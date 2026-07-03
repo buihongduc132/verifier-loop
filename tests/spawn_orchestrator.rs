@@ -84,11 +84,12 @@ fn spawn_round_creates_per_verifier_dirs_with_null_verdict_and_meta() {
     });
     let goal_id = seed_goal(root, "g", &config);
 
+    // Unquoted heredoc (`<<EOF`) so $VERIFIER_LOOP_VERIFIER_ID expands to v1/v2.
     let script = write_script(
         dir.path(),
         "ok.sh",
         r#"#!/bin/sh
-cat <<'EOF'
+cat <<EOF
 {"type":"session","id":"sid-$VERIFIER_LOOP_VERIFIER_ID"}
 {"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}],"willRetry":false}
 EOF
