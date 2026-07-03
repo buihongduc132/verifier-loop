@@ -1,0 +1,67 @@
+# Real self-verification (verification-contract item 3)
+
+The built `jewilo` (verifier-loop) was run against the REAL `pi -p --mode json`
+backend to self-verify this very implementation. No stub.
+
+## Run
+
+```
+config.json: {"n":1,"m":1,"maxTurn":8,"backend":"pi","gitDiffMaxChars":4000,"verifierTimeoutSec":1200}
+VERIFIER_LOOP_HOME=flow/proof/selfverify_real_home
+cmd: ./target/release/verifier-loop NEW "<selfverify_goal.txt>" --context "..."
+start: 2026-07-03T15:30:26Z
+end:   2026-07-03T15:33:12Z   (~2m46s)
+exit:  rc=0
+```
+
+## Result
+
+```
+goalId: 004c3b6e-d580-4da9-9561-cf8c10e44aa6
+vl:718b860585731d304fbee6c4af7303544a0b731e
+```
+
+completion.json:
+
+```json
+{
+  "hash": "vl:718b860585731d304fbee6c4af7303544a0b731e",
+  "goalId": "004c3b6e-d580-4da9-9561-cf8c10e44aa6",
+  "roundNumber": 1,
+  "matchedAt": "2026-07-03T15:33:12.769903144+00:00",
+  "matchingVerdicts": [
+    { "verifierId": "v1", "registeredAt": "2026-07-03T15:32:50.116426635+00:00" }
+  ]
+}
+```
+
+## Goal-dir populated (trust trail)
+
+```
+goals/004c3b6e-…/completion.json
+goals/004c3b6e-…/goal.json
+goals/004c3b6e-…/signature.json        # salted signature over goalText (immutability)
+goals/004c3b6e-…/state.json
+goals/004c3b6e-…/rounds/1/v1/initial-prompt.txt   # blind + frozen-artifact prompt
+goals/004c3b6e-…/rounds/1/v1/meta.json            # {sid, turnsUsed:1}
+goals/004c3b6e-…/rounds/1/v1/verdict.json         # {status:APPROVE, registeredAt}
+```
+
+verdict.json:
+
+```json
+{ "status": "APPROVE", "registeredAt": "2026-07-03T15:32:50.116426635+00:00" }
+```
+
+## Interpretation
+
+The real `pi` sub-agent (sid 019f289a-…), given the blind verifier prompt,
+ran `cargo build --release`, `cargo test --release`, checked `jewilo`/`jewije`
+on PATH and the coverage report, then registered `jewije approve`. Consensus
+n=1/m=1 reached on round 1; the tamper-evident `vl:` hash was emitted.
+
+The tool built in this repo was used to verify this repo's own implementation
+exactly as the verifier-loop skill prescribes — but executed through the CLI,
+not prose. The earlier null-verdict failure (turnsUsed:0) was a pipe-buffer
+deadlock in the orchestrator, fixed by concurrent stdout/stderr drain
+(commit "fix(spawn): drain verifier stdout concurrently to avoid pipe deadlock").

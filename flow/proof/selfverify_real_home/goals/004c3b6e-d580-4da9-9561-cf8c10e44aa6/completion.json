@@ -1,0 +1,12 @@
+{
+  "hash": "vl:718b860585731d304fbee6c4af7303544a0b731e",
+  "goalId": "004c3b6e-d580-4da9-9561-cf8c10e44aa6",
+  "roundNumber": 1,
+  "matchedAt": "2026-07-03T15:33:12.769903144+00:00",
+  "matchingVerdicts": [
+    {
+      "verifierId": "v1",
+      "registeredAt": "2026-07-03T15:32:50.116426635+00:00"
+    }
+  ]
+}

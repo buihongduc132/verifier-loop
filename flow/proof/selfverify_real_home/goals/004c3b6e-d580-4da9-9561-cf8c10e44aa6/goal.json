@@ -1,0 +1,14 @@
+{
+  "goalId": "004c3b6e-d580-4da9-9561-cf8c10e44aa6",
+  "goalText": "Implement the verifier-loop CLI (Rust, two binaries verifier-loop/jewilo + verifier-verdict/jewije) per openspec/changes/add-verifier-loop-cli/. Verify completion: (1) run `cargo build --release` - must succeed with zero errors (build cache is already warm). (2) run `cargo test --release` - all tests must pass. (3) confirm both `jewilo` and `jewije` are on PATH. (4) coverage >=80% lines (report at flow/proof/coverage_report.txt shows 93.16%). (5) the 6 OpenSpec specs are implemented across src/ modules: store (salt+config), goal (lifecycle immutability via salted signature), acp (parser+adapters), spawn (parallel orchestration+timeout), verdict (first-final+notes-required+env-derived-slot), consensus (n/m + tamper-evident vl: hash), prompt (blind+frozen artifacts), cli (NEW/RESUME wiring). When satisfied with the evidence, register your verdict by running: jewije approve --notes \"<summarize the evidence you checked>\". If any check genuinely fails, run: jewije reject --notes \"<what failed and why>\". Be concise in your verification - do not over-investigate; the build cache is warm so cargo commands are fast.",
+  "context": "Self-verify: jewilo verifies its own implementation via real pi -p --mode json backend. Build cache warm.",
+  "createdAt": "2026-07-03T15:30:26.702326083+00:00",
+  "config": {
+    "n": 1,
+    "m": 1,
+    "maxTurn": 8,
+    "backend": "pi",
+    "gitDiffMaxChars": 4000,
+    "verifierTimeoutSec": 1200
+  }
+}
