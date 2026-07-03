@@ -70,9 +70,35 @@ V* must run `verifier-verdict approve` / `reject --notes "..."`. The CLI writes 
 At `NEW`, the CLI writes `goal.json` (goalText, context, createdAt, config snapshot) and `signature.json` containing `SHA256(salt + goalText + createdAt)`. The salt lives at `~/.verifier-loop/.salt` (mode 600), generated once. The signature is an input to the completion hash, so editing goalText after creation breaks every downstream hash.
 **Alternative considered:** OS-level immutability (chattr +i). Deferred (OT3) — not portable.
 
-### D6 — Completion hash formula
-`completionHash = "vl:" + first40hex(SHA256(salt + goalId + goalSignature + String(roundNumber) + JSON.stringify(matchingVerdicts) + matchedAtISO))` where `matchingVerdicts` is sorted by verifierId for determinism. Each input guards a distinct tamper vector (see turn4 table). `vl:` prefix aids audit grep.
+### D6 — Completion hash formula (short form + full digest)
+
+**Short hash (displayed, printed, agent-invokable):**
+```
+completionHash = mmddyy + "-" + first8hex(SHA256(salt + goalId + goalSignature + String(roundNumber) + JSON.stringify(matchingVerdicts) + matchedAtISO))
+```
+where:
+- `mmddyy` = UTC date of `matchedAt`, 2-digit month + 2-digit day + 2-digit year (e.g. `070326` for 2026-07-03). Groups proofs by day for human scanning.
+- `first8hex(...)` = first 8 hex chars of the SHA-256 digest (32 bits, collision space ≈ 2³²).
+- `matchingVerdicts` is sorted by verifierId for determinism.
+
+Example: `070326-a1b2c3d4`. ~15 chars vs the old 43 — memorable, trivially invokable by sub-agents.
+
+**Full digest (stored, not displayed):**
+```
+fullDigest = SHA256(same inputs)   # full 64-hex digest
+```
+`completion.json` stores BOTH: `hash` (short `mmddyy-XXXXXXXX` form) and `fullDigest` (full 64 hex). Audit recompute compares `fullDigest` for exact (non-probabilistic) tamper detection; the short `hash` is the human/agent-facing ID.
+
+**Security note (shortening tradeoff):** 8 hex chars = 32 bits is too weak to be the sole tamper guard (~4 billion collision space). This is acceptable because:
+1. `signature.json` stays a FULL 256-bit SHA-256 (the real goalText tamper guard — D5).
+2. `completion.json` `fullDigest` field stays full 256-bit (exact audit recompute).
+3. The short `hash` is an ID for invocation/reference, not the crypto proof. Exact tamper detection still uses the full digest.
+
+"Any kind of hash" (per user directive) is reduced to this `mmddyy-XXXXXXXX` form when DISPLAYED or passed as an argument. Internal crypto digests (signature.json, completion.json `fullDigest`) remain full SHA-256.
+
 **Alternative considered:** include all rounds' verdicts. Rejected — only the matching round matters for the proof.
+**Alternative considered (old design):** `vl:` + 40 hex. Rejected — too long to remember/type; sub-agents could not reliably invoke it. Short form chosen for usability.
+**Alternative considered:** date from `createdAt` instead of `matchedAt`. Rejected — proofs are scanned by when they passed, not when the goal was created.
 
 ### D7 — Parallel non-blocking spawn + gather
 Round execution spawns all m verifiers concurrently, each as its own ACP process with injected env. The loop waits for all `agent_end` events (or timeout → NULL verdict), then reads verdict files and evaluates n/m. A is blocked only at the gather barrier.
@@ -91,7 +117,7 @@ V* receives: the baked-in verifier policy, the immutable goalText, optional cont
 
 ## Risks / Trade-offs
 
-- **[Salt readable by same-UID A]** → v1 relies on hash tamper-detection (recompute ≠ stored). Mitigation deferred to OT3 (`chattr +a` or dedicated UID). Acceptable because forging still requires the full input set + formula.
+- **[Salt readable by same-UID A]** → v1 relies on hash tamper-detection via the FULL digest (`completion.json` `fullDigest` recompute ≠ stored) + `signature.json` full SHA-256. The short display hash is an ID, not the guard. Mitigation deferred to OT3 (`chattr +a` or dedicated UID). Acceptable because forging still requires the full input set + formula; tampering any input invalidates the full digest (deterministic), even if a collision in 8 hex chars is theoretically findable.
 - **[V* false-APPROVE at 40%]** → mitigated by n/m. Document the math for operators; default n=m=2 (unanimous) for high-stakes, allow 2/3 or 3/5 where recall matters.
 - **[V* forgets to call verdict]** → pre-created null verdict + fail-closed. A sees a rejection with "verifier did not register a verdict" and must RESUME.
 - **[ACP stream format drift across backends]** → one shared parser with per-adapter spawn/resume templates; add a parser conformance test per backend.

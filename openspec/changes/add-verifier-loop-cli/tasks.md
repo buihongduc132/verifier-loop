@@ -55,7 +55,7 @@
 ## 8. Consensus and completion (consensus-check + completion-proof specs)
 
 - [ ] 8.1 Implement n/m counter after gather (APPROVE count >= n)
-- [ ] 8.2 On pass: compute `completionHash = "vl:" + first40hex(SHA256(salt + goalId + goalSignature + String(roundNumber) + JSON.stringify(matchingVerdicts sorted by verifierId) + matchedAtISO))`
+- [ ] 8.2 On pass: compute short hash `completionHash = mmddyy + "-" + first8hex(SHA256(salt + goalId + goalSignature + String(roundNumber) + JSON.stringify(matchingVerdicts sorted by verifierId) + matchedAtISO))` where `mmddyy` = UTC date of matchedAt. Also compute `fullDigest = full SHA256(same inputs)` for exact audit recompute.
 - [ ] 8.3 Write `completion.json` (hash, goalId, roundNumber, matchedAt, matchingVerdicts) and print hash
 - [ ] 8.4 On fail: print rejection (REJECT notes + null markers) to A, exit non-zero
 - [ ] 8.5 Tests: 2/2 pass, 2/3 pass, below-threshold fail, hash determinism, tamper invalidation (goalText edit, verdict edit)

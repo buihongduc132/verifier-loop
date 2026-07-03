@@ -10,7 +10,7 @@ The current `verifier-loop` skill is enforced only via prompt instructions. An A
 - **New CLI: `verifier-verdict`** (aliased `jewije`) — the verifier's only interface to register a verdict. `approve` or `reject --notes "..."`. Deterministic file writes via the JSON store. First verdict is FINAL; cannot be changed.
 - **Immutable goal store** at `~/.verifier-loop/goals/<goalId>/` — goal.json (north star, signed once), rounds/<round>/<verifierId>/ verdicts with captured initial-prompt + final-output, completion.json (only on n/m match).
 - **ACP adapter layer** — built-in adapters for `pi`, `hermes`, `acpx` (all emit the same ACP JSON event stream); custom adapters configurable via JSON. Resume via `--session <sid>` reuses the same SID.
-- **Completion hash** — `vl:` + 40 hex chars, derived from salt + goalId + goalSignature + roundNumber + matchingVerdicts + matchedAtISO. Fool-proof: A cannot forge it without the secret salt; tampering any input invalidates the hash.
+- **Completion hash** — short form `mmddyy-XXXXXXXX` (UTC date of match + 8 hex), derived from salt + goalId + goalSignature + roundNumber + matchingVerdicts + matchedAtISO. Fool-proof: A cannot forge it without the secret salt; tampering any input invalidates the hash. The full 256-bit digest is also stored in `completion.json` `fullDigest` for exact audit recompute. Short form chosen for memorability + sub-agent invocation.
 - **Fail-closed everywhere** — NULL verdict (verifier forgot/crashed/timed out) = no-pass, never silent-approve. Deleting the store = no proof = no-pass.
 - **Configuration** at `~/.verifier-loop/config.json` — n, m, maxTurn, backend, model, gitDiffMaxChars, cwd, verifierTimeoutSec, and optional prompt/resume-prompt templates.
 
