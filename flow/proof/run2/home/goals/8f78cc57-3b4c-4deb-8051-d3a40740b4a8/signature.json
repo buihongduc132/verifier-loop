@@ -1,0 +1,4 @@
+{
+  "signature": "d26c5900c661b625aa1e77f68950c0760ab67e02ef709ffb31d32e460da06619",
+  "algorithm": "SHA256(salt+goalText+createdAt)"
+}

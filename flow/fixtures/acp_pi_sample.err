@@ -1,0 +1,4 @@
+[cc-hooks-loader] Claude event 'SubagentStop' has no pi equivalent — skipping 1 group(s) 
+[dashboard] sendFlowsList: 0 flows, sessionId=019f27b5
+To resume session 019f27b5
+pi --session 019f27b5-7c4d-7c20-b228-b675c225d71f

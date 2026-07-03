@@ -1,0 +1,46 @@
+# Tamper-evidence proof (verification-contract item 4)
+
+Run against captured goal-dir from `flow/proof/run2/home_resume/`
+(goalId fd9f8a1c-8376-4dae-b7f1-7ec1aec9af67, vl:20262d7716f4b723b83b79f0147bb5ac5715188e).
+
+Command: `cargo run --release --example proof_tamper <goal_dir>`
+
+## Output
+
+```
+goal_dir : .../goals/fd9f8a1c-8376-4dae-b7f1-7ec1aec9af67
+[1] untampered verify_signature == Ok : true
+[2] goalText edited -> signature mismatch : true
+[3] verdict edited -> consensus re-eval passed : false
+    recomputed hash : None
+    verdict edit -> hash differs (fail-closed) : true
+```
+
+## Interpretation
+
+| Vector | Tamper | Expected | Result |
+|--------|--------|----------|--------|
+| goalText edit | appended " TAMPERED" | signature mismatch | ✅ verify_signature → Err |
+| verdict edit | APPROVE→REJECT on matching slot | round no longer passes | ✅ consensus.passed=false, no hash emitted |
+
+Both fail-closed invariants hold on a real captured goal-dir.
+
+# RESUME transcript (verification-contract item 5)
+
+From `flow/proof/run2/home_resume/goals/<gid>/`:
+
+```
+round 1 / v1 : REJECT "round 1: missing evidence"
+round 1 / v2 : REJECT "round 1: missing evidence"
+  -> no consensus on APPROVE; round fails
+  -> jewije RESUME --fix-notes "added coverage report + tamper/resume proof; invariants verified"
+round 2 / v1 : APPROVE
+round 2 / v2 : APPROVE
+  -> 2/2 consensus reached
+completion.json:
+  hash        : vl:20262d7716f4b723b83b79f0147bb5ac5715188e
+  roundNumber : 2
+  matchingVerdicts: [v1, v2]
+```
+
+Reject→fix→pass produces a vl: hash on the second round. ✅

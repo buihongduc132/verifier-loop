@@ -27,6 +27,8 @@ secrets/
 # per-user runtime data (NEVER commit)
 .verifier-loop/
 *.salt
+# exception: historical captured proof artifacts need their demo salt to be re-verifiable
+!flow/proof/**/.salt
 
 # ---- Editor / OS noise ----
 .idea/
@@ -40,11 +42,15 @@ Thumbs.db
 # ---- pi local runtime (sessions, cache) ----
 .pi/
 
+# ---- Code intelligence index ----
+.gitnexus/
+
 # ---- Local notes / scratch ----
 notes/
 scratch/
 *.local.md
 _STATE.md
+examples_tmp/
 
 # ---- Dependencies vendored locally (avoid committing huge dirs) ----
 /vendor/

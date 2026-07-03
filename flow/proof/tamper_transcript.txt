@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running `target/release/examples/tamper_proof flow/proof/run2/home 8f78cc57-3b4c-4deb-8051-d3a40740b4a8`
+[1] verify_signature: PASS (goal untampered at start)
+[2] recompute hash from stored artifacts
+    stored:     vl:886b62af796eae0b3c58b2d9b951ce4a57f6d40c
+    recomputed: vl:886b62af796eae0b3c58b2d9b951ce4a57f6d40c
+    => PASS: hashes identical (chain of custody intact)
+[3] tamper goalText → recompute
+    sig:    d26c5900c661b625aa1e77f68950c0760ab67e02ef709ffb31d32e460da06619  → 62e0a3c172c10b7973a03cc69590176a73c6dd17d6c043ba2677ebefdef45085
+    hash:   vl:886b62af796eae0b3c58b2d9b951ce4a57f6d40c  → vl:e935daef40419c86ad29efbee6f14bbaec0109bf
+    => PASS: goalText edit breaks both signature and hash (fail-closed)
+[4] tamper verdict registeredAt → recompute hash
+    registeredAt: 2026-07-03T14:57:38.763304393+00:00 → 1999-01-01T00:00:00Z
+    hash:         vl:886b62af796eae0b3c58b2d9b951ce4a57f6d40c → vl:d6f246ccd41490eee53d7c0230b723cabf40175f
+    => PASS: verdict edit invalidates the completion hash (fail-closed)
+[5] missing store → no hash
+    => PASS: salt cannot be materialised (store io error: Permission denied (os error 13)) → no hash possible
+
+ALL TAMPER CHECKS PASSED — fail-closed invariants hold.

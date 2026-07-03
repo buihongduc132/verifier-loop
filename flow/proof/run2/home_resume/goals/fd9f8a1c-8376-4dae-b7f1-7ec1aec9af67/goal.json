@@ -1,0 +1,14 @@
+{
+  "goalId": "fd9f8a1c-8376-4dae-b7f1-7ec1aec9af67",
+  "goalText": "Self-verify target: verifier-loop CLI implemented per spec, coverage>=80%, fail-closed holds.",
+  "context": "resume-transcript r1 reject",
+  "createdAt": "2026-07-03T14:58:33.943025453+00:00",
+  "config": {
+    "n": 2,
+    "m": 2,
+    "maxTurn": 3,
+    "backend": "stub",
+    "gitDiffMaxChars": 4000,
+    "verifierTimeoutSec": 900
+  }
+}

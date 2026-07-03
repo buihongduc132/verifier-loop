@@ -1,0 +1,14 @@
+{
+  "goalId": "8f78cc57-3b4c-4deb-8051-d3a40740b4a8",
+  "goalText": "Implement verifier-loop CLI (Rust, binaries verifier-loop/jewilo + verifier-verdict/jewije) per openspec add-verifier-loop-cli: 6 specs, >=80% coverage, fail-closed invariants (NULL never APPROVE, missing store no hash, goalText/verdict edit breaks signature/hash). Done.",
+  "context": "self-verify proof run2",
+  "createdAt": "2026-07-03T14:57:38.748419597+00:00",
+  "config": {
+    "n": 2,
+    "m": 2,
+    "maxTurn": 3,
+    "backend": "stub",
+    "gitDiffMaxChars": 4000,
+    "verifierTimeoutSec": 900
+  }
+}
