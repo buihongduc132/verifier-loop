@@ -122,8 +122,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
         fs::create_dir_all(&vdir)?;
         pre_create_verifier_dir(&vdir);
 
-        let rendered = acp::render_spawn(&input.adapter.spawn, input.prompt);
-        let mut cmd = build_command(&rendered);
+        let mut cmd = build_spawn_command(&input.adapter.spawn, input.prompt);
         inject_identity_env(&mut cmd, input.goal_id, &vid, input.round);
         plan.push((vid, cmd, vdir));
     }
@@ -170,11 +169,14 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         let prev_vdir = round_dir(input.root, input.goal_id, prev_round).join(&vid);
         let prior = read_meta(&prev_vdir)?;
 
-        let (rendered, fresh) = match &prior {
+        let mut cmd;
+        let fresh;
+        match &prior {
             Some(meta) if meta.turns_used < input.config.max_turn => {
                 // Reuse: resume on the prior SID.
                 let sid = meta.sid.clone().unwrap_or_default();
-                (acp::render_resume(&input.adapter.resume, &sid, input.prompt), false)
+                cmd = build_resume_command(&input.adapter.resume, &sid, input.prompt);
+                fresh = false;
             }
             _ => {
                 // Fresh (exhausted, or no prior meta). Archive the prior SID if present.
@@ -183,9 +185,10 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
                         archive_prior_sid(&prev_vdir, sid)?;
                     }
                 }
-                (acp::render_spawn(&input.adapter.spawn, input.prompt), true)
+                cmd = build_spawn_command(&input.adapter.spawn, input.prompt);
+                fresh = true;
             }
-        };
+        }
 
         // The new round's meta starts at null SID / turnsUsed=0; updated after gather.
         // For a reused session we keep the prior turnsUsed as the baseline so the next
@@ -197,7 +200,6 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         };
         pre_create_verifier_dir_with_turns(&vdir, baseline_turns);
 
-        let mut cmd = build_command(&rendered);
         inject_identity_env(&mut cmd, input.goal_id, &vid, input.round);
         plan.push((vid, cmd, vdir));
     }
@@ -372,10 +374,25 @@ fn archive_prior_sid(prev_vdir: &Path, sid: &str) -> Result<(), SpawnError> {
 /// (e.g. `pi -p "{prompt}" --mode json`). The prompt is arbitrary multi-KB text with
 /// spaces, newlines, and quotes, so naive `split_whitespace()` would shatter it into
 /// thousands of args. We delegate to `sh -c` so the shell handles quoting correctly.
-fn build_command(rendered: &str) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(rendered);
+fn build_spawn_command(template: &str, prompt: &str) -> Command {
+    let (left, right) = template.split_once("{prompt}")
+        .unwrap_or((template, ""));
+    let mut left_parts = left.split_whitespace();
+    let program = left_parts.next().expect("spawn template has a non-empty program");
+    let mut cmd = Command::new(program);
+    for a in left_parts {
+        cmd.arg(a);
+    }
+    cmd.arg(prompt);
+    for a in right.split_whitespace() {
+        cmd.arg(a);
+    }
     cmd
+}
+
+fn build_resume_command(template: &str, sid: &str, prompt: &str) -> Command {
+    let with_sid = template.replace("{sid}", sid);
+    build_spawn_command(&with_sid, prompt)
 }
 
 /// Inject the three identity env vars into a verifier command (D2).
@@ -396,18 +413,27 @@ mod tests {
     }
 
     #[test]
-    fn build_command_uses_sh_dash_c_to_preserve_quoted_prompt() {
-        // The rendered command embeds a multi-word prompt inside shell quotes.
-        // build_command MUST delegate to `sh -c` so the shell reassembles the quoted
-        // prompt as a single arg, rather than split_whitespace() shattering it.
-        let rendered = r#"pi -p "hello world with spaces" --mode json"#;
-        let cmd = build_command(rendered);
+    fn build_spawn_command_passes_prompt_as_single_arg_without_shell() {
+        let template = "pi -p {prompt} --mode json";
+        let prompt = "hello `world` $(rm -rf /) \"quoted\"";
+        let cmd = build_spawn_command(template, prompt);
         let s = format!("{:?}", cmd.as_std());
-        assert!(s.contains("sh"), "must invoke sh to handle quoting");
-        // The whole rendered string is passed as a single arg to -c.
-        assert!(s.contains("-c"));
-        assert!(s.contains("hello world with spaces"),
-            "quoted prompt must survive intact in the sh -c payload");
+        assert!(s.contains("pi"), "program is pi");
+        assert!(!s.contains("sh"), "must NOT use sh");
+        // The shell-unsafe substring `$(rm -rf /)` must survive inside ONE arg. If the
+        // prompt were split on spaces, "$(rm" and "-rf" would be separate args. The
+        // Debug format quotes each arg, so the whole prompt appears as one quoted unit.
+        assert!(s.contains("$(rm -rf /)"), "prompt body intact as single arg: {s}");
+        assert!(s.contains("--mode"), "post-args preserved");
+    }
+
+    #[test]
+    fn build_resume_command_substitutes_sid_then_prompt() {
+        let template = "pi --session {sid} -p {prompt} --mode json";
+        let cmd = build_resume_command(template, "abc-123", "hello world");
+        let s = format!("{:?}", cmd.as_std());
+        assert!(s.contains("abc-123"), "sid substituted: {s}");
+        assert!(s.contains("hello world"), "prompt intact: {s}");
     }
 
     #[test]
