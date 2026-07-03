@@ -79,7 +79,7 @@ fn main() {
     };
     std::fs::write(&v1_path, &vraw).unwrap();
     let stored = &completion.hash;
-    let differs = tampered_hash.as_deref() != Some(stored.as_str());
+    let differs = tampered_hash.as_ref().map(|h| h.short_hash()) != Some(stored.as_str());
     println!("[3] verdict edited -> consensus re-eval passed : {tampered_passed}");
     println!("    recomputed hash (None=round no longer passes) : {tampered_hash:?}");
     println!("    verdict edit -> hash differs (fail-closed)    : {differs}");

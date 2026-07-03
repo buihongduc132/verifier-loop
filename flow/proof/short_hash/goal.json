@@ -1,0 +1,13 @@
+{
+  "goalId": "72eeb3a8-4bcb-485a-8f9f-b0de99c3f110",
+  "goalText": "Implement short completion-hash form mmddyy-XXXXXXXX plus fullDigest field per spec commit 22029ff, proved by self-verify. Fix-forward; no reverts.",
+  "createdAt": "2026-07-03T18:02:18.747360886+00:00",
+  "config": {
+    "n": 1,
+    "m": 1,
+    "maxTurn": 3,
+    "backend": "custom",
+    "gitDiffMaxChars": 3000,
+    "verifierTimeoutSec": 60
+  }
+}

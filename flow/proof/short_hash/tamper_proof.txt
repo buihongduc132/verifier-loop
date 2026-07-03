@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running `target/release/examples/tamper_proof /home/bhd/.verifier-loop 72eeb3a8-4bcb-485a-8f9f-b0de99c3f110`
+[1] verify_signature: PASS (goal untampered at start)
+[2] recompute hash from stored artifacts
+    stored:     070326-108df114
+    recomputed: 070326-108df114
+    => PASS: hashes identical (chain of custody intact)
+[3] tamper goalText → recompute
+    sig:    8a50b061c8cfc0035d7069e8bce09973552503dc9bc1252b9b7521932baf156c  → 21c3c575f68843ef26ce8b42ba8774009cd6bec4eb287d2d6a815eccc43272a6
+    hash:   070326-108df114  → 070326-50bb45dd
+    => PASS: goalText edit breaks both signature and hash (fail-closed)
+[4] tamper verdict registeredAt → recompute hash
+    registeredAt: 2026-07-03T18:02:18.770501213+00:00 → 1999-01-01T00:00:00Z
+    hash:         070326-108df114 → 070326-9f96f1da
+    => PASS: verdict edit invalidates the completion hash (fail-closed)
+[5] missing store → no hash
+    => PASS: salt cannot be materialised (store io error: Permission denied (os error 13)) → no hash possible
+
+ALL TAMPER CHECKS PASSED — fail-closed invariants hold.

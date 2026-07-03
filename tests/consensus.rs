@@ -1,20 +1,23 @@
 // tasks.md §8 — Consensus n/m + tamper-evident completion hash.
-// RED phase: written first, against the spec, before any implementation.
+// RED phase (rev 2): short-hash form `mmddyy-XXXXXXXX` + `fullDigest` field.
 //
 // Covers the consensus-check + completion-proof spec scenarios:
 //   * Consensus is n approvals out of m verifiers (2/2, 2/3, below-threshold).
 //   * null + REJECT do not count toward n (fail-closed D9).
 //   * Rejection surfaces reject notes + null markers to A.
 //   * Consensus is static and human-configured (n/m from config.json, LD4).
-//   * Hash formula EXACT:
-//       completionHash = "vl:" + first40hex(SHA256(salt + goalId + goalSignature
-//                       + String(roundNumber) + JSON.stringify(matchingVerdicts
-//                       sorted by verifierId) + matchedAtISO))
-//       where goalSignature = SHA256(salt + goalText + createdAt).
-//   * Hash determinism (identical inputs -> identical hash).
-//   * Tamper vectors: goalText edit invalidates hash; verdict edit invalidates hash.
-//   * Audit-traceable (recompute from goal-dir + salt matches stored).
-//   * completion.json written on success; no hash/file on failure.
+//   * Hash formula EXACT (rev 2 — short form + full digest):
+//       short       = mmddyy + "-" + first8hex(SHA256(same inputs))
+//       fullDigest  = SHA256(same inputs)                  // 64 hex, stored not printed
+//       where mmddyy = UTC date of matchedAt (MMDDYY),
+//       inputs = salt + goalId + goalSignature + String(roundNumber)
+//              + canonicalJSON(matchingVerdicts sorted by verifierId) + matchedAtISO
+//       and goalSignature = SHA256(salt + goalText + createdAt).
+//   * Hash determinism (identical inputs -> identical short + fullDigest).
+//   * Tamper vectors: goalText edit invalidates BOTH short and fullDigest;
+//     verdict edit invalidates fullDigest (and short w.h.p.).
+//   * Audit-traceable (recompute from goal-dir + salt matches stored fullDigest).
+//   * completion.json written on success with `hash` + `fullDigest`; no file on failure.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -83,7 +86,20 @@ fn canonical_matching_json(matching: &[consensus::MatchingVerdict]) -> String {
     serde_json::to_string(&json!(arr)).unwrap()
 }
 
-/// Independent SHA-256 recompute of the spec formula, used to cross-check `compute_hash`.
+/// mmddyy from an RFC3339 matchedAtISO (UTC). e.g. "2026-07-03T10:05:00Z" -> "070326".
+/// Independent of the impl; used by audit-side recompute.
+fn mmddyy_of(iso: &str) -> String {
+    // Parse "YYYY-MM-DD" prefix from the RFC3339 string.
+    let date = &iso[..10]; // "2026-07-03"
+    let yyyy = &date[0..4];
+    let mm = &date[5..7];
+    let dd = &date[8..10];
+    let yy = &yyyy[2..4]; // last 2 digits of year
+    format!("{mm}{dd}{yy}")
+}
+
+/// Independent SHA-256 recompute producing BOTH the short hash and the full digest,
+/// used to cross-check `compute_hash`.
 fn spec_recompute(
     salt: &str,
     goal_id: &str,
@@ -91,11 +107,12 @@ fn spec_recompute(
     round: u32,
     matching: &[consensus::MatchingVerdict],
     matched_at_iso: &str,
-) -> String {
+) -> (String, String) {
     let canon = canonical_matching_json(matching);
     let input = format!("{salt}{goal_id}{goal_sig}{round}{canon}{matched_at_iso}");
     let digest = hex::encode(Sha256::digest(input.as_bytes()));
-    format!("vl:{}", &digest[..40])
+    let short = format!("{}-{}", mmddyy_of(matched_at_iso), &digest[..8]);
+    (short, digest)
 }
 
 /// Create a goal under a fresh temp store root.
@@ -186,7 +203,7 @@ fn matching_verdicts_sorted_by_verifier_id() {
 }
 
 // ---------------------------------------------------------------------------
-// Hash formula
+// Hash formula (rev 2: short form + full digest)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -201,7 +218,7 @@ fn compute_hash_formula_matches_spec_recompute() {
             registered_at: "2026-07-03T10:01:00Z".into(),
         },
     ];
-    let h = consensus::compute_hash(
+    let out = consensus::compute_hash(
         "deadbeef",
         "goal-123",
         "sig-abc",
@@ -209,8 +226,9 @@ fn compute_hash_formula_matches_spec_recompute() {
         &matching,
         "2026-07-03T10:05:00Z",
     );
-    let expected = spec_recompute("deadbeef", "goal-123", "sig-abc", 1, &matching, "2026-07-03T10:05:00Z");
-    assert_eq!(h, expected, "impl must match an independent recompute of the spec formula");
+    let (exp_short, exp_full) = spec_recompute("deadbeef", "goal-123", "sig-abc", 1, &matching, "2026-07-03T10:05:00Z");
+    assert_eq!(out.short_hash(), exp_short, "short hash must match independent recompute");
+    assert_eq!(out.full_digest(), exp_full, "full digest must match independent recompute");
 }
 
 #[test]
@@ -221,7 +239,8 @@ fn compute_hash_deterministic_identical_inputs() {
     }];
     let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
     let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
-    assert_eq!(a, b, "identical inputs must yield identical hash");
+    assert_eq!(a.short_hash(), b.short_hash(), "identical inputs -> identical short hash");
+    assert_eq!(a.full_digest(), b.full_digest(), "identical inputs -> identical full digest");
 
     // Stable regardless of the order matching was assembled (sorting is impl's job).
     let matching_rev = vec![consensus::MatchingVerdict {
@@ -229,31 +248,62 @@ fn compute_hash_deterministic_identical_inputs() {
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
     let c = consensus::compute_hash("s", "g", "sig", 1, &matching_rev, "2026-07-03T10:05:00Z");
-    assert_eq!(a, c);
+    assert_eq!(a.short_hash(), c.short_hash());
 }
 
 #[test]
-fn compute_hash_format_is_vl_prefix_plus_40_hex() {
+fn compute_hash_short_form_is_mmddyy_dash_8hex() {
     let matching = vec![consensus::MatchingVerdict {
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let h = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
-    assert!(h.starts_with("vl:"), "must start with vl: prefix: {h}");
-    assert_eq!(h.len(), 43, "vl: (3) + 40 hex chars = 43: {h}");
-    let hex_part = &h[3..];
+    let out = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
+    let short = out.short_hash();
+    // mmddyy from matchedAt UTC (2026-07-03 -> 070326), hyphen, 8 lowercase hex.
+    assert_eq!(&short[..7], "070326-", "prefix must be mmddyy- from matchedAt: {short}");
+    assert_eq!(short.len(), 15, "mmddyy(6) + -(1) + 8hex = 15: {short}");
+    let hex_part = &short[7..];
     assert!(
         hex_part.chars().all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-        "must be 40 lowercase hex chars: {h}"
+        "suffix must be 8 lowercase hex chars: {short}"
     );
 }
 
+#[test]
+fn compute_hash_full_digest_is_64_lowercase_hex() {
+    let matching = vec![consensus::MatchingVerdict {
+        verifier_id: "v1".into(),
+        registered_at: "2026-07-03T10:00:00Z".into(),
+    }];
+    let out = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
+    let full = out.full_digest();
+    assert_eq!(full.len(), 64, "full digest must be 64 hex chars: {full}");
+    assert!(
+        full.chars().all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "full digest must be lowercase hex: {full}"
+    );
+}
+
+#[test]
+fn compute_hash_mmddyy_tracks_matched_at_not_created_at() {
+    // Same inputs except matchedAt differs across two runs: short hash prefix (mmddyy)
+    // must change, full digest must also change.
+    let matching = vec![consensus::MatchingVerdict {
+        verifier_id: "v1".into(),
+        registered_at: "2026-07-03T10:00:00Z".into(),
+    }];
+    let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
+    let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-08-15T10:05:00Z");
+    assert_ne!(a.short_hash()[..6], b.short_hash()[..6], "mmddyy must come from matchedAt");
+    assert_ne!(a.full_digest(), b.full_digest(), "full digest must change with matchedAt");
+}
+
 // ---------------------------------------------------------------------------
-// Tamper vectors
+// Tamper vectors (rev 2: both short + fullDigest invalidated on goalText edit)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tamper_goal_text_invalidates_hash() {
+fn tamper_goal_text_invalidates_both_short_and_full_digest() {
     let (dir, goal_id) = fresh_goal("original goal text");
 
     let salt = store::salt_in(dir.path()).unwrap();
@@ -279,11 +329,12 @@ fn tamper_goal_text_invalidates_hash() {
     let tampered_sig = goal::compute_signature(&salt, &tampered.goal_text, &record.created_at);
     let after = consensus::compute_hash(&salt, &goal_id, &tampered_sig, 1, &matching, "2026-07-03T10:05:00Z");
 
-    assert_ne!(original, after, "edited goalText MUST invalidate the hash");
+    assert_ne!(original.short_hash(), after.short_hash(), "edited goalText MUST invalidate short hash");
+    assert_ne!(original.full_digest(), after.full_digest(), "edited goalText MUST invalidate full digest");
 }
 
 #[test]
-fn tamper_verdict_notes_invalidates_hash() {
+fn tamper_verdict_notes_invalidates_full_digest() {
     let (dir, goal_id) = fresh_goal("goal");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
     verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
@@ -319,7 +370,7 @@ fn tamper_verdict_notes_invalidates_hash() {
     }];
     let after = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching2, "2026-07-03T10:05:00Z");
 
-    assert_ne!(original, after, "edited verdict MUST invalidate the hash");
+    assert_ne!(original.full_digest(), after.full_digest(), "edited verdict MUST invalidate full digest");
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +406,8 @@ fn write_completion_writes_record_on_success() {
 
     let raw = fs::read_to_string(&path).unwrap();
     let v: Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(v["hash"], json!(hash));
+    assert_eq!(v["hash"], json!(hash.short_hash()));
+    assert_eq!(v["fullDigest"], json!(hash.full_digest()));
     assert_eq!(v["goalId"], json!(goal_id));
     assert_eq!(v["roundNumber"], json!(1));
     assert_eq!(v["matchedAt"], json!(matched_at));
@@ -374,7 +426,8 @@ fn no_completion_on_failure() {
     assert!(!r.passed);
 
     // write_completion must refuse on a non-passing round.
-    let res = consensus::write_completion(dir.path(), &goal_id, &r, 1, "vl:dead", "2026-07-03T10:05:00Z");
+    let dummy = consensus::compute_hash("s", "g", "sig", 1, &[], "2026-07-03T10:05:00Z");
+    let res = consensus::write_completion(dir.path(), &goal_id, &r, 1, &dummy, "2026-07-03T10:05:00Z");
     assert!(res.is_err(), "must refuse to write completion on failure");
 
     let completion_path = goal::goal_dir(dir.path(), &goal_id).join("completion.json");
@@ -431,7 +484,8 @@ fn audit_recompute_matches_stored_hash() {
     )
     .unwrap();
     let cv: Value = serde_json::from_str(&completion_raw).unwrap();
-    assert_eq!(cv["hash"], json!(recomputed), "stored hash must match audit recompute");
+    assert_eq!(cv["hash"], json!(recomputed.short_hash()), "stored short hash must match audit recompute");
+    assert_eq!(cv["fullDigest"], json!(recomputed.full_digest()), "stored fullDigest must match audit recompute");
 }
 
 // ---------------------------------------------------------------------------

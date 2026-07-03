@@ -156,16 +156,28 @@ fn read_goal_json(home: &Path, goal_id: &str) -> Value {
     serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap()
 }
 
-/// Read the completion hash from stdout (last `vl:` line).
+/// Read the completion hash from stdout (last `mmddyy-XXXXXXXX` line).
 fn hash_from_stdout(stdout: &str) -> Option<String> {
     stdout
         .lines()
         .rev()
-        .find_map(|l| l.trim().strip_prefix("vl:").map(|h| format!("vl:{h}")))
+        .find_map(|l| {
+            let l = l.trim();
+            // mmddyy-XXXXXXXX: 6 digits, hyphen, 8 hex.
+            if l.len() == 15
+                && l[6..7] == *"-"
+                && l[..6].chars().all(|c: char| c.is_ascii_digit())
+                && l[7..].chars().all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            {
+                Some(l.to_string())
+            } else {
+                None
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 1 — NEW happy path (n=m=1, stub approves) produces a vl: hash + goal dir.
+// Scenario 1 — NEW happy path (n=m=1, stub approves) produces a mmddyy-XXXXXXXX hash + goal dir.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -187,12 +199,12 @@ fn new_with_approving_stub_produces_hash_and_goal_dir() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "NEW exited {}: {stderr}", out.status);
 
-    let hash = hash_from_stdout(&stdout).expect("a vl: hash was printed on pass");
+    let hash = hash_from_stdout(&stdout).expect("a mmddyy-XXXXXXXX hash was printed on pass");
     assert!(
-        predicate::str::is_match("^vl:[0-9a-f]{40}$")
+        predicate::str::is_match("^[0-9]{6}-[0-9a-f]{8}$")
             .unwrap()
             .eval(&hash),
-        "hash must be vl:<40 hex>: {hash}"
+        "hash must be mmddyy-XXXXXXXX: {hash}"
     );
 
     // Locate the goal dir by scanning goals/ (goalId is a random UUID).
@@ -335,7 +347,7 @@ fn resume_after_reject_produces_hash_on_second_round() {
     );
 
     let hash = hash_from_stdout(&stdout).expect("hash on round 2");
-    assert!(predicate::str::is_match("^vl:[0-9a-f]{40}$").unwrap().eval(&hash));
+    assert!(predicate::str::is_match("^[0-9]{6}-[0-9a-f]{8}$").unwrap().eval(&hash));
 
     // Round 2 directory exists with an APPROVE verdict.
     let v2 = gdir.join("rounds").join("2").join("v1");
@@ -424,7 +436,8 @@ fn hash_recomputes_and_tamper_breaks_it() {
         &mvs,
         matched_at,
     );
-    assert_eq!(recomputed, stored_hash, "audit recomputes the stored hash");
+    assert_eq!(recomputed.short_hash(), stored_hash, "audit recomputes the stored short hash");
+    assert_eq!(recomputed.full_digest(), completion["fullDigest"].as_str().unwrap(), "audit recomputes the stored fullDigest");
 
     // Tamper 1: edit goalText → signature recomputation differs → hash differs.
     let mut tampered_goal = goal.clone();
@@ -441,7 +454,7 @@ fn hash_recomputes_and_tamper_breaks_it() {
         matched_at,
     );
     assert_ne!(
-        tampered_hash, stored_hash,
+        tampered_hash.short_hash(), stored_hash,
         "tampered goalText must break the hash"
     );
 
@@ -457,8 +470,12 @@ fn hash_recomputes_and_tamper_breaks_it() {
         matched_at,
     );
     assert_ne!(
-        tampered_v_hash, stored_hash,
+        tampered_v_hash.short_hash(), stored_hash,
         "tampered verdict must break the hash"
+    );
+    assert_ne!(
+        tampered_v_hash.full_digest(), recomputed.full_digest(),
+        "tampered verdict must break the full digest"
     );
 }
 

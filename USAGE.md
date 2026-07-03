@@ -19,7 +19,9 @@ renders the verifier prompt, spawns round 1 (m verifiers), gathers, and evaluate
 
 - Required positional: `goalText` (the goal to verify).
 - Optional: `--context "<…>"` — extra context folded into the prompt.
-- Output (stdout): `goalId: <id>`; on n/m APPROVE consensus, the `vl:<40 hex>` hash.
+- Output (stdout): `goalId: <id>`; on n/m APPROVE consensus, the short completion hash
+  (`mmddyy-XXXXXXXX`, e.g. `070326-a1b2c3d4`). The full 64-hex digest is stored in
+  `completion.json` `fullDigest` (not printed).
 - Exit `0` on consensus; non-zero on store/config/spawn failure or when a round does not reach
   `n/m` consensus (rejection summary printed to stderr).
 

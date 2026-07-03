@@ -5,7 +5,7 @@
 //! * `NEW "<goal>" [--context]`  — ensure salt + config, create immutable signed goal,
 //!   capture the frozen artifact snapshot, render the verifier prompt, spawn round 1
 //!   (§5), gather, evaluate n/m consensus (§8); on pass write `completion.json` and print
-//!   the `vl:` hash; on fail print the rejection and exit non-zero.
+//!   the short completion hash (`mmddyy-XXXXXXXX`); on fail print the rejection and exit non-zero.
 //! * `RESUME <goalId> [--fix "…"]` — load the goal, increment the round, append fix notes,
 //!   re-capture the snapshot, render the resume prompt, spawn_resume (§6), evaluate.
 //!
@@ -198,7 +198,7 @@ fn run_round(
         );
         verifier_loop::consensus::write_completion(root, goal_id, &result, round, &hash, &matched_at)
             .map_err(|e| format!("completion write: {e}"))?;
-        println!("{hash}");
+        println!("{}", hash.short_hash());
         Ok(())
     } else {
         // Surface the rejection: REJECT notes + null markers (consensus-check spec).

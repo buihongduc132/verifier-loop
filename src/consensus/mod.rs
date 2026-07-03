@@ -6,23 +6,19 @@
 //! `completion.json` is written. On fail a rejection (REJECT notes + null markers) is
 //! surfaced to A; no hash and no completion file are produced (fail-closed D9).
 //!
-//! ## Hash formula (completion-proof spec, D6)
+//! ## Hash formula (rev 2 — completion-proof spec, D6)
 //!
 //! ```text
-//! completionHash = "vl:" + first40hex(SHA256(
-//!     salt + goalId + goalSignature + String(roundNumber)
-//!          + JSON.stringify(matchingVerdicts sorted by verifierId)
-//!          + matchedAtISO
-//! ))
-//! where goalSignature = SHA256(salt + goalText + createdAt)
+//! short       = mmddyy + "-" + first8hex(SHA256(inputs))   // displayed, printed
+//! fullDigest  = SHA256(inputs)                              // 64 hex, stored not printed
+//! inputs      = salt + goalId + goalSignature + String(roundNumber)
+//!            + canonicalJSON(matchingVerdicts sorted by verifierId) + matchedAtISO
+//! mmddyy      = UTC date of matchedAt (MMDDYY)
+//! goalSignature = SHA256(salt + goalText + createdAt)       // stored full in signature.json
 //! ```
 //!
-//! Each input guards a distinct tamper vector: editing `goalText`/`createdAt` changes
-//! `goalSignature`; editing an APPROVE verdict's `registeredAt`/`notes` changes the
-//! canonicalized matching array; both break the hash. `matchingVerdicts` is serialized
-//! as canonical JSON (sorted by `verifierId`, object keys alphabetical, no whitespace)
-//! so the digest is deterministic and bit-for-bit reproducible by an auditor reading
-//! the goal directory plus `.salt`.
+//! The short form is the human/agent-facing ID (memorable, invokable); the full digest
+//! is the deterministic tamper guard stored in `completion.json` for exact audit recompute.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -37,10 +33,10 @@ use crate::verdict::{VerdictRecord, VerdictStatus};
 
 /// `~/.verifier-loop/goals/<goalId>/completion.json` — written only on consensus.
 pub const COMPLETION_FILE: &str = "completion.json";
-/// Length of the hex suffix of a completion hash (`first40hex`).
-const HASH_HEX_LEN: usize = 40;
-/// Prefix of every completion hash.
-const HASH_PREFIX: &str = "vl:";
+/// Length of the hex suffix of the short completion hash (`first8hex`).
+const HASH_SHORT_HEX_LEN: usize = 8;
+/// Length of the full SHA-256 hex digest.
+const HASH_FULL_HEX_LEN: usize = 64;
 
 /// A matching (APPROVE) verdict participating in the hash input.
 ///
@@ -78,15 +74,49 @@ pub struct ConsensusResult {
     pub rejection: Rejection,
 }
 
-/// The `completion.json` record written on success.
+/// The `completion.json` record written on success (rev 2).
+///
+/// `hash` is the short `mmddyy-XXXXXXXX` form (displayed); `fullDigest` is the full
+/// 64-hex SHA-256 digest for exact audit recompute (not printed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionRecord {
     pub hash: String,
+    pub full_digest: String,
     pub goal_id: String,
     pub round_number: u32,
     pub matched_at: String,
     pub matching_verdicts: Vec<MatchingVerdict>,
+}
+
+/// Output of [`compute_hash`]: the short display hash + the full digest.
+///
+/// The short hash is what A sees and invokes; the full digest is what an auditor
+/// compares for exact (non-probabilistic) tamper detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionHash {
+    /// `mmddyy-XXXXXXXX` — UTC date of matchedAt + first 8 hex of the digest.
+    short: String,
+    /// Full 64-hex SHA-256 digest of the same inputs.
+    full: String,
+}
+
+impl CompletionHash {
+    /// The short display hash (`mmddyy-XXXXXXXX`).
+    pub fn short_hash(&self) -> &str {
+        &self.short
+    }
+    /// The full 64-hex SHA-256 digest (stored in `completion.json` `fullDigest`).
+    pub fn full_digest(&self) -> &str {
+        &self.full
+    }
+}
+
+impl std::fmt::Display for CompletionHash {
+    /// Displays the short form (`mmddyy-XXXXXXXX`) — what A sees and invokes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.short)
+    }
 }
 
 /// Evaluate n-of-m consensus over the gathered verdicts.
@@ -177,14 +207,46 @@ fn canonical_matching_json(matching: &[MatchingVerdict]) -> String {
     serde_json::to_string(&serde_json::Value::Array(arr)).expect("array serializes")
 }
 
-/// Compute the tamper-evident completion hash (completion-proof spec, D6).
+/// Derive the `mmddyy` prefix (UTC date of `matchedAt`) from an RFC3339 ISO timestamp.
 ///
-/// `completionHash = "vl:" + first40hex(SHA256(salt + goalId + goalSignature +
-/// String(roundNumber) + canonicalJSON(matchingVerdicts sorted by verifierId) +
-/// matchedAtISO))`.
+/// Returns `MMDDYY` (2-digit month, 2-digit day, 2-digit year). e.g.
+/// `"2026-07-03T10:05:00Z"` → `"070326"`.
 ///
-/// Deterministic: identical inputs yield an identical hash. Each input guards a distinct
-/// tamper vector (see module docs).
+/// Parses the leading `YYYY-MM-DD` of any RFC3339 string; does not require a full
+/// datetime parser. Returns the raw prefix slice so the caller controls error policy.
+fn mmddyy_of(matched_at_iso: &str) -> String {
+    // RFC3339 date prefix is always "YYYY-MM-DD" (10 chars) when present.
+    // Defensive: if shorter/malformed, fall back to zeros (the hash stays deterministic;
+    // the prefix is only a sortable label, never a tamper guard).
+    let bytes = matched_at_iso.as_bytes();
+    let (yyyy, mm, dd) = if bytes.len() >= 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+    {
+        (
+            &matched_at_iso[0..4],
+            &matched_at_iso[5..7],
+            &matched_at_iso[8..10],
+        )
+    } else {
+        ("0000", "00", "00")
+    };
+    let yy = &yyyy[yyyy.len().saturating_sub(2)..];
+    format!("{mm}{dd}{yy}")
+}
+
+/// Compute the tamper-evident completion hash (completion-proof spec, D6 rev 2).
+///
+/// Produces BOTH:
+///   * `short_hash()`  = `mmddyy + "-" + first8hex(SHA256(inputs))` — displayed/printed
+///   * `full_digest()` = full 64-hex SHA-256(inputs) — stored in `completion.json`
+///
+/// where `inputs = salt + goalId + goalSignature + String(roundNumber) +
+/// canonicalJSON(matchingVerdicts sorted by verifierId) + matchedAtISO`.
+///
+/// Deterministic: identical inputs yield identical short hash and full digest. Each
+/// input guards a distinct tamper vector (see module docs). SHA-256 is computed exactly
+/// once; short and full always agree on the inputs.
 pub fn compute_hash(
     salt: &str,
     goal_id: &str,
@@ -192,29 +254,28 @@ pub fn compute_hash(
     round: u32,
     matching: &[MatchingVerdict],
     matched_at_iso: &str,
-) -> String {
+) -> CompletionHash {
     let canon = canonical_matching_json(matching);
     let input = format!("{salt}{goal_id}{goal_sig}{round}{canon}{matched_at_iso}");
-    let digest = hex::encode(Sha256::digest(input.as_bytes()));
-    debug_assert!(
-        digest.len() >= HASH_HEX_LEN,
-        "SHA-256 hex digest must be at least {} chars",
-        HASH_HEX_LEN
-    );
-    format!("{HASH_PREFIX}{}", &digest[..HASH_HEX_LEN])
+    let full = hex::encode(Sha256::digest(input.as_bytes()));
+    debug_assert_eq!(full.len(), HASH_FULL_HEX_LEN, "SHA-256 hex digest must be 64 chars");
+    let short = format!("{}-{}", mmddyy_of(matched_at_iso), &full[..HASH_SHORT_HEX_LEN]);
+    CompletionHash { short, full }
 }
 
-/// Write `completion.json` for a passing round. Refuses (returns `Err(NotPassed)`) when
-/// the round did not reach consensus — no completion record is ever produced on failure.
+/// Write `completion.json` for a passing round. Refuses (returns `Err(NotPassed)`)
+/// when the round did not reach consensus — no completion record is ever produced on
+/// failure.
 ///
 /// The write is atomic (tmp sibling + rename). Fails closed if the goal directory is
-/// missing or the store is unusable.
+/// missing or the store is unusable. The record carries both the short `hash` and the
+/// `full_digest` for exact audit recompute.
 pub fn write_completion(
     root: &Path,
     goal_id: &str,
     result: &ConsensusResult,
     round: u32,
-    hash: &str,
+    hash: &CompletionHash,
     matched_at_iso: &str,
 ) -> Result<PathBuf, ConsensusError> {
     if !result.passed {
@@ -227,7 +288,8 @@ pub fn write_completion(
     }
 
     let record = CompletionRecord {
-        hash: hash.to_string(),
+        hash: hash.short_hash().to_string(),
+        full_digest: hash.full_digest().to_string(),
         goal_id: goal_id.to_string(),
         round_number: round,
         matched_at: matched_at_iso.to_string(),
@@ -283,11 +345,12 @@ mod tests {
         let matching = vec![mv("v1", "2026-07-03T10:00:00Z")];
         let h = compute_hash("SALT", "GID", "SIG", 1, &matching, "2026-07-03T10:05:00Z");
 
-        // Independent recompute.
+        // Independent recompute — full digest + short form.
         let canon = canonical_matching_json(&matching);
         let input = format!("SALTGIDSIG1{canon}2026-07-03T10:05:00Z");
         let digest = hex::encode(Sha256::digest(input.as_bytes()));
-        assert_eq!(h, format!("vl:{}", &digest[..HASH_HEX_LEN]));
+        assert_eq!(h.full_digest(), digest, "full digest must match exact concat order");
+        assert_eq!(h.short_hash(), format!("070326-{}", &digest[..HASH_SHORT_HEX_LEN]));
     }
 
     #[test]

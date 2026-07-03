@@ -1,7 +1,7 @@
 # verifier-loop
 
 Out-of-process **verifier-loop** CLI that an agent (A) cannot bypass, bias, or forge. Produces a
-tamper-evident completion hash (`vl:<40 hex>`) only on genuine **n/m** consensus among independent
+tamper-evident completion hash (`mmddyy-XXXXXXXX`) only on genuine **n/m** consensus among independent
 verifier sessions (V\*) spawned as real ACP-JSON CLI-agent processes.
 
 Two binaries, strict capability separation (design D1):
@@ -67,7 +67,7 @@ Semantics (fail-closed):
 ## Usage examples
 
 ```bash
-# A — start a fresh goal (round 1); prints `goalId: <id>` then, on consensus, the vl: hash:
+# A — start a fresh goal (round 1); prints `goalId: <id>` then, on consensus, the mmddyy-XXXXXXXX hash:
 verifier-loop NEW "implement the foo-bar endpoint with tests"
 
 # A — drive the next round, appending fix notes from the prior round's rejections:
@@ -78,30 +78,38 @@ verifier-verdict approve
 verifier-verdict reject --notes "issue 1: missing test for the error path"
 ```
 
-On n/m APPROVE consensus the `vl:<40 hex>` completion hash is printed to stdout and
-`completion.json` is written under the goal directory. On failure the rejection summary is printed
+On n/m APPROVE consensus the short completion hash (`mmddyy-XXXXXXXX`) is printed to stdout and
+`completion.json` is written under the goal directory (carrying both the short `hash` and the
+full 64-hex `fullDigest` for exact audit recompute). On failure the rejection summary is printed
 to stderr and the exit code is non-zero.
 
 ## Completion-hash formula
 
 ```
-completionHash = "vl:" + first40hex(SHA256(
-    salt
-    + goalId
-    + goalSignature
-    + String(round)
-    + canonicalJSON(matchingVerdicts sorted by verifierId)
-    + matchedAtISO
-))
+short       = mmddyy + "-" + first8hex(SHA256(inputs))   # displayed, printed
+fullDigest  = SHA256(inputs)                              # 64 hex, stored in completion.json
+
+inputs      = salt
+            + goalId
+            + goalSignature
+            + String(round)
+            + canonicalJSON(matchingVerdicts sorted by verifierId)
+            + matchedAtISO
 
 where  goalSignature = SHA256(salt + goalText + createdAt)
+      mmddyy         = UTC date of matchedAt (MMDDYY, e.g. 070326 for 2026-07-03)
 ```
 
 - `salt` — per-store random secret; never printed.
 - `matchingVerdicts` — the matching APPROVE verdicts, serialized as **canonical JSON**: objects
   sorted by `verifierId` ascending, object keys alphabetical, no whitespace.
-- Any edit to `goalText` (breaks `goalSignature`) or to a stored verdict changes the digest, so the
-  printed hash will not match the recomputed one.
+- The **short hash** (`mmddyy-XXXXXXXX`) is the human/agent-facing ID — memorable, trivially
+  invokable by sub-agents. Example: `070326-a1b2c3d4`.
+- The **full digest** (`fullDigest`, 64 hex) is stored in `completion.json` and is the exact
+  (deterministic) tamper guard. 8 hex alone (32 bits) is too weak as a sole guard, so audit
+  compares `fullDigest`; the short hash is a scannable label.
+- Any edit to `goalText` (breaks `goalSignature`) or to a stored verdict changes BOTH the short
+  hash (w.h.p.) and the full digest (deterministically), so recompute will not match stored.
 
 ## Fail-closed guarantees (D9)
 

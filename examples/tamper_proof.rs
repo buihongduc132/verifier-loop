@@ -81,7 +81,7 @@ fn main() -> ExitCode {
     println!("[2] recompute hash from stored artifacts");
     println!("    stored:     {stored_hash}");
     println!("    recomputed: {recomputed}");
-    if stored_hash != recomputed {
+    if stored_hash != recomputed.short_hash() {
         println!("    => FAIL: hash does not match stored completion.json");
         return ExitCode::FAILURE;
     }
@@ -100,7 +100,7 @@ fn main() -> ExitCode {
         println!("    => FAIL: signature did NOT change after goalText edit");
         return ExitCode::FAILURE;
     }
-    if stored_hash == hash_a {
+    if stored_hash == hash_a.short_hash() {
         println!("    => FAIL: hash did NOT change after goalText edit");
         return ExitCode::FAILURE;
     }
@@ -128,8 +128,8 @@ fn main() -> ExitCode {
     std::fs::write(&v1_path, &v1_raw).unwrap();
     println!("[4] tamper verdict registeredAt → recompute hash");
     println!("    registeredAt: {original_registered_at} → {}", v1_tampered.registered_at.as_deref().unwrap_or(""));
-    println!("    hash:         {stored_hash} → {hash_b}");
-    if stored_hash == hash_b {
+    println!("    hash:         {stored_hash} → {}", hash_b.short_hash());
+    if stored_hash == hash_b.short_hash() {
         println!("    => FAIL: hash did NOT change after verdict edit");
         return ExitCode::FAILURE;
     }

@@ -1,0 +1,19 @@
+=== SELF-VERIFY: short hash form (rev 2) ===
+goalId: 72eeb3a8-4bcb-485a-8f9f-b0de99c3f110
+printed hash: 070326-108df114
+fullDigest:   108df1143e39fa60bce80041c459420e20902ba8e06c05f2103f6dcdeeb7bee5
+
+=== completion.json ===
+{
+  "hash": "070326-108df114",
+  "fullDigest": "108df1143e39fa60bce80041c459420e20902ba8e06c05f2103f6dcdeeb7bee5",
+  "goalId": "72eeb3a8-4bcb-485a-8f9f-b0de99c3f110",
+  "roundNumber": 1,
+  "matchedAt": "2026-07-03T18:02:18.770955157+00:00",
+  "matchingVerdicts": [
+    {
+      "verifierId": "v1",
+      "registeredAt": "2026-07-03T18:02:18.770501213+00:00"
+    }
+  ]
+}
