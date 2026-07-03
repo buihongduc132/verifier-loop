@@ -49,6 +49,11 @@ pub const ARCHIVE_FILE: &str = "archive.json";
 pub const ENV_GOAL_ID: &str = "VERIFIER_LOOP_GOAL_ID";
 pub const ENV_VERIFIER_ID: &str = "VERIFIER_LOOP_VERIFIER_ID";
 pub const ENV_ROUND: &str = "VERIFIER_LOOP_ROUND";
+/// Store-root override propagated to spawned verifiers so `verifier-verdict`
+/// (jewije) registers its verdict into the *same* store the orchestrator used —
+/// otherwise jewije resolves its own default `$HOME/.verifier-loop` and the verdict
+/// write lands in the wrong store, leaving the slot null (no consensus → no hash).
+pub const ENV_HOME: &str = "VERIFIER_LOOP_HOME";
 
 /// Inputs to a spawn round. All borrowed; the round is driven to completion synchronously.
 #[derive(Debug, Clone, Copy)]
@@ -123,7 +128,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
         pre_create_verifier_dir(&vdir);
 
         let mut cmd = build_spawn_command(&input.adapter.spawn, input.prompt);
-        inject_identity_env(&mut cmd, input.goal_id, &vid, input.round);
+        inject_identity_env(&mut cmd, input.goal_id, &vid, input.round, input.root);
         plan.push((vid, cmd, vdir));
     }
 
@@ -200,7 +205,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         };
         pre_create_verifier_dir_with_turns(&vdir, baseline_turns);
 
-        inject_identity_env(&mut cmd, input.goal_id, &vid, input.round);
+        inject_identity_env(&mut cmd, input.goal_id, &vid, input.round, input.root);
         plan.push((vid, cmd, vdir));
     }
 
@@ -395,11 +400,34 @@ fn build_resume_command(template: &str, sid: &str, prompt: &str) -> Command {
     build_spawn_command(&with_sid, prompt)
 }
 
-/// Inject the three identity env vars into a verifier command (D2).
-fn inject_identity_env(cmd: &mut Command, goal_id: &str, verifier_id: &str, round: u32) {
-    cmd.env(ENV_GOAL_ID, goal_id);
-    cmd.env(ENV_VERIFIER_ID, verifier_id);
-    cmd.env(ENV_ROUND, round.to_string());
+/// The env pairs a spawned verifier needs: identity (D2) plus the store root so its
+/// `verifier-verdict` call writes into the orchestrator's store (fail-closed: a
+/// verdict written to a *different* store would be invisible → null slot → no hash).
+fn identity_env_pairs<'a>(
+    goal_id: &'a str,
+    verifier_id: &'a str,
+    round: u32,
+    root: &'a Path,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    vec![
+        (ENV_GOAL_ID, goal_id.into()),
+        (ENV_VERIFIER_ID, verifier_id.into()),
+        (ENV_ROUND, round.to_string().into()),
+        (ENV_HOME, root.as_os_str().into()),
+    ]
+}
+
+/// Inject the identity + store-root env vars into a verifier command (D2).
+fn inject_identity_env(
+    cmd: &mut Command,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    root: &Path,
+) {
+    for (k, v) in identity_env_pairs(goal_id, verifier_id, round, root) {
+        cmd.env(k, v);
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +485,23 @@ mod tests {
         };
         let j = serde_json::to_string(&m).unwrap();
         assert!(!j.contains("sid"), "null sid should be skipped: {j}");
+    }
+
+    #[test]
+    fn identity_env_pairs_propagate_store_root() {
+        let root = Path::new("/tmp/vl-home");
+        let pairs = identity_env_pairs("g1", "v1", 2, root);
+        let home = pairs.iter().find(|(k, _)| *k == ENV_HOME);
+        assert!(home.is_some(), "VERIFIER_LOOP_HOME must be injected");
+        assert_eq!(
+            home.unwrap().1.as_os_str(),
+            Path::new("/tmp/vl-home").as_os_str(),
+            "injected HOME must equal the orchestrator's root"
+        );
+        // identity vars still present
+        assert!(pairs.iter().any(|(k, _)| *k == ENV_GOAL_ID));
+        assert!(pairs.iter().any(|(k, _)| *k == ENV_VERIFIER_ID));
+        assert!(pairs.iter().any(|(k, _)| *k == ENV_ROUND));
     }
 
     #[test]
