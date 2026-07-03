@@ -1,0 +1,48 @@
+# ---- Rust build artifacts ----
+/target/
+**/*.rs.bk
+Cargo.lock
+# binaries built locally
+/bin/
+*.exe
+
+# ---- Coverage / profiling ----
+*.profraw
+*.profdata
+tarpaulin-report.html
+cov/
+*.lcov
+
+# ---- Sensitive / local state ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+**/credentials*
+**/creds*
+# per-user runtime data (NEVER commit)
+.verifier-loop/
+*.salt
+
+# ---- Editor / OS noise ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Local notes / scratch ----
+notes/
+scratch/
+*.local.md
+_STATE.md
+
+# ---- Dependencies vendored locally (avoid committing huge dirs) ----
+/vendor/
+/node_modules/

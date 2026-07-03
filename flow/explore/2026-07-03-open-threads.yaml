@@ -1,0 +1,50 @@
+status: ongoing
+threads:
+  - id: OT1
+    topic: audit subcmd not implemented yet
+    raised_in: turn2
+    status: deferred
+    resolution: 'verifier-loop audit <hash> subcmd deferred. CLI outputs hash on n/m match but audit/verification of hash deferred.'
+    resolved_in: turn5
+
+  - id: OT2
+    topic: per-verifier maxTurn refresh (not round-based)
+    raised_in: turn2
+    status: deferred
+    resolution: 'Currently all verifiers refresh after maxTurn rounds. Improvement — refresh only verifiers that individually hit maxTurn.'
+    resolved_in: turn2
+
+  - id: OT3
+    topic: chattr +a hardening on .salt
+    raised_in: turn4
+    status: deferred
+    resolution: 'Salt is mode 600 but A (same UID) can technically read it. chattr +a (append-only) or separate UID hardening deferred. Hash-based tamper detection sufficient for now.'
+    resolved_in: turn4
+
+  - id: OT4
+    topic: skill becomes thin wrapper around CLI
+    raised_in: turn2
+    status: deferred
+    resolution: 'verifier-loop skill stays as-is. When CLI stable, skill becomes thin wrapper. Not now.'
+    resolved_in: turn2
+
+  - id: OT5
+    topic: OpenSpec proposal not yet created
+    raised_in: turn5
+    status: closed
+    resolution: 'OpenSpec change add-verifier-loop-cli created in ../verifier-loop/openspec/changes/. 4/4 artifacts complete (proposal, design, 6 specs, tasks).'
+    resolved_in: turn5
+
+  - id: OT6
+    topic: fan-out scouts (from skill) not in CLI
+    raised_in: turn2
+    status: deferred
+    resolution: 'Skill fan-out scouts (find similar issues across codebase) NOT part of CLI v1. A responsibility. Defer.'
+    resolved_in: turn2
+
+  - id: OT7
+    topic: no cost/round caps
+    raised_in: turn2
+    status: closed
+    resolution: 'No max-rounds or max-cost limit. A can retry indefinitely.'
+    resolved_in: turn2

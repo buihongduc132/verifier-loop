@@ -1,0 +1,226 @@
+- id: LD1
+  turn: turn2
+  parts: ["V*-authority-over-A"]
+  user_quote: |
+    "V* is authority over A.
+    V* is LLM itself (cli agents).
+    chance of V incorrectly APPROVE a goal is 40% each time. IF with 3/3 model , the chance of V* being wrong is 0.4^3 , must lower than single A or single V*. This is the entire purpose of V*."
+  decision: 'V* is authority over A. Trust model — A is adversarial, V* is honest but fallible (40% error). n/m consensus compensates for V* fallibility.'
+  status: locked
+
+- id: LD2
+  turn: turn2
+  parts: ["session-reuse-all-refresh"]
+  user_quote: |
+    "CORRECT. [all verifiers refreshed after maxTurn]"
+  decision: 'After maxTurn rounds, ALL verifiers get fresh sessions (round-based refresh, not per-verifier).'
+  status: locked
+
+- id: LD3
+  turn: turn2
+  parts: ["per-verifier-refresh-deferred"]
+  user_quote: |
+    "this is more improvement later , not now. Just note this as well."
+  decision: 'Per-verifier maxTurn refresh (refresh only verifiers that hit maxTurn, not all) is deferred for later.'
+  status: locked
+
+- id: LD4
+  turn: turn2
+  parts: ["n-m-static-config"]
+  user_quote: |
+    "I will configured this. It is NOT smart / dynamic chosen. Human configured in the json."
+  decision: 'n/m is static human-configured in config.json, not dynamically chosen.'
+  status: locked
+
+- id: LD5
+  turn: turn2
+  parts: ["n-m-meaning"]
+  user_quote: |
+    "correct. [n/m = need n approvals out of m total verifiers]"
+  decision: 'n/m means "need n approvals out of m total verifiers spawned".'
+  status: locked
+
+- id: LD6
+  turn: turn2
+  parts: ["delete-invalidates-hash"]
+  user_quote: |
+    "if it delete , then audit will fail. Because there is no proof."
+  decision: 'If A deletes ~/.verifier-loop/, audit fails — no proof exists. Fail-closed.'
+  status: locked
+
+- id: LD7
+  turn: turn2
+  parts: ["write-once-log"]
+  user_quote: |
+    "if it is not hard to have write-once log. Then make it."
+  decision: 'Write-once log should be implemented if not hard. (Resolved in turn4 — hash-based tamper detection is sufficient; chattr +a deferred.)'
+  status: locked
+
+- id: LD8
+  turn: turn2
+  parts: ["store-messages"]
+  user_quote: |
+    "verdicts should also stored the — actual message being sent to the verifier initially ; AND it last output message in each verdict as well."
+  decision: 'Each verdict stores — initial-prompt.txt (what was sent to V*) AND final-output.txt (V* last message before verdict call).'
+  status: locked
+
+- id: LD9
+  turn: turn2
+  parts: ["separate-verdict-cli"]
+  user_quote: |
+    "a SEPARATE cli for verifier. Denote it is verifier-verdict reject --goalId <id> --notes \"...\". that cli automate works with the json files store we are have"
+  decision: 'Verdict registration uses a SEPARATE CLI (verifier-verdict) that works with the JSON file store. Not pattern matching on output.'
+  status: locked
+
+- id: LD10
+  turn: turn2
+  parts: ["no-pattern-matching"]
+  user_quote: |
+    "**NO**. ABSOLUTE no \"pattern / regex\" match."
+  decision: 'ABSOLUTE prohibition on pattern/regex matching to detect verdicts. Verdict MUST be explicit CLI call.'
+  status: locked
+
+- id: LD11
+  turn: turn2
+  parts: ["verifier-sees-artifacts"]
+  user_quote: |
+    "default — cwd
+    git status on that directory.
+    files edited time.
+    top 10k chars of the git status in diff mode."
+  decision: 'V* sees — cwd, git status, file edit times, git diff top 10k chars (configurable).'
+  status: locked
+
+- id: LD12
+  turn: turn2
+  parts: ["v-no-round-number"]
+  user_quote: |
+    "no , it do not need to are how many round."
+  decision: 'V* does NOT see round number.'
+  status: locked
+
+- id: LD13
+  turn: turn2
+  parts: ["prev-round-configurable"]
+  user_quote: |
+    "optional / configurable. [previous round summary]
+    yes , none of these should be shown (except previous round , if configured)"
+  decision: 'Previous round summary is optional/configurable. Other verifiers verdicts, n/m config, completion hash are NEVER shown to V*.'
+  status: locked
+
+- id: LD14
+  turn: turn2
+  parts: ["verdict-in-notes"]
+  user_quote: |
+    "it output is the tools call in the cli.
+    suggestion is in the \"notes\" itself."
+  decision: 'V* output is the CLI tool call. Suggestions go in the "notes" field of the verdict, not separate output.'
+  status: locked
+
+- id: LD15
+  turn: turn2
+  parts: ["no-direct-file-write"]
+  user_quote: |
+    "C — *ABSOLUTE* no. it must not need to worry how the process works internally.
+    B — must be a 100% deterministic cli."
+  decision: 'V* MUST NOT write files directly. Must use deterministic verifier-verdict CLI.'
+  status: locked
+
+- id: LD16
+  turn: turn2
+  parts: ["forgotten-verdict-null"]
+  user_quote: |
+    "if it forgot. Then it is NOT setting NULL -> APPROVE. Then that round is invalid."
+  decision: 'Forgotten verdict = NULL (NOT APPROVE). Round is invalid. Fail-closed.'
+  status: locked
+
+- id: LD17
+  turn: turn3
+  parts: ["env-var-plus-prompt"]
+  user_quote: |
+    "Env var + prompt {{}} embedded one. Because that ID is different each time isn't it ?"
+  decision: 'V* identity passed via BOTH env var (machine-readable, for verifier-verdict CLI) AND prompt {{}} (human-readable, for V* the LLM).'
+  status: locked
+
+- id: LD18
+  turn: turn3
+  parts: ["acp-format"]
+  user_quote: |
+    "Current pi already having acp , thus make it acp format instead of just normal pi -p;"
+  decision: 'Use ACP JSON format (--mode json), not plain pi -p text output.'
+  status: locked
+
+- id: LD19
+  turn: turn3
+  parts: ["custom-adapters"]
+  user_quote: |
+    "pi / hermes / acpx having their own custom adapter.
+    for the rest , make it to be able to configured as json above whenever needed ;
+    Assumes that all of them having acp output format."
+  decision: 'pi/hermes/acpx each have custom adapter. Others configurable via JSON. All assume ACP output format.'
+  status: locked
+
+- id: LD20
+  turn: turn3
+  parts: ["verdict-output-exit0"]
+  user_quote: |
+    "Just verdict registered , exit 0;"
+  decision: 'verifier-verdict outputs "Verdict registered" and exits 0.'
+  status: locked
+
+- id: LD21
+  turn: turn3
+  parts: ["v-natural-exit"]
+  user_quote: |
+    "V* naturally exit. It is cli-agent"
+  decision: 'V* naturally exits after registering verdict (agent_end). CLI does not kill it.'
+  status: locked
+
+- id: LD22
+  turn: turn3
+  parts: ["no-verdict-change"]
+  user_quote: |
+    "5. NO. [cannot change verdict after registering]"
+  decision: 'V* CANNOT change verdict after registering. First verdict is FINAL.'
+  status: locked
+
+- id: LD23
+  turn: turn3
+  parts: ["parallel-non-blocking"]
+  user_quote: |
+    "Also , ensure these clis (v*) are running in parallel. Non-blocking; Gather all in the end."
+  decision: 'All V* run in parallel, non-blocking. CLI gathers all results at the end.'
+  status: locked
+
+- id: LD24
+  turn: turn4
+  parts: ["resume-template-like-first"]
+  user_quote: |
+    "it just like the first. But base on configuration , it might have the previous verdict notes.
+    this configuration could be done in the template as well."
+  decision: 'RESUME prompt is like the first, but template may include {{prevNotes}}. Configuration done via template variables (no separate boolean flag).'
+  status: locked
+
+- id: LD25
+  turn: turn4
+  parts: ["assistant-judges-schema-hash"]
+  user_quote: |
+    "these to , judge yourself then finalize schema , completion hash formula."
+  decision: 'config.json schema and completion hash formula delegated to assistant judgment (finalized in turn4).'
+  status: locked
+
+- id: LD26
+  turn: turn5
+  parts: ["code-location"]
+  user_quote: |
+    "code stays in ../verifier-loop"
+  decision: 'Code lives in ../verifier-loop/ (sibling repo to pi-plugins).'
+  status: locked
+
+- id: LD27
+  turn: turn5
+  parts: ["cli-aliases"]
+  user_quote: |
+    "cli will be verifier-loop and verifier-verdict (aliased respectively to — jewilo , jewije)"
+  decision: 'CLI binaries — verifier-loop (aliased jewilo), verifier-verdict (aliased jewije).'
+  status: locked
