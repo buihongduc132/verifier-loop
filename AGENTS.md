@@ -1,0 +1,60 @@
+# AGENTS.md — verifier-loop repo
+
+Single source of truth pointers for any agent (human or CLI) working in this repo.
+
+## What this is
+
+A Rust implementation of the `verifier-loop` skill's contract as two out-of-process CLIs
+(`verifier-loop`/`jewilo` and `verifier-verdict`/`jewije`) that produce a tamper-evident
+completion hash on n/m verifier consensus. See [`README.md`](README.md).
+
+## Design source of truth (read FIRST)
+
+- **Specs (behavioural contract):** [`openspec/changes/add-verifier-loop-cli/specs/`](openspec/changes/add-verifier-loop-cli/specs/)
+  - `goal-lifecycle`, `verifier-spawn`, `verdict-registration`, `consensus-check`,
+    `completion-proof`, `verifier-prompt`
+- **Design decisions D0–D10 + risks:** [`openspec/changes/add-verifier-loop-cli/design.md`](openspec/changes/add-verifier-loop-cli/design.md)
+- **Locked decisions LD1–LD27 + rationale:** [`flow/explore/2026-07-03-locked-decisions.yaml`](flow/explore/2026-07-03-locked-decisions.yaml), [`flow/explore/`](flow/explore/)
+- **Language choice (why Rust):** [`flow/findings/2026-07-03-language-choice.md`](flow/findings/2026-07-03-language-choice.md)
+- **Implementation roadmap:** [`openspec/changes/add-verifier-loop-cli/tasks.md`](openspec/changes/add-verifier-loop-cli/tasks.md) §1–§11
+- **ACP sample fixtures:** [`flow/fixtures/`](flow/fixtures/)
+
+## Module map
+
+| `src/` module | tasks.md | spec |
+|---------------|----------|------|
+| `store/`   | §2 | goal-lifecycle (salt + config) |
+| `goal/`    | §3 | goal-lifecycle (NEW/RESUME/immutability) |
+| `acp/`     | §4 | verifier-spawn (ACP parser + adapters) |
+| `spawn/`   | §5,§6 | verifier-spawn (orchestration + reuse) |
+| `verdict/` | §7 | verdict-registration |
+| `consensus/` | §8 | consensus-check + completion-proof |
+| `prompt/`  | §9 | verifier-prompt |
+| `cli/`     | §10 | wiring |
+
+## TDD discipline (hard constraint)
+
+Every feature group follows strict RED-then-GREEN:
+1. A **fresh** teammate authors the failing (RED) test against the spec.
+2. A **different fresh** teammate authors the minimal GREEN implementation.
+3. Coverage gate `>=80%` lines per new src file before the group is marked done.
+
+Never implement without a test first. Never have the same author write both RED and GREEN for a group.
+
+## Coverage gate
+
+```bash
+cargo llvm-cov --fail-under-lines 80
+```
+
+## Fail-closed invariants (must always hold)
+
+- NULL verdict never → APPROVE.
+- Missing store → no hash.
+- `goalText` edit → signature mismatch → hash mismatch.
+- Verdict edit → hash mismatch.
+
+## Out of scope (do NOT implement)
+
+Deferred: OT1 audit subcommand, OT2 per-verifier maxTurn refresh, OT3 `chattr +a` hardening,
+OT4 skill→wrapper, OT6 fan-out scouts. See design.md Non-Goals.

@@ -1,0 +1,55 @@
+[package]
+name = "verifier-loop"
+version = "0.1.0"
+edition = "2021"
+description = "Out-of-process verifier-loop CLI producing tamper-evident completion hashes"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bhd/verifier-loop"
+# Two binaries:
+#   verifier-loop    -> aliased at install time to `jewilo` (A's interface: NEW/RESUME/spawn/gather/consensus/hash)
+#   verifier-verdict -> aliased at install time to `jewije` (V*'s interface: approve/reject)
+# The `jewilo`/`jewije` aliases are installed as post-install symlinks/copies (tasks.md §10.4);
+# Cargo does not support multiple names per [[bin]] target natively.
+
+[lib]
+name = "verifier_loop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "verifier-loop"
+path = "src/bin/verifier_loop.rs"
+
+[[bin]]
+name = "verifier-verdict"
+path = "src/bin/verifier_verdict.rs"
+
+[dependencies]
+# JSON (goal.json, verdict.json, config.json, ACP stream)         -> tasks.md §3,§7,§4
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# goalId generation (UUID v4)                                     -> §3.1
+uuid = { version = "1", features = ["v4"] }
+# signature.json (D5) + completion hash (D6)                      -> §3.1,§8.2
+sha2 = "0.10"
+hex = "0.4"
+# CLI args for both binaries (NEW/RESUME/approve/reject)          -> §3.1,§7.1
+clap = { version = "4", features = ["derive", "env"] }
+# parallel verifier spawn + per-verifier timeout (D7, D9)         -> §5.1,§5.4
+tokio = { version = "1", features = ["full"] }
+# error handling: Result<T,E> enforced, fail-closed (D0 rationale)-> all modules
+anyhow = "1"
+thiserror = "1"
+# timestamps for createdAt / registeredAt / matchedAt             -> §3.1,§7.1,§8.3
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+# deterministic temp HOMEs for store tests                        -> §2.3,§3.5
+tempfile = "3"
+# invoke the built binaries in integration tests                  -> §10.2,§10.3
+assert_cmd = "2"
+predicates = "3"
+
+# Coverage gate (tasks.md §1.4, §10.5): >=80% lines on all new src files.
+# Tool: cargo-llvm-cov (already installed: 0.8.5).
+#   cargo llvm-cov --fail-under-lines 80 --html
+# tarpaulin is the documented alternative.

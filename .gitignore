@@ -37,6 +37,9 @@ secrets/
 .DS_Store
 Thumbs.db
 
+# ---- pi local runtime (sessions, cache) ----
+.pi/
+
 # ---- Local notes / scratch ----
 notes/
 scratch/
