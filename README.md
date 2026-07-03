@@ -30,19 +30,33 @@ cargo build --release
 
 ## Install + aliases
 
+**Prerequisites**: a recent Rust toolchain (`cargo` 1.70+). Install via [rustup](https://rustup.rs/)
+if needed. Then:
+
 ```bash
-# installs both binaries (verifier-loop, verifier-verdict):
+# Option A — install just the two binaries into ~/.cargo/bin:
 cargo install --path .
 
-# create the short jewilo / jewije aliases (tasks.md §10.4):
+# Option B (recommended) — install binaries AND the short jewilo / jewije aliases
+# into <root>/bin (default ~/.local/bin) via the canonical script:
 ./scripts/install.sh                 # default root: ~/.local
 ./scripts/install.sh /opt/verifier   # custom --root
 ```
 
 `scripts/install.sh` runs `cargo install --path . --force --root <root>` then symlinks
 `jewilo -> verifier-loop` and `jewije -> verifier-verdict` under `<root>/bin` (falling back to a
-copy on filesystems without symlink support). Cargo cannot express multiple names per `[[bin]]`
-target natively, so the aliases are created post-install.
+full copy on filesystems without symlink support). Cargo cannot express multiple names per
+`[[bin]]` target natively, so the aliases are created post-install.
+
+**Ensure the install dir is on your PATH**, then smoke-test:
+
+```bash
+# both names must resolve:
+command -v jewilo jewije
+# must print the mmddyy-XXXXXXXX short-hash form on consensus:
+VERIFIER_LOOP_BACKEND_CMD="$(pwd)/scripts/stub_approve.sh" \
+  jewilo NEW "smoke test"   # e.g.  070326-00a50e40
+```
 
 ## `config.json` reference
 
