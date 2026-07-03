@@ -6,19 +6,20 @@ verifier sessions (V\*) spawned as real ACP-JSON CLI-agent processes.
 
 Two binaries, strict capability separation (design D1):
 
-| binary           | alias    | role | interface                                   |
-|------------------|----------|------|---------------------------------------------|
-| `verifier-loop`  | `jewilo` | A    | `NEW`, `RESUME`, spawn, gather, consensus, hash |
-| `verifier-verdict` | `jewije` | V\* | `approve`, `reject --notes "…"` |
+| binary             | alias    | role | interface                                      |
+|--------------------|----------|------|------------------------------------------------|
+| `verifier-loop`    | `jewilo` | A    | `NEW`, `RESUME`, spawn, gather, consensus, hash |
+| `verifier-verdict` | `jewije` | V\*  | `approve`, `reject --notes "…"`                |
 
-> **Status:** scaffold (tasks.md §1). Behaviour lands group-by-group under strict TDD per
-> [`openspec/changes/add-verifier-loop-cli/tasks.md`](openspec/changes/add-verifier-loop-cli/tasks.md).
+See [`USAGE.md`](USAGE.md) for full invocation reference and [`AGENTS.md`](AGENTS.md) for the
+agent-facing source-of-truth pointers.
 
 ## Design source
 
 - Proposal / decisions: [`openspec/changes/add-verifier-loop-cli/`](openspec/changes/add-verifier-loop-cli/) (D0–D10, locked decisions LD1–LD27)
 - Explore rationale: [`flow/explore/`](flow/explore/), [`flow/findings/`](flow/findings/)
 - Behavioural specs: [`openspec/changes/add-verifier-loop-cli/specs/`](openspec/changes/add-verifier-loop-cli/specs/) (6 specs)
+- Implementation roadmap: [`openspec/changes/add-verifier-loop-cli/tasks.md`](openspec/changes/add-verifier-loop-cli/tasks.md)
 
 ## Build
 
@@ -30,25 +31,87 @@ cargo build --release
 ## Install + aliases
 
 ```bash
+# installs both binaries (verifier-loop, verifier-verdict):
 cargo install --path .
-# then create the short aliases (tasks.md §10.4):
-ln -sf "$(which verifier-loop)"    "$(dirname "$(which verifier-loop)")/jewilo"
-ln -sf "$(which verifier-verdict)" "$(dirname "$(which verifier-verdict)")/jewije"
+
+# create the short jewilo / jewije aliases (tasks.md §10.4):
+./scripts/install.sh                 # default root: ~/.local
+./scripts/install.sh /opt/verifier   # custom --root
 ```
+
+`scripts/install.sh` runs `cargo install --path . --force --root <root>` then symlinks
+`jewilo -> verifier-loop` and `jewije -> verifier-verdict` under `<root>/bin` (falling back to a
+copy on filesystems without symlink support). Cargo cannot express multiple names per `[[bin]]`
+target natively, so the aliases are created post-install.
+
+## `config.json` reference
+
+`~/.verifier-loop/config.json` carries the tunables that gate spawning, consensus, and the frozen
+diff fed to verifiers (tasks.md §2.2). On-disk keys are camelCase; all fields are optional.
+
+| key                  | type    | default     | meaning                                                                     |
+|----------------------|---------|-------------|-----------------------------------------------------------------------------|
+| `n`                  | u32     | `2`         | consensus threshold — minimum APPROVE verdicts required to pass (n of m).   |
+| `m`                  | u32     | `2`         | number of verifiers spawned per round.                                      |
+| `maxTurn`            | u32     | `3`         | per-verifier turn budget; once exhausted the session is spawned fresh (D8). |
+| `backend`            | string  | `"pi"`      | ACP backend key: `pi` \| `hermes` \| `acpx` \| a custom/stub key.           |
+| `gitDiffMaxChars`    | u64     | `10000`     | cap on the frozen `git diff` snapshot handed to each verifier (chars).      |
+| `verifierTimeoutSec` | u64     | `1800`      | per-verifier wall-clock timeout in seconds (D9); a timeout leaves a null verdict. |
+
+Semantics (fail-closed):
+
+- **Missing** `config.json` → fully defaulted [`Config`].
+- **Partial** `config.json` → present fields honoured, missing fields defaulted.
+- **Malformed** `config.json` → hard error; never silently defaulted.
+
+## Usage examples
+
+```bash
+# A — start a fresh goal (round 1); prints `goalId: <id>` then, on consensus, the vl: hash:
+verifier-loop NEW "implement the foo-bar endpoint with tests"
+
+# A — drive the next round, appending fix notes from the prior round's rejections:
+verifier-loop RESUME <goalId> --fix "addressed the missing error path"
+
+# V* — register a verdict (identity comes from VERIFIER_LOOP_* env, NOT arguments):
+verifier-verdict approve
+verifier-verdict reject --notes "issue 1: missing test for the error path"
+```
+
+On n/m APPROVE consensus the `vl:<40 hex>` completion hash is printed to stdout and
+`completion.json` is written under the goal directory. On failure the rejection summary is printed
+to stderr and the exit code is non-zero.
+
+## Completion-hash formula
+
+```
+completionHash = "vl:" + first40hex(SHA256(
+    salt
+    + goalId
+    + goalSignature
+    + String(round)
+    + canonicalJSON(matchingVerdicts sorted by verifierId)
+    + matchedAtISO
+))
+
+where  goalSignature = SHA256(salt + goalText + createdAt)
+```
+
+- `salt` — per-store random secret; never printed.
+- `matchingVerdicts` — the matching APPROVE verdicts, serialized as **canonical JSON**: objects
+  sorted by `verifierId` ascending, object keys alphabetical, no whitespace.
+- Any edit to `goalText` (breaks `goalSignature`) or to a stored verdict changes the digest, so the
+  printed hash will not match the recomputed one.
+
+## Fail-closed guarantees (D9)
+
+- A **NULL** verdict (crash / timeout / forgot-to-call-verdict) **never** becomes APPROVE.
+- A missing `~/.verifier-loop/` or goal directory yields **no hash**.
+- Editing `goal.json` `goalText` after creation breaks `signature.json` and every downstream hash.
+- Editing a stored APPROVE verdict invalidates the completion hash on recompute.
 
 ## Coverage gate (>=80% lines)
 
 ```bash
 cargo llvm-cov --fail-under-lines 80 --html    # report at target/llvm-cov/html/index.html
-# alternative:
-cargo tarpaulin --skip-clean --out Html --fail-under 80
 ```
-
-## Fail-closed guarantees (D9)
-
-- A NULL verdict (crash / timeout / forgot-to-call-verdict) **never** becomes APPROVE.
-- A missing `~/.verifier-loop/` or goal directory yields **no hash**.
-- Editing `goal.json` goalText after creation breaks `signature.json` and every downstream hash.
-- Editing a stored APPROVE verdict invalidates the completion hash on recompute.
-
-See `USAGE.md` (tasks.md §11) and `AGENTS.md` for full reference.
