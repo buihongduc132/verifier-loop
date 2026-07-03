@@ -366,13 +366,15 @@ fn archive_prior_sid(prev_vdir: &Path, sid: &str) -> Result<(), SpawnError> {
 /// Splitting on whitespace matches the §4 contract ("the orchestrator splits the rendered
 /// command on whitespace"). The first token is the program; the rest are args. Prompts
 /// needing shell quoting are the caller's responsibility (D2 note in adapters.rs).
+/// Parse a rendered command string into a `Command`.
+///
+/// Adapter templates embed the prompt via `{prompt}` substitution inside shell quotes
+/// (e.g. `pi -p "{prompt}" --mode json`). The prompt is arbitrary multi-KB text with
+/// spaces, newlines, and quotes, so naive `split_whitespace()` would shatter it into
+/// thousands of args. We delegate to `sh -c` so the shell handles quoting correctly.
 fn build_command(rendered: &str) -> Command {
-    let mut parts = rendered.split_whitespace();
-    let program = parts.next().expect("rendered command is non-empty");
-    let mut cmd = Command::new(program);
-    for arg in parts {
-        cmd.arg(arg);
-    }
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(rendered);
     cmd
 }
 
@@ -394,13 +396,18 @@ mod tests {
     }
 
     #[test]
-    fn build_command_splits_program_and_args() {
-        // Use a harmless program so the Command is constructible without spawning.
-        let mut cmd = build_command("/bin/echo --session abc def");
-        let rendered = format!("{:?}", cmd.as_std());
-        assert!(rendered.contains("/bin/echo"));
-        assert!(rendered.contains("--session"));
-        assert!(rendered.contains("abc"));
+    fn build_command_uses_sh_dash_c_to_preserve_quoted_prompt() {
+        // The rendered command embeds a multi-word prompt inside shell quotes.
+        // build_command MUST delegate to `sh -c` so the shell reassembles the quoted
+        // prompt as a single arg, rather than split_whitespace() shattering it.
+        let rendered = r#"pi -p "hello world with spaces" --mode json"#;
+        let cmd = build_command(rendered);
+        let s = format!("{:?}", cmd.as_std());
+        assert!(s.contains("sh"), "must invoke sh to handle quoting");
+        // The whole rendered string is passed as a single arg to -c.
+        assert!(s.contains("-c"));
+        assert!(s.contains("hello world with spaces"),
+            "quoted prompt must survive intact in the sh -c payload");
     }
 
     #[test]
