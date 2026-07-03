@@ -238,10 +238,31 @@ async fn gather(
     let mut runs = Vec::with_capacity(children.len());
 
     for (vid, mut child, vdir) in children.drain(..) {
-        // Take the stdout pipe out of the child up front so neither select branch has to
-        // move the `Child` (we use `wait()` which borrows, not `wait_with_output()` which
-        // consumes). This keeps both branches borrow-compatible inside `select!`.
-        let mut stdout_pipe = child.stdout.take();
+        // Take the stdout pipe out of the child and drain it on a background task.
+        // Draining concurrently with `wait()` is required because an OS pipe holds only
+        // ~64KB: a verifier emitting MBs of ACP events would fill the buffer, block on
+        // write, and either hang to the timeout or exit without emitting `agent_end` —
+        // leaving a null verdict despite a successful run.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let drain = tokio::spawn(async move {
+            // Best-effort stderr drain so a chatty backend never blocks on a full pipe.
+            if let Some(mut p) = stderr_pipe {
+                use tokio::io::AsyncReadExt;
+                let mut sink = Vec::<u8>::new();
+                let _ = p.read_to_end(&mut sink).await;
+            }
+            let buf = match stdout_pipe {
+                Some(mut pipe) => {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    let _ = pipe.read_to_end(&mut buf).await;
+                    buf
+                }
+                None => Vec::new(),
+            };
+            buf
+        });
 
         let run = tokio::select! {
             biased;
@@ -252,16 +273,8 @@ async fn gather(
                 VerifierRun { verifier_id: vid, sid: None, final_output: None, timed_out: true }
             }
             status = child.wait() => {
-                // Drain stdout regardless of exit status; parse for SID + final output.
-                let buf = match stdout_pipe.take() {
-                    Some(mut pipe) => {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = Vec::new();
-                        let _ = pipe.read_to_end(&mut buf).await;
-                        buf
-                    }
-                    None => Vec::new(),
-                };
+                // Child exited; the drain task finishes shortly after (pipe hits EOF).
+                let buf = drain.await.unwrap_or_default();
                 let stdout = String::from_utf8_lossy(&buf);
                 let sid = acp::extract_sid(&stdout);
                 let final_output = acp::extract_final_output(&stdout);
