@@ -63,10 +63,8 @@ fn approve_writes_verdict_with_status_and_registered_at() {
         Value::String(APPROVE.into())
     );
     // registeredAt must be present and non-empty.
-    assert!(
-        !rec.registered_at.is_empty(),
-        "registeredAt must be populated"
-    );
+    let ts = rec.registered_at.as_deref().expect("registeredAt must be populated");
+    assert!(!ts.is_empty(), "registeredAt must be non-empty");
 }
 
 #[test]
