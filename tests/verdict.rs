@@ -282,6 +282,115 @@ fn cli_missing_identity_env_exits_non_zero() {
 }
 
 // ---------------------------------------------------------------------------
+// CLI error-path coverage (tasks.md §7): NotesRequired / GoalNotFound /
+// missing-home. These exercise the bin/verifier_verdict.rs error arms that the
+// happy-path CLI tests above leave uncovered.
+// ---------------------------------------------------------------------------
+
+/// `reject --notes ""` (empty string, non-null) reaches `register_reject` and is
+/// refused with NotesRequired — distinct from omitting `--notes` (which clap rejects
+/// before `run()`). Covers the bin's NotesRequired error arm.
+#[test]
+fn cli_reject_with_empty_notes_string_is_refused() {
+    let (dir, goal_id) = fresh_goal_with_null_verdict(1);
+
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .args(["reject", "--notes", ""])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("reject requires non-empty --notes"));
+
+    // Stored verdict must remain null (no write on refused reject).
+    assert_eq!(
+        read_status(dir.path(), &goal_id, "v1", 1),
+        Value::Null,
+        "empty-string notes must not write a verdict"
+    );
+}
+
+/// An approve against a goal id that does not exist in the store must fail closed with
+/// the bin's GoalNotFound error arm.
+#[test]
+fn cli_approve_for_unknown_goal_id_returns_goal_not_found() {
+    let (dir, _goal_id) = fresh_goal_with_null_verdict(1);
+
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", "goal-does-not-exist")
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .arg("approve")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("goal not found"));
+}
+
+/// With neither VERIFIER_LOOP_HOME nor HOME set, `resolve_home` must fail closed rather
+/// than silently falling back to a non-existent default. Covers the bin's $HOME-unset
+/// error arm and the dirs_home() None branch.
+#[test]
+fn cli_with_home_unset_and_no_home_env_fails_closed() {
+    // Remove VERIFIER_LOOP_HOME and HOME individually (not env_clear) so the
+    // llvm-cov profiling env (LLVM_PROFILE_FILE) is preserved and the spawned
+    // binary's coverage is still merged into the report.
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env_remove("VERIFIER_LOOP_HOME")
+        .env_remove("HOME")
+        .env("VERIFIER_LOOP_GOAL_ID", "any-goal")
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .arg("approve")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "VERIFIER_LOOP_HOME is unset and $HOME is not available",
+        ));
+}
+
+/// With VERIFIER_LOOP_HOME unset but HOME set, the store root falls back to
+/// `$HOME/.verifier-loop`. Covers the bin's `Some(h)` HOME-fallback branch in
+/// `resolve_home` (and the `dirs_home()` body).
+#[test]
+fn cli_with_home_unset_falls_back_to_dot_verifier_loop() {
+    let home = tempfile::tempdir().unwrap();
+    // Plant a goal directly under the $HOME/.verifier-loop default root so the
+    // fallback path is actually resolvable end-to-end.
+    let default_root = home.path().join(".verifier-loop");
+    fs::create_dir_all(&default_root).unwrap();
+    let goal_id = goal::new(&default_root, "build it", None).unwrap();
+    let vdir = verdict::verdict_path(&default_root, &goal_id, "v1", 1);
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
+
+    // VERIFIER_LOOP_HOME deliberately unset; only HOME is provided. env_remove
+    // (not env_clear) preserves the llvm-cov profiling env for the subprocess.
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env_remove("VERIFIER_LOOP_HOME")
+        .env("HOME", home.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .arg("approve")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Verdict registered"));
+
+    // Written via the $HOME/.verifier-loop fallback root.
+    assert_eq!(
+        read_status(&default_root, &goal_id, "v1", 1),
+        Value::String(APPROVE.into()),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Atomic first-write-wins (direct API)
 // ---------------------------------------------------------------------------
 
