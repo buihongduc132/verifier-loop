@@ -187,9 +187,11 @@ fn diff_truncated_with_indicator_when_over_cap() {
 #[test]
 fn snapshot_diff_truncated_flag_and_indicator() {
     let dir = temp_git_repo();
-    // Produce a large diff.
-    fs::write(dir.path().join("big.txt"), &"z".repeat(5_000)).unwrap();
-    run(dir.path(), "git", &["add", "."]);
+    // Produce a large UNSTAGED change on a tracked file so `git diff` emits it.
+    let mut content = fs::read_to_string(dir.path().join("file.txt")).unwrap();
+    content.push_str(&"z".repeat(5_000));
+    fs::write(dir.path().join("file.txt"), content).unwrap();
+    // do NOT stage — git diff (unstaged) must surface it.
 
     let snap = prompt::capture_snapshot(dir.path(), 100).unwrap();
     assert!(snap.truncated, "snapshot over cap must set truncated=true");
