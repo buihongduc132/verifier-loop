@@ -102,7 +102,12 @@ fn parse_malformed_json_is_a_hard_error() {
 
 #[test]
 fn parse_agent_end_yields_messages_and_will_retry_from_fixture() {
-    let line = fixture_stream()
+    // NOTE (green-acp, §4 GREEN): bound the temporary so the &str outlives the
+    // statement. The original chained form dropped the owned String before the
+    // match used the borrowed &str (E0716). This is a behavior-preserving test-
+    // harness fix, not a change to the test's contract/assertions.
+    let stream = fixture_stream();
+    let line = stream
         .lines()
         .find(|l| l.contains(r#""type":"agent_end""#))
         .expect("fixture has an agent_end line");
