@@ -29,14 +29,40 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
 
-/// `verifier-loop` binary built by cargo (target/debug).
+/// Absolute path to a cargo-built binary.
+fn bin(name: &str) -> PathBuf {
+    assert_cmd::cargo::cargo_bin(name)
+}
+
+/// `verifier-loop` binary built by cargo (target/debug) — for assert-style (success) tests.
 fn vl_bin() -> Command {
     Command::cargo_bin("verifier-loop").unwrap()
 }
 
 /// Absolute path to the built `verifier-verdict` binary (baked into the stub script).
 fn verdict_bin_path() -> PathBuf {
-    assert_cmd::cargo::cargo_bin("verifier-verdict")
+    bin("verifier-verdict")
+}
+
+/// Run `verifier-loop` as a raw subprocess and return its full output regardless of exit
+/// status. Used by failure-path tests (assert_cmd's `.unwrap()` asserts success, which we
+/// explicitly want to AVOID when the round is expected to reject).
+fn run_vl_raw(
+    cwd: &Path,
+    home: &Path,
+    stub: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut c = std::process::Command::new(bin("verifier-loop"));
+    c.args(args)
+        .env("VERIFIER_LOOP_HOME", home)
+        .env("VERIFIER_LOOP_BACKEND_CMD", stub)
+        .current_dir(cwd);
+    for (k, v) in extra_env {
+        c.env(k, v);
+    }
+    c.output().expect("verifier-loop subprocess ran")
 }
 
 /// Write `body` to `<dir>/<name>`, chmod 0755, return its absolute path.
@@ -215,15 +241,13 @@ fn new_with_rejecting_stub_exits_non_zero_and_no_hash() {
     let home = dir.path();
     let stub = seed_workdir(home, 1, 1);
 
-    let mut cmd = vl_bin();
-    let out = cmd
-        .arg("NEW")
-        .arg("a goal that will be rejected")
-        .env("VERIFIER_LOOP_HOME", home)
-        .env("VERIFIER_LOOP_BACKEND_CMD", &stub)
-        .env("VERIFIER_LOOP_STUB_VERDICT", "reject")
-        .current_dir(home)
-        .unwrap();
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["NEW", "a goal that will be rejected"],
+        &[("VERIFIER_LOOP_STUB_VERDICT", "reject")],
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -272,15 +296,13 @@ fn resume_after_reject_produces_hash_on_second_round() {
     let stub = seed_workdir(home, 1, 1);
 
     // Round 1: reject.
-    let mut cmd = vl_bin();
-    let out = cmd
-        .arg("NEW")
-        .arg("goal needing a fix round")
-        .env("VERIFIER_LOOP_HOME", home)
-        .env("VERIFIER_LOOP_BACKEND_CMD", &stub)
-        .env("VERIFIER_LOOP_STUB_VERDICT", "reject")
-        .current_dir(home)
-        .unwrap();
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["NEW", "goal needing a fix round"],
+        &[("VERIFIER_LOOP_STUB_VERDICT", "reject")],
+    );
     assert!(!out.status.success(), "round 1 rejects");
 
     let goal_id = fs::read_dir(home.join("goals"))
@@ -298,18 +320,13 @@ fn resume_after_reject_produces_hash_on_second_round() {
     let sig_before = fs::read(gdir.join("signature.json")).unwrap();
 
     // Round 2: approve via RESUME.
-    let mut cmd = vl_bin();
-    let out = cmd
-        .arg("RESUME")
-        .arg(&goal_id)
-        .arg("--fix")
-        .arg("added missing tests")
-        .env("VERIFIER_LOOP_HOME", home)
-        .env("VERIFIER_LOOP_BACKEND_CMD", &stub)
-        // default stub verdict = approve
-        .env_remove("VERIFIER_LOOP_STUB_VERDICT")
-        .current_dir(home)
-        .unwrap();
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["RESUME", &goal_id, "--fix", "added missing tests"],
+        &[],
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -457,14 +474,7 @@ fn new_with_home_pointing_at_a_file_fails_closed() {
 
     let stub = stub_script(dir.path());
 
-    let mut cmd = vl_bin();
-    let out = cmd
-        .arg("NEW")
-        .arg("goal that cannot be created")
-        .env("VERIFIER_LOOP_HOME", &home_file)
-        .env("VERIFIER_LOOP_BACKEND_CMD", &stub)
-        .current_dir(dir.path())
-        .unwrap();
+    let out = run_vl_raw(dir.path(), &home_file, &stub, &["NEW", "goal that cannot be created"], &[]);
     assert!(!out.status.success(), "must fail closed when home is a file");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(hash_from_stdout(&stdout).is_none(), "no hash when store unusable");
