@@ -263,3 +263,15 @@ fn custom_adapter_templates_round_trip_through_render() {
     assert!(rendered_resume.contains("sess-1"));
     assert!(rendered_resume.contains("verify again"));
 }
+
+#[test]
+fn extract_final_output_works_on_real_pi_stream_fixture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("flow/fixtures/acp_pi_verifierdone.jsonl");
+    let stream = std::fs::read_to_string(&path).expect("fixture exists");
+    let sid = acp::extract_sid(&stream).expect("real pi stream has a session id");
+    assert!(sid.starts_with("019f"), "sid looks like a UUID: {sid}");
+    let final_output = acp::extract_final_output(&stream)
+        .expect("real pi stream has an agent_end with assistant text");
+    assert!(final_output.contains("VERIFIER DONE"), "final output captured: {final_output}");
+}
