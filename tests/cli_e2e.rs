@@ -887,3 +887,95 @@ fn new_without_verifier_prompt_file_keeps_baked_in_default_only() {
         "absent verifierPromptFile must keep the baked-in-only render: {prompt}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RED phase (cwd-runtime-source) — config.json dead keys must fail-closed at
+// parse time, and the frozen snapshot's cwd must reflect the RUNTIME cwd
+// (std::env::current_dir), NEVER any config.json value.
+//
+// 6a: jewilo NEW with a `cwd` key in config.json MUST exit non-zero (the key
+//     is rejected; cwd is runtime-derived). Currently FAILS because Config
+//     lacks #[serde(deny_unknown_fields)] so the cwd key is silently ignored
+//     and the run proceeds to exit 0.
+// 6b: snapshot.cwd == the runtime dir from which jewilo was invoked. Already
+//     true today (cwd is sourced from std::env::current_dir), so this is a
+//     regression guard that must STAY green.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn jewilo_new_fails_closed_when_config_has_cwd_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Seed a valid worktree BUT inject the dead `cwd` key (pointing at a wrong path).
+    let stub = seed_workdir_with_config(
+        home,
+        1,
+        1,
+        serde_json::json!({ "cwd": "/nonexistent/wrong/config/path" }),
+        None,
+    );
+    // Append the cwd key by rewriting config.json (seed_workdir_with_config merges extras).
+    // (The helper already inserted it via extra_config above.)
+
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["NEW", "regression: config.json must not carry a cwd key"],
+        &[],
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "jewilo NEW MUST fail-closed when config.json contains a `cwd` key (cwd is runtime-derived). \
+         Got exit {:?}. stderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(
+        stderr.to_lowercase().contains("cwd"),
+        "error message must explain cwd is not a valid config key / is runtime-derived: {stderr}"
+    );
+    // No goal dir / signature written (fail-closed before any side effect).
+    assert!(
+        !any_goal_dir(home),
+        "no goal dir must be created when config.json has a dead `cwd` key"
+    );
+}
+
+#[test]
+fn snapshot_cwd_is_runtime_dir_regardless_of_anything_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let stub = seed_workdir_with_config(home, 1, 1, serde_json::json!({}), None);
+
+    // Invoke jewilo from a SPECIFIC runtime dir (the worktree root = home here).
+    let out = run_vl_raw(home, home, &stub, &["NEW", "regression: snapshot cwd must be runtime"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "NEW exited {}: {stderr}", out.status);
+
+    let goal_id = fs::read_dir(home.join("goals"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    let prompt = fs::read_to_string(
+        home.join("goals")
+            .join(&goal_id)
+            .join("rounds")
+            .join("1")
+            .join("v1")
+            .join("initial-prompt.txt"),
+    )
+    .unwrap();
+
+    // The frozen snapshot embeds the runtime cwd. assert_cmd's current_dir(home) sets it.
+    assert!(
+        prompt.contains(home.to_str().unwrap()),
+        "snapshot cwd must equal the RUNTIME dir ({:?}), not any config value. prompt:\n{prompt}",
+        home
+    );
+}
