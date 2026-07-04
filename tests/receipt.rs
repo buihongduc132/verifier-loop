@@ -337,3 +337,56 @@ fn log_file_is_jsonl_one_object_per_line() {
 fn receipt_log_path(root: &Path, goal_id: &str) -> std::path::PathBuf {
     goal::goal_dir(root, goal_id).join("receipt-log.jsonl")
 }
+
+// ===========================================================================
+// Concurrency: append_receipt under an exclusive lock must serialize concurrent
+// writers so the chain stays well-formed (PR#5 review — TOCTOU race fix).
+// ===========================================================================
+
+#[test]
+fn concurrent_appends_produce_distinct_sequence_numbers() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let (dir, goal_id) = fresh_goal();
+    let root = Arc::new(dir.path().to_path_buf());
+    let goal = Arc::new(goal_id);
+
+    // 8 threads each appending one entry. Without the exclusive lock these would
+    // race on read_head_and_count and likely produce duplicate seq values.
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let root = Arc::clone(&root);
+        let goal = Arc::clone(&goal);
+        handles.push(thread::spawn(move || {
+            let vid = format!("v{}", i + 1);
+            verifier_loop::receipt::append_receipt(
+                &root,
+                &goal,
+                "approve",
+                &vid,
+                "APPROVE",
+                "abcd0123abcd0123",
+            )
+            .expect("append must succeed under lock")
+        }));
+    }
+    let heads: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(heads.len(), 8, "all 8 appends completed");
+
+    // Read the log back. There must be exactly 8 entries, with unique seq values
+    // 1..=8 and a fully-linked chain.
+    let entries = verifier_loop::receipt::read_receipt_log(&root, &goal).unwrap();
+    assert_eq!(entries.len(), 8, "8 lines on disk");
+    let seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec![1, 2, 3, 4, 5, 6, 7, 8], "seq values must be a unique permutation of 1..=8");
+    // Chain integrity holds despite concurrency.
+    verifier_loop::receipt::verify_chain(&entries).expect("chain must be intact");
+
+    // The head returned by the last-completing append is not deterministic across
+    // runs, but read_receipt_head MUST equal the last entry's entryHash.
+    let disk_head = verifier_loop::receipt::read_receipt_head(&root, &goal);
+    assert_eq!(disk_head, entries.last().unwrap().entry_hash, "head tracks the last entry");
+}

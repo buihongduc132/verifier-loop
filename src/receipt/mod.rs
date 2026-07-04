@@ -20,6 +20,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -60,6 +61,11 @@ pub enum ReceiptError {
     Json(#[from] serde_json::Error),
     #[error("chain broken at seq {seq}: {reason}")]
     ChainBreak { seq: u64, reason: String },
+    /// Failed to acquire the exclusive append lock (e.g. held by another process
+    /// for too long, or lock FS not supported). Fail-closed: do not append
+    /// without the lock, since that would race concurrent writers.
+    #[error("receipt log lock error: {0}")]
+    Lock(String),
 }
 
 /// Resolve the on-disk receipt log path: `<root>/goals/<goal_id>/receipt-log.jsonl`.
@@ -85,8 +91,46 @@ pub fn append_receipt(
 ) -> Result<String, ReceiptError> {
     let log_path = receipt_log_path(root, goal_id);
 
-    // 1. Current head + 2. seq = line_count + 1.
-    let (prev_hash, line_count) = read_head_and_count(&log_path);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Open (create if needed) then acquire an EXCLUSIVE lock for the full
+    // read-head + append cycle. This closes the TOCTOU race flagged in PR#5:
+    // without the lock, two concurrent verifier processes could both read the
+    // same (prev_hash, line_count), emit duplicate seq numbers, and break the
+    // chain. The lock is advisory (flock on Unix, LockFileEx on Windows) — it
+    // relies on every writer cooperating via this code path.
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&log_path)?;
+    file.lock_exclusive()
+        .map_err(|e| ReceiptError::Lock(e.to_string()))?;
+
+    // SAFETY: from here until unlock, no other cooperating writer can enter.
+    let result = append_receipt_locked(&file, kind, verdict_id, status, signed_by);
+
+    // Always release the lock, even on error (don't poison the slot).
+    let _ = file.unlock();
+
+    result
+}
+
+/// Append under an already-held exclusive lock. Reads head+count from `file`,
+/// computes the new entry, appends one line, flushes.
+fn append_receipt_locked(
+    file: &std::fs::File,
+    kind: &str,
+    verdict_id: &str,
+    status: &str,
+    signed_by: &str,
+) -> Result<String, ReceiptError> {
+    // 1. Current head + 2. seq = line_count + 1. Errors now propagate (PR#5):
+    // a transient read failure on a non-empty log MUST NOT be swallowed into
+    // ("", 0), which would corrupt the chain by restarting at seq=1.
+    let (prev_hash, line_count) = read_head_and_count(file)?;
     let seq = line_count + 1;
 
     // 3 + 4. Canonical form + entry hash.
@@ -103,16 +147,12 @@ pub fn append_receipt(
         signed_by: signed_by.to_string(),
     };
 
-    // 6. Append one compact JSON line + '\n'.
+    // 6. Append one compact JSON line + '\n'. `file` was opened with append(true)
+    // so the OS positions the write at end-of-file atomically per write(2).
     let line = serde_json::to_string(&entry)?;
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    writeln!(file, "{line}")?;
+    let mut writer = std::io::BufWriter::new(file);
+    writeln!(writer, "{line}")?;
+    writer.flush()?;
 
     // 7. Return the new chain head.
     Ok(entry_hash)
@@ -122,7 +162,14 @@ pub fn append_receipt(
 /// or empty.
 pub fn read_receipt_head(root: &Path, goal_id: &str) -> String {
     let log_path = receipt_log_path(root, goal_id);
-    read_head_and_count(&log_path).0
+    // Open without creating; if absent, head is empty. A transient read error
+    // is logged away here for back-compat (read_receipt_head is a read-only
+    // best-effort helper used by consensus/auditors), but read_receipt_log
+    // (the parsing variant) propagates errors. See PR#5.
+    match std::fs::File::open(&log_path) {
+        Ok(f) => read_head_and_count(&f).map(|(h, _)| h).unwrap_or_default(),
+        Err(_) => String::new(),
+    }
 }
 
 /// Read and parse the entire receipt log, one `ReceiptEntry` per non-empty line.
@@ -192,14 +239,17 @@ fn compute_entry_hash(prev_hash: &str, seq: u64, kind: &str, verdict_id: &str, s
 /// Read the log file and return `(last_entry_hash, non_empty_line_count)`.
 ///
 /// If the file does not exist, returns `("", 0)`.
-fn read_head_and_count(log_path: &Path) -> (String, u64) {
-    if !log_path.exists() {
-        return (String::new(), 0);
-    }
-    let raw = match std::fs::read_to_string(log_path) {
-        Ok(s) => s,
-        Err(_) => return (String::new(), 0),
-    };
+/// I/O errors propagate (PR#5): previously a read failure was silently
+/// mapped to `("", 0)`, which would corrupt the chain by restarting at seq=1.
+fn read_head_and_count(file: &std::fs::File) -> Result<(String, u64), std::io::Error> {
+    let mut raw = String::new();
+    // Seek to start in case the file was opened in append mode (append-mode
+    // writes go to EOF, but reads start at the current offset which may be EOF
+    // on some platforms).
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = file;
+    f.seek(SeekFrom::Start(0))?;
+    f.read_to_string(&mut raw)?;
     let mut count = 0u64;
     let mut head = String::new();
     for line in raw.split('\n') {
@@ -214,5 +264,5 @@ fn read_head_and_count(log_path: &Path) -> (String, u64) {
             }
         }
     }
-    (head, count)
+    Ok((head, count))
 }
