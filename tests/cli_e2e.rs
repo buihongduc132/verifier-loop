@@ -530,3 +530,360 @@ fn new_with_context_records_context_in_goal_json() {
     let goal = read_goal_json(home, &goal_id);
     assert_eq!(goal["context"], "ticket #99");
 }
+
+// ---------------------------------------------------------------------------
+// RED phase (task #10) — verifierPromptFile + minGoalChars config features.
+// Expected to FAIL until the GREEN implementation wires the two new keys.
+//   * (a) verifierPromptFile set -> initial-prompt.txt = <file> + "\n---\n" + baked-in
+//         (raw static text, NO {{var}} expansion).
+//   * (b) the same prepend happens on RESUME.
+//   * (c) empty/whitespace goalText -> non-zero exit, no goal dir.
+//   * (d) minGoalChars > trimmed goalText length -> non-zero exit, no goal dir.
+//   * (e) verifierPromptFile pointing at a MISSING file -> non-zero exit, no goal dir.
+//   * (f) verifierPromptFile absent -> today's baked-in-only behavior (no change).
+// ---------------------------------------------------------------------------
+
+/// Seed a workdir + custom config.json (including the new camelCase keys), returning the
+/// stub script path. `prompt_file_body` writes the file at `custom-prompt.md` inside `home`
+/// when Some; used for (a)/(b) where the file exists and is raw static text.
+fn seed_workdir_with_config(
+    dir: &Path,
+    n: u32,
+    m: u32,
+    extra_config: serde_json::Value,
+    prompt_file_body: Option<&str>,
+) -> PathBuf {
+    let git_ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["init", "-q"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(git_ok, "git init failed in tempdir");
+
+    if let Some(body) = prompt_file_body {
+        fs::write(dir.join("custom-prompt.md"), body).unwrap();
+    }
+
+    let mut cfg = serde_json::json!({
+        "n": n,
+        "m": m,
+        "maxTurn": 3,
+        "backend": "stub",
+        "gitDiffMaxChars": 1000,
+        "verifierTimeoutSec": 10,
+    });
+    if let serde_json::Value::Object(map) = &mut cfg {
+        if let serde_json::Value::Object(extra) = extra_config {
+            for (k, v) in extra {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    fs::write(dir.join("config.json"), cfg.to_string()).unwrap();
+
+    fs::write(dir.join(".gitkeep"), "").unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("-C").arg(dir)
+        .args(["config", "user.email", "test@example.com"])
+        .status();
+    let _ = std::process::Command::new("git")
+        .arg("-C").arg(dir)
+        .args(["config", "user.name", "Test"])
+        .status();
+    let _ = std::process::Command::new("git")
+        .arg("-C").arg(dir)
+        .args(["add", "."])
+        .status();
+    let _ = std::process::Command::new("git")
+        .arg("-C").arg(dir)
+        .args(["commit", "-q", "-m", "seed"])
+        .status();
+
+    stub_script(dir)
+}
+
+/// Returns true if at least one goal dir was created under <home>/goals.
+fn any_goal_dir(home: &Path) -> bool {
+    home.join("goals")
+        .read_dir()
+        .map(|mut it| it.next().is_some())
+        .unwrap_or(false)
+}
+
+#[test]
+fn new_with_verifier_prompt_file_prepends_custom_text_to_initial_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Raw static text with literal {{goalText}} braces — must NOT be expanded.
+    let custom = "CUSTOM VERIFIER PREAMBLE v1\nRemember: {{goalText}} must stay literal.\n";
+    let stub = seed_workdir_with_config(
+        home,
+        1,
+        1,
+        serde_json::json!({ "verifierPromptFile": "custom-prompt.md" }),
+        Some(custom),
+    );
+
+    let mut cmd = vl_bin();
+    let out = cmd
+        .arg("NEW")
+        .arg("implement the verifier-loop CLI")
+        .env("VERIFIER_LOOP_HOME", home)
+        .env("VERIFIER_LOOP_BACKEND_CMD", &stub)
+        .current_dir(home)
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "NEW exited {}: {stderr}", out.status);
+
+    let goal_id = fs::read_dir(home.join("goals"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    let prompt = fs::read_to_string(
+        home.join("goals")
+            .join(&goal_id)
+            .join("rounds")
+            .join("1")
+            .join("v1")
+            .join("initial-prompt.txt"),
+    )
+    .unwrap();
+
+    // (1) Custom file contents come FIRST.
+    assert!(
+        prompt.starts_with(custom),
+        "initial-prompt must start with the custom verifierPromptFile contents; got:\n{prompt}"
+    );
+    // (2) Then a `---` separator, then the baked-in default template.
+    let sep = format!("{custom}---\n");
+    assert!(
+        prompt.starts_with(&sep),
+        "separator `\n---\n` between custom file and baked-in default missing; got:\n{prompt}"
+    );
+    // (3) Raw static text — no {{var}} expansion inside the custom portion.
+    assert!(
+        prompt.contains("{{goalText}}"),
+        "custom file must be RAW STATIC text (no {{var}} expansion): {prompt}"
+    );
+    // (4) The baked-in default policy text is still present after the separator.
+    let baked = verifier_loop::prompt::default_template();
+    // The baked-in embeds the policy line used by the unit tests; assert a stable substring.
+    assert!(
+        prompt.contains("Verifier Detective Policy"),
+        "baked-in policy text must follow the custom preamble: {prompt}"
+    );
+    let _ = baked; // pin the symbol reference (compile-time RED if default_template moves).
+}
+
+#[test]
+fn resume_with_verifier_prompt_file_prepends_custom_text_to_initial_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let custom = "RESUME CUSTOM PREAMBLE\n";
+    let stub = seed_workdir_with_config(
+        home,
+        1,
+        1,
+        serde_json::json!({ "verifierPromptFile": "custom-prompt.md" }),
+        Some(custom),
+    );
+
+    // Round 1: reject, so we can RESUME.
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["NEW", "goal needing a resume round"],
+        &[("VERIFIER_LOOP_STUB_VERDICT", "reject")],
+    );
+    assert!(!out.status.success(), "round 1 must reject");
+
+    let goal_id = fs::read_dir(home.join("goals"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+
+    // Round 2: RESUME (approve).
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["RESUME", &goal_id, "--fix", "added missing tests"],
+        &[],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "RESUME must pass: {stderr}");
+
+    let prompt = fs::read_to_string(
+        home.join("goals")
+            .join(&goal_id)
+            .join("rounds")
+            .join("2")
+            .join("v1")
+            .join("initial-prompt.txt"),
+    )
+    .unwrap();
+
+    assert!(
+        prompt.starts_with(custom),
+        "RESUME initial-prompt must start with custom verifierPromptFile contents: {prompt}"
+    );
+    assert!(
+        prompt.starts_with(&format!("{custom}---\n")),
+        "separator `\n---\n` between custom file and baked-in resume default missing: {prompt}"
+    );
+}
+
+#[test]
+fn new_with_empty_or_whitespace_goal_text_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let stub = seed_workdir_with_config(
+        home,
+        1,
+        1,
+        serde_json::json!({}), // minGoalChars absent -> 0, but empty/whitespace is ALWAYS an error
+        None,
+    );
+
+    let out = run_vl_raw(home, home, &stub, &["NEW", "   \t  "], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "whitespace-only goalText must exit non-zero: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("goal") || stderr.to_lowercase().contains("empty"),
+        "stderr should name the empty-goal failure clearly: {stderr}"
+    );
+    assert!(
+        !any_goal_dir(home),
+        "no goal dir / signature may be written on empty goalText"
+    );
+}
+
+#[test]
+fn new_with_goal_below_min_goal_chars_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let stub = seed_workdir_with_config(
+        home,
+        1,
+        1,
+        serde_json::json!({ "minGoalChars": 50 }),
+        None,
+    );
+
+    // 10-char goalText, well under minGoalChars=50.
+    let out = run_vl_raw(home, home, &stub, &["NEW", "0123456789"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "goalText shorter than minGoalChars must exit non-zero: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("min")
+            || stderr.to_lowercase().contains("short")
+            || stderr.to_lowercase().contains("goal"),
+        "stderr should explain the min-goal-chars failure: {stderr}"
+    );
+    assert!(
+        !any_goal_dir(home),
+        "no goal dir / signature may be written when goalText is below minGoalChars"
+    );
+}
+
+#[test]
+fn new_with_missing_verifier_prompt_file_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Point verifierPromptFile at a path that does NOT exist (and pass NO prompt body so the
+    // file is never written). The run must fail closed with a clear error and write nothing.
+    let stub = seed_workdir_with_config(
+        home,
+        1,
+        1,
+        serde_json::json!({ "verifierPromptFile": "does-not-exist-prompt.md" }),
+        None,
+    );
+
+    let out = run_vl_raw(home, home, &stub, &["NEW", "implement the verifier-loop CLI"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "missing verifierPromptFile must exit non-zero: {stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("prompt") || stderr.to_lowercase().contains("file"),
+        "stderr should name the missing-prompt-file failure: {stderr}"
+    );
+    assert!(
+        !any_goal_dir(home),
+        "no goal dir / signature may be written when verifierPromptFile is missing"
+    );
+}
+
+#[test]
+fn new_without_verifier_prompt_file_keeps_baked_in_default_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // No verifierPromptFile key at all -> today's behavior.
+    let stub = seed_workdir_with_config(
+        home,
+        1,
+        1,
+        serde_json::json!({}),
+        None,
+    );
+
+    let mut cmd = vl_bin();
+    let out = cmd
+        .arg("NEW")
+        .arg("implement the verifier-loop CLI")
+        .env("VERIFIER_LOOP_HOME", home)
+        .env("VERIFIER_LOOP_BACKEND_CMD", &stub)
+        .current_dir(home)
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "NEW exited {}: {stderr}", out.status);
+
+    let goal_id = fs::read_dir(home.join("goals"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    let prompt = fs::read_to_string(
+        home.join("goals")
+            .join(&goal_id)
+            .join("rounds")
+            .join("1")
+            .join("v1")
+            .join("initial-prompt.txt"),
+    )
+    .unwrap();
+
+    // No custom preamble present: the initial prompt must equal exactly the baked-in default
+    // render (no leading custom block, no leading `---`).
+    assert!(
+        !prompt.starts_with("CUSTOM VERIFIER PREAMBLE"),
+        "no custom preamble expected when verifierPromptFile is absent: {prompt}"
+    );
+    // The baked-in default template starts with the identity line referencing verifierId/goalId.
+    assert!(
+        prompt.starts_with("You are verifier"),
+        "absent verifierPromptFile must keep the baked-in-only render: {prompt}"
+    );
+}

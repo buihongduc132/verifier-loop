@@ -42,6 +42,16 @@ pub struct Config {
     /// Per-verifier wall-clock timeout in seconds (D9). A timeout leaves a null verdict.
     #[serde(rename = "verifierTimeoutSec")]
     pub verifier_timeout_sec: u64,
+    /// Optional override file whose contents are prepended (raw, no `{{var}}` expansion)
+    /// to the baked-in verifier prompt for every round (NEW + RESUME). Relative paths
+    /// resolve against the store root; absolute paths are used as-is. Missing/unreadable
+    /// -> fail-closed error (no goal dir / signature written).
+    #[serde(rename = "verifierPromptFile")]
+    pub verifier_prompt_file: Option<String>,
+    /// Minimum trimmed char length for `goalText`. `0` disables the check (default).
+    /// Empty/whitespace-only goalText is ALWAYS an error regardless of this value.
+    #[serde(rename = "minGoalChars", default)]
+    pub min_goal_chars: u64,
 }
 
 impl Default for Config {
@@ -53,6 +63,8 @@ impl Default for Config {
             backend: "pi".to_string(),
             git_diff_max_chars: 10_000,
             verifier_timeout_sec: 1800,
+            verifier_prompt_file: None,
+            min_goal_chars: 0,
         }
     }
 }
@@ -107,6 +119,8 @@ mod tests {
             backend: "hermes".into(),
             git_diff_max_chars: 4_000,
             verifier_timeout_sec: 99,
+            verifier_prompt_file: None,
+            min_goal_chars: 0,
         };
         let j = serde_json::to_string(&cfg).unwrap();
         // camelCase keys must appear verbatim (this is the on-disk contract).

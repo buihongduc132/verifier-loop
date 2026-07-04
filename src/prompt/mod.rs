@@ -140,6 +140,27 @@ pub fn render_resume(
     render_inner(tpl, vars)
 }
 
+/// Prepends a custom verifier-prompt preamble (loaded from `verifierPromptFile`) to an
+/// already-rendered prompt. The custom text is inserted RAW (no `{{var}}` expansion),
+/// followed by a `---` separator line, then the baked-in rendered prompt:
+///
+/// ```text
+/// <custom file contents>---\n<rendered baked-in prompt>
+/// ```
+///
+/// `custom = None` is a no-op (today's baked-in-only behavior is preserved).
+pub fn prepend_custom(rendered: String, custom: Option<&str>) -> String {
+    match custom {
+        // Ensure exactly one newline separates the custom preamble from the `---` rule,
+        // regardless of whether the file ends with a trailing newline.
+        Some(c) => {
+            let nl = if c.ends_with('\n') { "" } else { "\n" };
+            format!("{c}{nl}---\n{rendered}")
+        }
+        None => rendered,
+    }
+}
+
 /// Core template engine: linear scan, `{{name}}` substitution.
 ///
 /// - Known vars resolve from [`PromptVars`].
