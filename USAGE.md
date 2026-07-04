@@ -63,6 +63,48 @@ verifier-verdict reject --notes "<non-empty reason>"
 | `VERIFIER_LOOP_SPAWN_CMD`    | loop           | spawn-only backend command override (takes precedence over `BACKEND_CMD` for spawn).      |
 | `VERIFIER_LOOP_RESUME_CMD`   | loop           | resume-only backend command override (defaults to the spawn command when unset).          |
 
+## Verifier prompt override (`verifierPromptFile`)
+
+`~/.verifier-loop/config.json` may set `verifierPromptFile` to a path whose **raw** contents are
+prepended to the baked-in verifier prompt for every NEW + RESUME round. Relative paths resolve
+against `VERIFIER_LOOP_HOME`; absolute paths used as-is. No `{{var}}` expansion — it is a static
+preamble. Rendered order:
+
+```text
+<custom file contents>
+---
+<baked-in default template (policy + goalText + frozen snapshot)>
+```
+
+If the file is missing/unreadable → fail-closed error (no goal dir written). Absent/null →
+baked-in default only (today's behavior).
+
+Worked example:
+
+```bash
+mkdir -p ~/.verifier-loop/prompts
+cat > ~/.verifier-loop/prompts/verifier_rules.md <<'EOF'
+## Rules
+- you are only to verify; do not do engineering work.
+- 1 wrong thing => REJECT.
+EOF
+# wire it + enforce a minimum goal length:
+cat > ~/.verifier-loop/config.json <<'EOF'
+{
+  "n": 2, "m": 2, "backend": "pi",
+  "verifierPromptFile": "prompts/verifier_rules.md",
+  "minGoalChars": 500
+}
+EOF
+```
+
+## Goal length validation (`minGoalChars`)
+
+`config.json` may set `minGoalChars` (u64, default `0` = disabled). The **trimmed** `goalText`
+char count must be `>= minGoalChars`. Empty/whitespace-only `goalText` is ALWAYS an error
+regardless of `minGoalChars`. Below-threshold → fail-closed error before any goal dir / signature
+is written.
+
 ## Stub / custom backend
 
 Built-in adapters are `pi`, `hermes`, `acpx` (resolved from `config.backend`). Any **other**

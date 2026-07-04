@@ -71,6 +71,8 @@ diff fed to verifiers (tasks.md §2.2). On-disk keys are camelCase; all fields a
 | `backend`            | string  | `"pi"`      | ACP backend key: `pi` \| `hermes` \| `acpx` \| a custom/stub key.           |
 | `gitDiffMaxChars`    | u64     | `10000`     | cap on the frozen `git diff` snapshot handed to each verifier (chars).      |
 | `verifierTimeoutSec` | u64     | `1800`      | per-verifier wall-clock timeout in seconds (D9); a timeout leaves a null verdict. |
+| `verifierPromptFile` | string? | `null`      | optional override file whose **raw** contents are prepended to the baked-in verifier prompt for every NEW + RESUME round. Relative paths resolve against the store root (`VERIFIER_LOOP_HOME`); absolute paths used as-is. Missing/unreadable → fail-closed error (no goal dir written). No `{{var}}` expansion. |
+| `minGoalChars`       | u64     | `0`         | minimum trimmed `goalText` char length. `0` disables the check. Empty/whitespace-only `goalText` is ALWAYS an error regardless. Below-threshold → fail-closed error before any goal dir/signature is written. |
 
 Semantics (fail-closed):
 
