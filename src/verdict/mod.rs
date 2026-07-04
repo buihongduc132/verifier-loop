@@ -306,7 +306,19 @@ pub fn register_signed_approve(
         round,
         secret,
     )?;
-    write_first_verdict(root, goal_id, verifier_id, round, &record)
+    write_first_verdict(root, goal_id, verifier_id, round, &record)?;
+    // Hash-chained receipt append (receipt-log spec): every successful signed write
+    // extends the per-goal chain. Fail-closed if the receipt append itself fails —
+    // a missing chain entry means the completion-hash inputs would be incomplete.
+    append_receipt_for_signed_write(
+        root,
+        goal_id,
+        verifier_id,
+        "approve",
+        "APPROVE",
+        record.pubkey_id.as_deref(),
+    )?;
+    Ok(())
 }
 
 /// Register a SIGNED REJECT verdict with notes (atomic first-write-wins). Empty notes
@@ -332,7 +344,16 @@ pub fn register_signed_reject(
         round,
         secret,
     )?;
-    write_first_verdict(root, goal_id, verifier_id, round, &record)
+    write_first_verdict(root, goal_id, verifier_id, round, &record)?;
+    append_receipt_for_signed_write(
+        root,
+        goal_id,
+        verifier_id,
+        "reject",
+        "REJECT",
+        record.pubkey_id.as_deref(),
+    )?;
+    Ok(())
 }
 
 /// Build a signed `VerdictRecord` bound to the slot's pinned verifying key.
@@ -386,6 +407,25 @@ fn build_signed_record(
         signature: Some(hex::encode(&sig)),
         pubkey_id: Some(crypto::pubkey_id(&pinned_vk)),
     })
+}
+
+/// Append a hash-chained receipt entry after a successful signed verdict write.
+///
+/// Fail-closed: if the receipt append errors (disk full, parse error), the error is
+/// surfaced to the caller — the verdict itself is already durably written, but the
+/// completion hash for the goal cannot be considered complete without the chain entry.
+fn append_receipt_for_signed_write(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    kind: &str,
+    status: &str,
+    signed_by: Option<&str>,
+) -> Result<(), VerdictError> {
+    let signed_by = signed_by.unwrap_or("");
+    crate::receipt::append_receipt(root, goal_id, kind, verifier_id, status, signed_by)
+        .map_err(|e| VerdictError::ReceiptFailed(e.to_string()))?;
+    Ok(())
 }
 
 /// Register an (unsigned) APPROVE verdict in the given slot (atomic first-write-wins).
@@ -529,6 +569,11 @@ pub enum VerdictError {
     /// registration MODIFIED spec, secret-required gate).
     #[error("unauthenticated: {0}")]
     Unauthenticated(String),
+    /// The hash-chained receipt log append failed after the verdict was written.
+    /// The verdict is durable but the goal's completion hash cannot be considered
+    /// complete without the chain entry (receipt-log spec).
+    #[error("receipt log append failed: {0}")]
+    ReceiptFailed(String),
 }
 
 #[cfg(test)]
