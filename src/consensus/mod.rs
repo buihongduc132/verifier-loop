@@ -360,11 +360,15 @@ mod tests {
                 status: VerdictStatus::Approve,
                 notes: None,
                 registered_at: Some("t".into()),
+                signature: None,
+                pubkey_id: None,
             }),
             ("v2".to_string(), VerdictRecord {
                 status: VerdictStatus::Reject,
                 notes: Some("needs work".into()),
                 registered_at: Some("t".into()),
+                signature: None,
+                pubkey_id: None,
             }),
         ];
         let r = evaluate(&verdicts, 2, 2);

@@ -38,6 +38,8 @@ fn approve_at(iso: &str) -> verdict::VerdictRecord {
         status: verdict::VerdictStatus::Approve,
         notes: None,
         registered_at: Some(iso.to_string()),
+        signature: None,
+        pubkey_id: None,
     }
 }
 
@@ -46,6 +48,8 @@ fn reject_at(notes: &str, iso: &str) -> verdict::VerdictRecord {
         status: verdict::VerdictStatus::Reject,
         notes: Some(notes.to_string()),
         registered_at: Some(iso.to_string()),
+        signature: None,
+        pubkey_id: None,
     }
 }
 
@@ -54,6 +58,8 @@ fn null_verdict() -> verdict::VerdictRecord {
         status: verdict::VerdictStatus::Null,
         notes: None,
         registered_at: None,
+        signature: None,
+        pubkey_id: None,
     }
 }
 
@@ -356,6 +362,8 @@ fn tamper_verdict_notes_invalidates_full_digest() {
         status: verdict::VerdictStatus::Approve,
         notes: Some("injected".to_string()),
         registered_at: Some("1999-01-01T00:00:00Z".to_string()),
+        signature: None,
+        pubkey_id: None,
     };
     fs::write(
         verdict::verdict_path(dir.path(), &goal_id, "v1", 1).join(verdict::VERDICT_FILE),
