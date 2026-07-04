@@ -59,9 +59,53 @@ verifier-verdict reject --notes "<non-empty reason>"
 | `VERIFIER_LOOP_GOAL_ID`      | verifier       | goal slot to write into (env wins; no arg override).                                      |
 | `VERIFIER_LOOP_VERIFIER_ID`  | verifier       | verifier slot id (`v1`, `v2`, …).                                                         |
 | `VERIFIER_LOOP_ROUND`        | verifier       | round number (u32).                                                                       |
+| `VERIFIER_LOOP_VERIFIER_SECRET` | verifier    | hex-encoded Ed25519 signing key for this V\* slot (see [Signed-regime secret](#verifier_loop_verifier_secret--signed-regime-secret) below). |
 | `VERIFIER_LOOP_BACKEND_CMD`  | loop           | stub/custom backend command override, used for both spawn and resume.                     |
 | `VERIFIER_LOOP_SPAWN_CMD`    | loop           | spawn-only backend command override (takes precedence over `BACKEND_CMD` for spawn).      |
 | `VERIFIER_LOOP_RESUME_CMD`   | loop           | resume-only backend command override (defaults to the spawn command when unset).          |
+
+## `VERIFIER_LOOP_VERIFIER_SECRET` — signed-regime secret
+
+`VERIFIER_LOOP_VERIFIER_SECRET` is the **hex-encoded Ed25519 signing key** injected by the
+spawn layer (`jewilo`) into each V\* process at spawn time. It is the per-verifier credential
+introduced by the `add-verifier-tamper-hardening` change (spec: `verifier-identity`,
+`signed-verdict-record`, `verdict-registration`).
+
+- **Injected automatically by spawn.** `jewilo` mints a fresh Ed25519 keypair per V\* slot,
+  writes only the **public** half to `<slot>/verifier-pubkey.json` (`{pubkey, mintedAt}`),
+  and injects the **signing** half into the V\* process env as `VERIFIER_LOOP_VERIFIER_SECRET`.
+  The signing key is **never** persisted to disk by `jewilo` or `jewije`.
+- **Required for the signed registration path.** `jewije approve` / `jewije reject` derive the
+  slot's signing key from `VERIFIER_LOOP_VERIFIER_SECRET` and sign the verdict record over the
+  canonical bytes `{status, notes, registeredAt, goalId, verifierId, round}`. The written
+  `verdict.json` then carries `signature` (128-hex Ed25519) and `pubkeyId` (first 16 hex of the
+  pinned pubkey).
+- **Fail-closed when absent or mismatched.** If `VERIFIER_LOOP_VERIFIER_SECRET` is unset/empty,
+  or its derived pubkey does not match the slot's pinned `verifier-pubkey.json`, `jewije` exits
+  non-zero with `VerdictError::Unauthenticated` and writes **no** verdict and **no** receipt-log
+  entry. The slot is left untouched.
+- **BREAKING for direct/manual `jewije` invocations.** Pre-`add-verifier-tamper-hardening`
+  workflows that called `jewije` directly (e.g. from a hand-rolled spawn script or an ad-hoc
+  shell) now fail. To register a verdict manually you must obtain the slot's signing secret
+  (the same value `jewilo` would have injected) and export it:
+  ```sh
+  VERIFIER_LOOP_HOME=/path/to/store \
+  VERIFIER_LOOP_GOAL_ID=<id> \
+  VERIFIER_LOOP_VERIFIER_ID=v1 \
+  VERIFIER_LOOP_ROUND=1 \
+  VERIFIER_LOOP_VERIFIER_SECRET=<64-hex-ed25519-signing-key> \
+    jewije approve
+  ```
+  The recommended path is to drive V\* via `jewilo` so the secret is minted and injected
+  automatically; manual invocation is only for debugging/recovery.
+- **Pinned pubkey derivation.** `verifier-pubkey.json` (per slot) is the public half of this
+  secret, written at spawn. Consensus evaluation verifies each APPROVE verdict's signature
+  against this pinned pubkey before counting it toward n/m; a verdict signed by any other key
+  (including a fresh keypair a forger mints after the fact) is treated as untrusted and named
+  in the rejection summary.
+
+For the threat model (what this secret does and does **not** prevent on a single host), see
+[`THREAT-MODEL.md`](THREAT-MODEL.md).
 
 ## Verifier prompt override (`verifierPromptFile`)
 

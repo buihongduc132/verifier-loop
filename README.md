@@ -156,3 +156,44 @@ where  goalSignature = SHA256(salt + goalText + createdAt)
 ```bash
 cargo llvm-cov --fail-under-lines 80 --html    # report at target/llvm-cov/html/index.html
 ```
+
+## Threat model
+
+The `add-verifier-tamper-hardening` change closes three in-process attack paths against an
+adversary (Mallory) who has filesystem write access to the store root (`VERIFIER_LOOP_HOME`,
+default `~/.verifier-loop/`) but **not** the per-verifier signing secret:
+
+1. **Identity spoofing** — calling `jewije approve` against another V\*'s slot by faking the
+   identity env vars. **Closed by:** `jewije` now requires `VERIFIER_LOOP_VERIFIER_SECRET`
+   (hex Ed25519 signing key, injected at spawn) whose pubkey matches the slot's pinned
+   `verifier-pubkey.json`; mismatch → `VerdictError::Unauthenticated`, no verdict written.
+2. **Null-slot first-fill** — pre-filling a `{status: null}` placeholder slot with APPROVE
+   before the legitimate V\* verdicts (pre-emptive consensus). **Closed by:** first-fill of
+   a null slot requires a signature from the pinned key; the null placeholder is never
+   signed and never counts toward n/m.
+3. **In-flight verdict edit** — editing `status`/`notes`/`registeredAt` of an already-registered
+   signed verdict before consensus eval. **Closed by:** the verdict signature is over the
+   canonical record bytes; any edit invalidates the signature, consensus treats the verdict
+   as untrusted (fail-closed, not merely post-hoc-auditable), and the rejection summary names
+   the slot.
+
+Supporting mechanisms: per-verifier Ed25519 keypairs minted at spawn (`verifier-identity`),
+pinned pubkeys (mtime-earliest entry authoritative), signed verdict records (`signed-verdict-record`),
+and an append-only hash-chained receipt log whose head is folded into the completion hash
+(`receipt-log` + `completion-proof`). Post-completion edits to `goalText` or to the receipt
+log are still detectable on audit recompute.
+
+### Fundamental same-box limit
+
+**A process with write access to `~/.verifier-loop/` AND the ability to read a V\*'s env
+(`VERIFIER_LOOP_VERIFIER_SECRET`) can still forge that V\*'s verdict** — the signature will
+verify against the pinned pubkey and forensics will look clean. The per-verifier secret is a
+**deterrent + detection layer**, not a prevention guarantee. True forgery prevention requires
+running each V\* out-of-process on a separate host where A cannot read V\*'s env and cannot
+write V\*'s slot dir; the pinned-pubkey + signed-verdict + receipt-log design is exactly what
+makes that out-of-process verification meaningful.
+
+➡️ **Full model, attacker matrix, and the out-of-process V\* requirement:**
+[`THREAT-MODEL.md`](THREAT-MODEL.md). (Specs:
+[`openspec/changes/add-verifier-tamper-hardening/specs/`](openspec/changes/add-verifier-tamper-hardening/specs/);
+design + risks: [`design.md`](openspec/changes/add-verifier-tamper-hardening/design.md).)
