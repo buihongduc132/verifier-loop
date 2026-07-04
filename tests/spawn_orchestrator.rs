@@ -614,8 +614,9 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
         })
         .collect();
 
-    // Sanity: the existing (head-less) compute_hash reproduces the stored digest.
-    // This proves our reconstructed inputs are correct. (Should pass today.)
+    // Sanity: compute_hash (which now folds in the receipt head) reproduces the stored
+    // digest. This proves our reconstructed inputs are correct.
+    let head = receipt::read_receipt_head(home, &goal_id);
     let without_head = consensus::compute_hash(
         &salt,
         &goal_id,
@@ -623,17 +624,17 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
         round,
         &matching,
         &matched_at,
+        &head,
     );
     assert_eq!(
         without_head.full_digest(),
         stored_full,
-        "sanity: head-less recompute matches stored digest (inputs reconstructed correctly)"
+        "sanity: recompute matches stored digest (inputs reconstructed correctly)"
     );
 
     // The NEW contract: the digest must fold in the receipt head. Recompute WITH the
     // head appended to the canonical input string and assert it equals the stored
-    // digest. Today this FAILS (head not yet in inputs) → RED.
-    let head = receipt::read_receipt_head(home, &goal_id);
+    // digest.
     assert!(!head.is_empty(), "receipt head is non-empty after m=2 approves");
 
     // Mirror consensus::compute_hash's input assembly, then append the head.
