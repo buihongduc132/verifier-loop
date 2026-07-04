@@ -402,3 +402,365 @@ fn first_write_wins_is_atomic_across_two_approves() {
     let err = verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap_err();
     assert!(matches!(err, verdict::VerdictError::AlreadyFinal));
 }
+
+// ===========================================================================
+// Pinned verifier pubkey (verifier-identity spec)
+// RED phase for add-verifier-tamper-hardening §2 (tasks.md). These tests demand
+// the new `mint_and_pin_pubkey` / `read_pinned_pubkey` / `VerifierPubkeyFile` /
+// `pubkey_path` API on `verifier_loop::verdict`. They will FAIL TO COMPILE until
+// the GREEN team adds that API — that IS RED.
+// ===========================================================================
+
+use verifier_loop::crypto;
+use verifier_loop::verdict::VerifierPubkeyFile;
+
+/// Mint a keypair into a fresh goal's v1 slot and return (TempDir, goal_id) so each
+/// test below has an isolated store. Mirrors `fresh_goal_with_null_verdict` but does
+/// NOT pre-create a verdict.json (the pubkey mint must succeed on an empty slot).
+fn fresh_goal_for_pubkey() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let goal_id = goal::new(dir.path(), "build it", None).unwrap();
+    (dir, goal_id)
+}
+
+#[test]
+fn mint_and_pin_pubkey_writes_file_before_returning() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1)
+        .expect("mint_and_pin_pubkey must succeed on a fresh slot");
+
+    // File MUST exist at the pinned location.
+    let file = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join("verifier-pubkey.json");
+    assert!(file.exists(), "pinned pubkey file must exist at {file:?}");
+
+    // On-disk schema: {pubkey: <64 hex>, mintedAt: <iso>}.
+    let raw: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    let pubkey_hex = raw["pubkey"].as_str().expect("pubkey field must be a hex string");
+    assert_eq!(
+        pubkey_hex.len(),
+        64,
+        "pubkey must be the 64-hex encoding of a 32-byte Ed25519 verifying key"
+    );
+    assert!(
+        hex::decode(pubkey_hex).is_ok(),
+        "pubkey must be valid hex"
+    );
+    let minted_at = raw["mintedAt"].as_str().expect("mintedAt must be a string");
+    assert!(!minted_at.is_empty(), "mintedAt must be populated");
+
+    // Returned signing key's verifying_key() MUST equal the pinned pubkey bytes.
+    let pinned_vk = crypto::verifying_key_from_hex(pubkey_hex).unwrap();
+    let returned_vk = sk.verifying_key();
+    assert_eq!(
+        crypto::verifying_key_to_hex(&returned_vk),
+        pubkey_hex,
+        "returned signing key must correspond to the pinned verifying key"
+    );
+    assert_eq!(
+        crypto::verifying_key_to_hex(&pinned_vk),
+        crypto::verifying_key_to_hex(&returned_vk),
+    );
+}
+
+#[test]
+fn mint_and_pin_pubkey_second_call_on_same_slot_fails() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+
+    let _first = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let second = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1);
+
+    let err = second.expect_err("second mint on the same slot must fail closed (immutable)");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("pin") || msg.contains("exists") || msg.contains("final"),
+        "second-mint error must name the immutability reason; got: {err}"
+    );
+}
+
+#[test]
+fn mint_and_pin_pubkey_distinct_keys_across_verifiers() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+
+    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v2", 1).unwrap();
+
+    let read = |vid: &str| -> String {
+        let file = verdict::pubkey_path(dir.path(), &goal_id, vid, 1).join("verifier-pubkey.json");
+        let raw: VerifierPubkeyFile = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        raw.pubkey
+    };
+
+    let pk_v1 = read("v1");
+    let pk_v2 = read("v2");
+    assert_ne!(
+        pk_v1, pk_v2,
+        "distinct verifier slots MUST mint distinct keypairs (fresh per slot)"
+    );
+}
+
+#[test]
+fn read_pinned_pubkey_returns_none_when_absent() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+
+    let result = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+        .expect("read on a slot without a pinned pubkey must be Ok(None), not an error");
+    assert!(
+        result.is_none(),
+        "absent verifier-pubkey.json must resolve to None (caller treats as Unauthenticated)"
+    );
+}
+
+#[test]
+fn read_pinned_pubkey_returns_some_when_present() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let expected_hex = crypto::verifying_key_to_hex(&sk.verifying_key());
+
+    let key = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+        .expect("read on a minted slot must be Ok")
+        .expect("minted slot must read back Some(key)");
+
+    assert_eq!(
+        crypto::verifying_key_to_hex(&key),
+        expected_hex,
+        "read_pinned_pubkey must return exactly the key that was minted"
+    );
+}
+
+// ===========================================================================
+// Signed verdict record (signed-verdict-record spec)
+// RED phase for add-verifier-tamper-hardening §3. Demands `signature` + `pubkeyId`
+// fields on `VerdictRecord` and a `verify_record` function. FAILS TO COMPILE until
+// the GREEN team adds them — that IS RED.
+// ===========================================================================
+
+/// Build a genuine signed APPROVE record using the given signing key. The signature
+/// covers the canonical bytes of {status:APPROVE, notes:None, registeredAt, goalId,
+/// verifierId, round} exactly as the GREEN team's `verify_record` will recompute.
+fn signed_approve_record(
+    sk: &crypto::SigningKey,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    registered_at: &str,
+) -> verdict::VerdictRecord {
+    let vk = sk.verifying_key();
+    let canon = crypto::canonical_record_bytes(
+        "APPROVE",
+        None,
+        registered_at,
+        goal_id,
+        verifier_id,
+        round,
+    );
+    let sig = crypto::sign(&canon, sk);
+    verdict::VerdictRecord {
+        status: verdict::VerdictStatus::Approve,
+        notes: None,
+        registered_at: Some(registered_at.to_string()),
+        signature: Some(hex::encode(&sig)),
+        pubkey_id: Some(crypto::pubkey_id(&vk)),
+    }
+}
+
+#[test]
+fn approve_record_carries_signature_and_pubkey_id() {
+    // Hex shapes only — correctness of the signature is exercised by verify_record tests.
+    let sig_128 = "a".repeat(128);
+    let pub_id_16 = "b".repeat(16);
+
+    let rec = verdict::VerdictRecord {
+        status: verdict::VerdictStatus::Approve,
+        notes: None,
+        registered_at: Some("2026-07-04T12:00:00+00:00".to_string()),
+        signature: Some(sig_128.clone()),
+        pubkey_id: Some(pub_id_16.clone()),
+    };
+
+    let j = serde_json::to_string(&rec).unwrap();
+    assert!(
+        j.contains(&format!("\"signature\":\"{sig_128}\"")),
+        "serialized record must carry signature verbatim: {j}"
+    );
+    assert!(
+        j.contains(&format!("\"pubkeyId\":\"{pub_id_16}\"")),
+        "serialized record must carry pubkeyId (camelCase) verbatim: {j}"
+    );
+}
+
+#[test]
+fn null_placeholder_has_no_signature_fields() {
+    let rec = verdict::VerdictRecord {
+        status: verdict::VerdictStatus::Null,
+        notes: None,
+        registered_at: None,
+        signature: None,
+        pubkey_id: None,
+    };
+
+    let j = serde_json::to_string(&rec).unwrap();
+    assert!(!j.contains("signature"), "null placeholder must omit signature: {j}");
+    assert!(!j.contains("pubkeyId"), "null placeholder must omit pubkeyId: {j}");
+    assert!(!j.contains("pubkey_id"), "no snake_case leak: {j}");
+}
+
+#[test]
+fn verify_record_accepts_genuine_signature() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let vk = sk.verifying_key();
+
+    let iso = "2026-07-04T12:00:00+00:00";
+    let rec = signed_approve_record(&sk, &goal_id, "v1", 1, iso);
+
+    verdict::verify_record(&rec, Some(&vk), &goal_id, "v1", 1)
+        .expect("a genuine signature over the canonical bytes must verify Ok(())");
+}
+
+#[test]
+fn verify_record_rejects_edited_status() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let vk = sk.verifying_key();
+
+    let iso = "2026-07-04T12:00:00+00:00";
+    let mut rec = signed_approve_record(&sk, &goal_id, "v1", 1, iso);
+    // Tamper: flip status to REJECT without re-signing.
+    rec.status = verdict::VerdictStatus::Reject;
+
+    let err = verdict::verify_record(&rec, Some(&vk), &goal_id, "v1", 1)
+        .expect_err("edited status must invalidate the signature");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("bad") || msg.contains("signature") || msg.contains("mismatch"),
+        "edited-status error must be BadSignature-shaped; got: {err}"
+    );
+}
+
+#[test]
+fn verify_record_rejects_edited_notes() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let vk = sk.verifying_key();
+
+    let iso = "2026-07-04T12:00:00+00:00";
+    let mut rec = signed_approve_record(&sk, &goal_id, "v1", 1, iso);
+    // Tamper: add notes after signing.
+    rec.notes = Some("late addition".to_string());
+
+    let err = verdict::verify_record(&rec, Some(&vk), &goal_id, "v1", 1)
+        .expect_err("added notes must invalidate the signature");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("bad") || msg.contains("signature") || msg.contains("mismatch"),
+        "edited-notes error must be BadSignature-shaped; got: {err}"
+    );
+}
+
+#[test]
+fn verify_record_rejects_edited_registered_at() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let vk = sk.verifying_key();
+
+    let iso = "2026-07-04T12:00:00+00:00";
+    let mut rec = signed_approve_record(&sk, &goal_id, "v1", 1, iso);
+    // Tamper: flip registered_at after signing.
+    rec.registered_at = Some("2026-07-04T23:59:59+00:00".to_string());
+
+    let err = verdict::verify_record(&rec, Some(&vk), &goal_id, "v1", 1)
+        .expect_err("edited registeredAt must invalidate the signature");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("bad") || msg.contains("signature") || msg.contains("mismatch"),
+        "edited-registeredAt error must be BadSignature-shaped; got: {err}"
+    );
+}
+
+#[test]
+fn verify_record_rejects_identity_mismatch() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let vk = sk.verifying_key();
+
+    let iso = "2026-07-04T12:00:00+00:00";
+    // Signed for v1 — but presented as v2's verdict.
+    let rec = signed_approve_record(&sk, &goal_id, "v1", 1, iso);
+
+    let err = verdict::verify_record(&rec, Some(&vk), &goal_id, "v2", 1)
+        .expect_err("identity mismatch (verifierId) must invalidate the signature");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("bad") || msg.contains("signature") || msg.contains("mismatch"),
+        "identity-mismatch error must be BadSignature-shaped; got: {err}"
+    );
+}
+
+#[test]
+fn verify_record_wrong_pubkey_when_pinned_missing() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+
+    let iso = "2026-07-04T12:00:00+00:00";
+    let rec = signed_approve_record(&sk, &goal_id, "v1", 1, iso);
+
+    // No pinned pubkey supplied -> cannot be trusted even though the signature is valid.
+    let err = verdict::verify_record(&rec, None, &goal_id, "v1", 1)
+        .expect_err("missing pinned pubkey must fail closed");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("pubkey") || msg.contains("untrusted") || msg.contains("pin"),
+        "missing-pinned-pubkey error must name pubkey/untrusted/pin; got: {err}"
+    );
+}
+
+#[test]
+fn verify_record_wrong_pubkey_when_pubkey_id_mismatch() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk_a = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let vk_a = sk_a.verifying_key();
+
+    // A different keypair whose pubkeyId is NOT vk_a's.
+    let other = crypto::generate_keypair();
+    let vk_b = other.verifying;
+
+    let iso = "2026-07-04T12:00:00+00:00";
+    let mut rec = signed_approve_record(&sk_a, &goal_id, "v1", 1, iso);
+    // Lie about the pubkeyId: claim it belongs to vk_b while the signature is vk_a's.
+    rec.pubkey_id = Some(crypto::pubkey_id(&vk_b));
+
+    let err = verdict::verify_record(&rec, Some(&vk_a), &goal_id, "v1", 1)
+        .expect_err("pubkeyId mismatch must fail closed even if the signature itself is valid");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("pubkey") || msg.contains("wrong") || msg.contains("mismatch"),
+        "pubkeyId-mismatch error must name the wrong-pubkey reason; got: {err}"
+    );
+}
+
+#[test]
+fn verify_record_untrusted_for_null_status() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let vk = sk.verifying_key();
+
+    // A null-status record, even with a signature attached, is non-matching by spec.
+    let rec = verdict::VerdictRecord {
+        status: verdict::VerdictStatus::Null,
+        notes: None,
+        registered_at: None,
+        signature: Some("a".repeat(128)),
+        pubkey_id: Some(crypto::pubkey_id(&vk)),
+    };
+
+    let err = verdict::verify_record(&rec, Some(&vk), &goal_id, "v1", 1)
+        .expect_err("null-status record must NOT verify even if a signature is set");
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("untrusted") || msg.contains("null") || msg.contains("not") || msg.contains("status"),
+        "null-status error must be Untrusted-shaped; got: {err}"
+    );
+}
