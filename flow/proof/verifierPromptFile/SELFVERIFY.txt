@@ -1,0 +1,26 @@
+SELF-VERIFY: verifierPromptFile override
+goalId: 048a4a3d-efb8-4e8a-ab5d-6663cd7c3d40
+hash: 070426-94c3bc31
+
+{
+  "hash": "070426-94c3bc31",
+  "fullDigest": "94c3bc31f04a5df2f8ef6497925e1782fa10dea5f294e71cf42fff80e1a0f80f",
+  "goalId": "048a4a3d-efb8-4e8a-ab5d-6663cd7c3d40",
+  "roundNumber": 1,
+  "matchedAt": "2026-07-04T02:09:07.284955256+00:00",
+  "matchingVerdicts": [
+    {
+      "verifierId": "v1",
+      "registeredAt": "2026-07-04T02:09:07.284111338+00:00"
+    }
+  ]
+}
+=== initial-prompt.txt head ===
+## Rules
+- must use the verify hat immediately whenever you are first invoked. 
+- you are only to verify , do not doing any engineering works. 
+- after through understand the goal / requirement , if it roughly need >8 hours of dev effort , then split it to roughly 4 hours works , then spawn teams in fork mode , invoke team workflow , delegate them to find out the problem , then you review their finding , then double check it again , then provider final verdict. 
+REMEMBER: even if 1 single WRONG things , verdict: REJECT; 
+---
+You are verifier v1 for goal 048a4a3d-efb8-4e8a-ab5d-6663cd7c3d40.
+
