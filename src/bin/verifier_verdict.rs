@@ -22,6 +22,11 @@ const ENV_HOME: &str = "VERIFIER_LOOP_HOME";
 const ENV_GOAL_ID: &str = "VERIFIER_LOOP_GOAL_ID";
 const ENV_VERIFIER_ID: &str = "VERIFIER_LOOP_VERIFIER_ID";
 const ENV_ROUND: &str = "VERIFIER_LOOP_ROUND";
+/// Verifier signing secret (verdict-registration MODIFIED spec). A 64-hex Ed25519
+/// signing key whose deriving pubkey must match the slot's pinned verifier-pubkey.json.
+/// Required when the slot has a pinned pubkey; refused (Unauthenticated) if supplied
+/// for a slot without one.
+const ENV_VERIFIER_SECRET: &str = "VERIFIER_LOOP_VERIFIER_SECRET";
 const DEFAULT_HOME_DIR: &str = ".verifier-loop";
 
 #[derive(Debug, Parser)]
@@ -67,19 +72,64 @@ fn run(cli: &Cli) -> Result<(), String> {
     let verifier_id = resolve_required(ENV_VERIFIER_ID, "verifier id")?;
     let round = resolve_round()?;
 
-    let result = match cli.command {
-        Cmd::Approve => verdict::register_approve(&root, &goal_id, &verifier_id, round),
-        Cmd::Reject { ref notes } => {
-            verdict::register_reject(&root, &goal_id, &verifier_id, round, notes)
-        }
+    // Resolve the optional signing secret. A missing/empty secret is legal only for
+    // slots in the legacy (unsigned) regime — see the regime gate below.
+    let secret_hex = std::env::var(ENV_VERIFIER_SECRET)
+        .ok()
+        .filter(|s| !s.is_empty());
+    let signing_key = match secret_hex.as_deref() {
+        Some(h) => Some(
+            verifier_loop::crypto::signing_key_from_hex(h)
+                .map_err(|e| format!("unauthenticated: invalid verifier secret: {e}"))?,
+        ),
+        None => None,
     };
 
-    result.map_err(|e| match e {
+    // Regime gate: the slot's pinned verifier pubkey presence determines whether a
+    // secret is required. Pinned + no secret, or secret + no pin, are both
+    // Unauthenticated (fail closed). Both absent → legacy unsigned path. Both present
+    // (and matching) → signed path.
+    let pinned = verdict::read_pinned_pubkey(&root, &goal_id, &verifier_id, round)
+        .map_err(|e| e.to_string())?;
+
+    let result = match (&cli.command, pinned, signing_key.as_ref()) {
+        (Cmd::Approve, None, None) => {
+            verdict::register_approve(&root, &goal_id, &verifier_id, round)
+        }
+        (Cmd::Approve, Some(_), Some(sk)) => {
+            verdict::register_signed_approve(&root, &goal_id, &verifier_id, round, sk)
+        }
+        (Cmd::Approve, _, None) => Err(VerdictError::Unauthenticated(
+            "verifier secret missing; set $VERIFIER_LOOP_VERIFIER_SECRET".to_string(),
+        )),
+        (Cmd::Approve, None, Some(_)) => Err(VerdictError::Unauthenticated(
+            "no pinned verifier pubkey for this slot".to_string(),
+        )),
+        (Cmd::Reject { ref notes }, None, None) => {
+            verdict::register_reject(&root, &goal_id, &verifier_id, round, notes)
+        }
+        (Cmd::Reject { ref notes }, Some(_), Some(sk)) => {
+            verdict::register_signed_reject(&root, &goal_id, &verifier_id, round, notes, sk)
+        }
+        (Cmd::Reject { .. }, _, None) => Err(VerdictError::Unauthenticated(
+            "verifier secret missing; set $VERIFIER_LOOP_VERIFIER_SECRET".to_string(),
+        )),
+        (Cmd::Reject { .. }, None, Some(_)) => Err(VerdictError::Unauthenticated(
+            "no pinned verifier pubkey for this slot".to_string(),
+        )),
+    };
+
+    result.map_err(map_verdict_error)
+}
+
+/// Map a `VerdictError` to a user-facing stderr string. Each arm fails closed.
+fn map_verdict_error(e: VerdictError) -> String {
+    match e {
         VerdictError::NotesRequired => "reject requires non-empty --notes".to_string(),
         VerdictError::AlreadyFinal => "verdict is already final; cannot be overwritten".to_string(),
         VerdictError::GoalNotFound => format!("goal not found: {e}"),
         other => other.to_string(),
-    })
+    }
 }
 
 /// Resolve the store root from `VERIFIER_LOOP_HOME` or the default `~/.verifier-loop`.

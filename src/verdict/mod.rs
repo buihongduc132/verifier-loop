@@ -281,7 +281,117 @@ pub fn verify_record(
     Ok(())
 }
 
-/// Register an APPROVE verdict in the given slot (atomic first-write-wins).
+/// Register a SIGNED APPROVE verdict bound to the slot's pinned verifier pubkey
+/// (verdict-registration MODIFIED spec — secret-required gate).
+///
+/// Fail-closed chain:
+///   1. No pinned pubkey for the slot → `Unauthenticated` (no trust anchor).
+///   2. The secret's deriving verifying key does not equal the pinned key →
+///      `Unauthenticated`.
+///   3. Otherwise: sign the canonical record bytes and write atomically
+///      (first-write-wins; an existing non-null verdict yields `AlreadyFinal`).
+pub fn register_signed_approve(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    secret: &crypto::SigningKey,
+) -> Result<(), VerdictError> {
+    let record = build_signed_record(
+        VerdictStatus::Approve,
+        None,
+        root,
+        goal_id,
+        verifier_id,
+        round,
+        secret,
+    )?;
+    write_first_verdict(root, goal_id, verifier_id, round, &record)
+}
+
+/// Register a SIGNED REJECT verdict with notes (atomic first-write-wins). Empty notes
+/// are refused with `NotesRequired` exactly like the unsigned path.
+pub fn register_signed_reject(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    notes: &str,
+    secret: &crypto::SigningKey,
+) -> Result<(), VerdictError> {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return Err(VerdictError::NotesRequired);
+    }
+    let record = build_signed_record(
+        VerdictStatus::Reject,
+        Some(trimmed),
+        root,
+        goal_id,
+        verifier_id,
+        round,
+        secret,
+    )?;
+    write_first_verdict(root, goal_id, verifier_id, round, &record)
+}
+
+/// Build a signed `VerdictRecord` bound to the slot's pinned verifying key.
+///
+/// Shared by `register_signed_approve` / `register_signed_reject`. Performs the
+/// secret/pinned-pubkey authentication gate, then signs the canonical record bytes.
+fn build_signed_record(
+    status: VerdictStatus,
+    notes: Option<&str>,
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    secret: &crypto::SigningKey,
+) -> Result<VerdictRecord, VerdictError> {
+    // (1) Trust anchor: the pinned verifying key must exist for this slot.
+    let pinned_vk = read_pinned_pubkey(root, goal_id, verifier_id, round)?
+        .ok_or_else(|| {
+            VerdictError::Unauthenticated("no pinned verifier pubkey for this slot".to_string())
+        })?;
+
+    // (2) The supplied secret must correspond to the pinned pubkey.
+    let derived_vk = secret.verifying_key();
+    if crypto::verifying_key_to_hex(&derived_vk) != crypto::verifying_key_to_hex(&pinned_vk) {
+        return Err(VerdictError::Unauthenticated(
+            "secret's pubkey does not match the pinned verifier pubkey".to_string(),
+        ));
+    }
+
+    // (3) Sign the canonical record bytes (binds status/notes/registeredAt/ids/round).
+    let registered_at = Utc::now().to_rfc3339();
+    let status_str = match status {
+        VerdictStatus::Approve => "APPROVE",
+        VerdictStatus::Reject => "REJECT",
+        VerdictStatus::Null => "null",
+    };
+    let canonical = crypto::canonical_record_bytes(
+        status_str,
+        notes,
+        &registered_at,
+        goal_id,
+        verifier_id,
+        round,
+    );
+    let sig = crypto::sign(&canonical, secret);
+
+    Ok(VerdictRecord {
+        status,
+        notes: notes.map(|s| s.to_string()),
+        registered_at: Some(registered_at),
+        signature: Some(hex::encode(&sig)),
+        pubkey_id: Some(crypto::pubkey_id(&pinned_vk)),
+    })
+}
+
+/// Register an (unsigned) APPROVE verdict in the given slot (atomic first-write-wins).
+///
+/// Legacy path retained for slots that are not in the signed regime (no pinned pubkey
+/// and no secret supplied). Signed registration goes through `register_signed_approve`.
 pub fn register_approve(
     root: &Path,
     goal_id: &str,
@@ -413,6 +523,12 @@ pub enum VerdictError {
     /// The record is unsigned or carries a null status — by spec it is never trusted.
     #[error("untrusted record: unsigned or null status is never accepted")]
     Untrusted,
+    /// The verifier could not be authenticated against the slot's pinned pubkey: the
+    /// pinned pubkey is missing, no secret was supplied for a pinned slot, or the
+    /// supplied secret's deriving pubkey does not match the pinned one (verdict-
+    /// registration MODIFIED spec, secret-required gate).
+    #[error("unauthenticated: {0}")]
+    Unauthenticated(String),
 }
 
 #[cfg(test)]
