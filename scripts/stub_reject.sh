@@ -10,4 +10,9 @@ printf '{"type":"message_start","message":{"role":"assistant","content":[{"type"
 printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Rejecting: hypothetical issue found."}]}}\n'
 printf '{"type":"turn_end"}\n'
 printf '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"verify"}]},{"role":"assistant","content":[{"type":"text","text":"Rejecting: hypothetical issue found."}]}],"willRetry":false}\n'
-verifier-verdict reject --notes "Round 1 stub rejection: coverage on bin/verifier_verdict.rs was below gate before remediation. Fixed in commit 4ed3680."
+# Forward the per-verifier signing secret (D3) so jewije takes the signed path.
+# Identity + store-root env are already in our env (injected by spawn) and inherited.
+# Prefer the orchestrator-resolved sibling binary to avoid a stale global install.
+export VERIFIER_LOOP_VERIFIER_SECRET
+VVERDICT="${VERIFIER_LOOP_VERDICT_BIN:-verifier-verdict}"
+"$VVERDICT" reject --notes "Round 1 stub rejection: coverage on bin/verifier_verdict.rs was below gate before remediation. Fixed in commit 4ed3680."
