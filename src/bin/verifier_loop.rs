@@ -62,7 +62,7 @@ fn run(cli: &VerifierLoopCli) -> Result<(), String> {
         VerifierLoopCmd::Resume {
             ref goal_id,
             ref fix,
-        } => run_resume(&root, goal_id, fix.as_deref(), prepend.as_deref())?,
+        } => run_resume(&root, &config, goal_id, fix.as_deref(), prepend.as_deref())?,
     }
     Ok(())
 }
@@ -88,15 +88,14 @@ fn run_new(
 /// `RESUME`: increment the round, append fix notes, respawn, evaluate.
 fn run_resume(
     root: &Path,
+    config: &verifier_loop::store::Config,
     goal_id: &str,
     fix: Option<&str>,
     prepend: Option<&str>,
 ) -> Result<(), String> {
-    let config = verifier_loop::store::Config::load_in(root)
-        .map_err(|e| format!("config: {e}"))?;
     let round = verifier_loop::goal::resume(root, goal_id, fix)
         .map_err(|e| format!("RESUME failed: {e}"))?;
-    run_round(root, &config, goal_id, round, fix, RoundKind::Resume, prepend)
+    run_round(root, config, goal_id, round, fix, RoundKind::Resume, prepend)
 }
 
 #[derive(Clone, Copy)]

@@ -151,7 +151,12 @@ pub fn render_resume(
 /// `custom = None` is a no-op (today's baked-in-only behavior is preserved).
 pub fn prepend_custom(rendered: String, custom: Option<&str>) -> String {
     match custom {
-        Some(c) => format!("{c}---\n{rendered}"),
+        // Ensure exactly one newline separates the custom preamble from the `---` rule,
+        // regardless of whether the file ends with a trailing newline.
+        Some(c) => {
+            let nl = if c.ends_with('\n') { "" } else { "\n" };
+            format!("{c}{nl}---\n{rendered}")
+        }
         None => rendered,
     }
 }
