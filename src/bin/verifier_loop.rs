@@ -49,32 +49,54 @@ fn main() -> ExitCode {
 
 fn run(cli: &VerifierLoopCli) -> Result<(), String> {
     let root = resolve_home()?;
+    let config = verifier_loop::store::Config::load_in(&root)
+        .map_err(|e| format!("config: {e}"))?;
+    // Load the custom verifier-prompt preamble (if configured) BEFORE any goal dir / signature
+    // is written, so a missing/unreadable file fails closed with NO side effects.
+    let prepend = load_verifier_prompt_file(&root, config.verifier_prompt_file.as_deref())?;
     match cli.command {
         VerifierLoopCmd::New {
             ref goal,
             ref context,
-        } => run_new(&root, goal, context.as_deref()),
+        } => run_new(&root, &config, goal, context.as_deref(), prepend.as_deref())?,
         VerifierLoopCmd::Resume {
             ref goal_id,
             ref fix,
-        } => run_resume(&root, goal_id, fix.as_deref()),
+        } => run_resume(&root, goal_id, fix.as_deref(), prepend.as_deref())?,
     }
+    Ok(())
 }
 
 /// `NEW`: create the goal, spawn round 1, evaluate, print hash or rejection.
-fn run_new(root: &Path, goal_text: &str, context: Option<&str>) -> Result<(), String> {
+fn run_new(
+    root: &Path,
+    config: &verifier_loop::store::Config,
+    goal_text: &str,
+    context: Option<&str>,
+    prepend: Option<&str>,
+) -> Result<(), String> {
+    // Validate goalText BEFORE any goal dir / signature is written (fail-closed).
+    validate_goal_text(goal_text, config.min_goal_chars)?;
+
     let goal_id = verifier_loop::goal::new(root, goal_text, context)
         .map_err(|e| format!("NEW failed: {e}"))?;
     let round = 1u32;
     println!("goalId: {goal_id}");
-    run_round(root, &goal_id, round, None, RoundKind::New)
+    run_round(root, config, &goal_id, round, None, RoundKind::New, prepend)
 }
 
 /// `RESUME`: increment the round, append fix notes, respawn, evaluate.
-fn run_resume(root: &Path, goal_id: &str, fix: Option<&str>) -> Result<(), String> {
+fn run_resume(
+    root: &Path,
+    goal_id: &str,
+    fix: Option<&str>,
+    prepend: Option<&str>,
+) -> Result<(), String> {
+    let config = verifier_loop::store::Config::load_in(root)
+        .map_err(|e| format!("config: {e}"))?;
     let round = verifier_loop::goal::resume(root, goal_id, fix)
         .map_err(|e| format!("RESUME failed: {e}"))?;
-    run_round(root, goal_id, round, fix, RoundKind::Resume)
+    run_round(root, &config, goal_id, round, fix, RoundKind::Resume, prepend)
 }
 
 #[derive(Clone, Copy)]
@@ -86,12 +108,13 @@ enum RoundKind {
 /// Shared round driver: snapshot → render → spawn → gather → evaluate → hash/reject.
 fn run_round(
     root: &Path,
+    config: &verifier_loop::store::Config,
     goal_id: &str,
     round: u32,
     fix_notes: Option<&str>,
     kind: RoundKind,
+    prepend: Option<&str>,
 ) -> Result<(), String> {
-    let config = verifier_loop::store::Config::load_in(root).map_err(|e| format!("config: {e}"))?;
     let record = verifier_loop::goal::load(root, goal_id).map_err(|e| format!("goal load: {e}"))?;
 
     // Frozen artifact snapshot (§9): captured once per round from cwd. Fails closed if cwd
@@ -138,6 +161,7 @@ fn run_round(
             RoundKind::Resume => verifier_loop::prompt::render_resume(None, &vars),
         }
         .map_err(|e| format!("prompt render failed: {e}"))?;
+        let rendered = verifier_loop::prompt::prepend_custom(rendered, prepend);
         verifier_loop::prompt::write_initial_prompt(&goal_root, goal_id, &vid, round, &rendered)
             .map_err(|e| format!("initial-prompt persist failed: {e}"))?;
         rendered_prompts.push(rendered);
@@ -274,4 +298,43 @@ fn resolve_home() -> Result<PathBuf, String> {
         Some(h) => Ok(PathBuf::from(h).join(DEFAULT_HOME_DIR)),
         None => Err(format!("{ENV_HOME} is unset and $HOME is not available")),
     }
+}
+
+/// Validates `goal_text` against the empty/whitespace invariant and `min_goal_chars`.
+/// Empty/whitespace-only is ALWAYS an error (regardless of `min_goal_chars`). When
+/// `min_goal_chars > 0`, a trimmed length below it is an error. Errors out BEFORE any goal
+/// dir / signature is written.
+fn validate_goal_text(goal_text: &str, min_goal_chars: u64) -> Result<(), String> {
+    let trimmed_len = goal_text.trim().chars().count() as u64;
+    if trimmed_len == 0 {
+        return Err("goal text is empty or whitespace-only; a non-empty goal is required".to_string());
+    }
+    if min_goal_chars > 0 && trimmed_len < min_goal_chars {
+        return Err(format!(
+            "goal text is {trimmed_len} chars, below the configured minGoalChars of {min_goal_chars}"
+        ));
+    }
+    Ok(())
+}
+
+/// Loads the custom verifier-prompt preamble file, if configured.
+/// Relative paths resolve against `home`; absolute paths are used as-is. A
+/// missing/unreadable file is a hard error (fail-closed: no goal dir / signature written).
+/// Returns `None` when no `verifierPromptFile` is configured (today's default behavior).
+fn load_verifier_prompt_file(home: &Path, configured: Option<&str>) -> Result<Option<String>, String> {
+    let rel = match configured {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let resolved = if Path::new(rel).is_absolute() {
+        PathBuf::from(rel)
+    } else {
+        home.join(rel)
+    };
+    std::fs::read_to_string(&resolved).map(Some).map_err(|e| {
+        format!(
+            "verifier prompt file '{}' could not be read: {e}",
+            resolved.display()
+        )
+    })
 }
