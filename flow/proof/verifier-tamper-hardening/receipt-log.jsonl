@@ -1,0 +1,2 @@
+{"seq":1,"kind":"approve","verdictId":"v1","status":"APPROVE","prevHash":"","entryHash":"b081c94dfd6bfd2ea6d51e5e70ae3ec6986c9d0a50c5b9859d56f29063717ee9","signedBy":"b6ac07c46b6f7f1a"}
+{"seq":2,"kind":"approve","verdictId":"v2","status":"APPROVE","prevHash":"b081c94dfd6bfd2ea6d51e5e70ae3ec6986c9d0a50c5b9859d56f29063717ee9","entryHash":"13c0733cab9376d010375bf0ed4a7f4b0017aa12646c751930778ec273640fa9","signedBy":"d670ae34bfc47173"}
