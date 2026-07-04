@@ -22,11 +22,18 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::crypto;
 use crate::goal;
 use crate::store;
 
 /// On-disk per-verifier verdict filename (mirrors `spawn::VERDICT_FILE`).
 pub const VERDICT_FILE: &str = "verdict.json";
+
+/// On-disk pinned verifier pubkey filename (verifier-identity spec).
+///
+/// Written once at spawn time into the per-verifier slot dir and never overwritten;
+/// its immutability binds a verifier's later signatures to a single pubkey.
+pub const PUBKEY_FILE: &str = "verifier-pubkey.json";
 
 /// The status of a verdict slot.
 ///
@@ -80,17 +87,52 @@ pub struct VerdictRecord {
     /// ISO-8601 timestamp the verdict was registered. Absent on the null placeholder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registered_at: Option<String>,
+    /// Detached Ed25519 signature over the canonical record bytes
+    /// (`crypto::canonical_record_bytes`), hex-encoded. Absent on the null placeholder
+    /// and on unsigned legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Short pubkey prefix identifier (`crypto::pubkey_id`) of the pinned verifying key
+    /// the signature was made under. Absent on unsigned records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pubkey_id: Option<String>,
 }
 
-/// Compute the on-disk path for a verifier's verdict file.
+/// On-disk pinned verifier pubkey record (verifier-identity spec).
 ///
-/// `<root>/goals/<goalId>/rounds/<round>/<verifierId>/verdict.json`
+/// Written exactly once into `<slot>/verifier-pubkey.json` at spawn time. Its presence
+/// pins the verifier's verifying key; subsequent verdict signatures are bound to it via
+/// `pubkey_id` + `verify_record`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifierPubkeyFile {
+    /// 64-hex encoding of the 32-byte Ed25519 verifying key.
+    #[serde(rename = "pubkey")]
+    pub pubkey: String,
+    /// ISO-8601 timestamp the keypair was minted.
+    #[serde(rename = "mintedAt")]
+    pub minted_at: String,
+}
+
+/// Compute the on-disk slot directory for a verifier (the dir that holds both
+/// `verdict.json` and `verifier-pubkey.json`).
+///
+/// `<root>/goals/<goalId>/rounds/<round>/<verifierId>/`
 /// (matches the spawn layer's directory layout — `rounds/<round>/<vid>`).
 pub fn verdict_path(root: &Path, goal_id: &str, verifier_id: &str, round: u32) -> PathBuf {
     goal::goal_dir(root, goal_id)
         .join(goal::ROUNDS_DIR)
         .join(round.to_string())
         .join(verifier_id)
+}
+
+/// Compute the on-disk slot directory that holds a verifier's pinned pubkey file.
+///
+/// Identical layout to `verdict_path` (same per-verifier slot dir); callers append
+/// `PUBKEY_FILE` to reach the file itself. Returns the directory so it can also be
+/// `create_dir_all`'d before writing.
+pub fn pubkey_path(root: &Path, goal_id: &str, verifier_id: &str, round: u32) -> PathBuf {
+    // Same slot dir as the verdict — both files live side-by-side per verifier-identity spec.
+    verdict_path(root, goal_id, verifier_id, round)
 }
 
 /// Read a verdict slot. A missing file or a malformed/null record resolves to a `Null`
@@ -108,6 +150,8 @@ pub fn read_verdict(
             status: VerdictStatus::Null,
             notes: None,
             registered_at: None,
+            signature: None,
+            pubkey_id: None,
         });
     }
     let raw = fs::read_to_string(&path)?;
@@ -115,7 +159,279 @@ pub fn read_verdict(
     Ok(rec)
 }
 
-/// Register an APPROVE verdict in the given slot (atomic first-write-wins).
+/// Mint a fresh Ed25519 keypair for the verifier and pin its verifying key into the
+/// slot as `verifier-pubkey.json` (verifier-identity spec).
+///
+/// First-write-wins (immutable pin): if a pubkey is already pinned for this slot the
+/// call fails closed with `AlreadyPinned` and the stored file is left untouched.
+/// Returns the secret `SigningKey` so the caller (verifier process) can sign verdicts;
+/// it is NEVER persisted to disk by this function.
+pub fn mint_and_pin_pubkey(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+) -> Result<crypto::SigningKey, VerdictError> {
+    ensure_goal_dir(root, goal_id)?;
+
+    let slot = pubkey_path(root, goal_id, verifier_id, round);
+    fs::create_dir_all(&slot)?;
+    let target = slot.join(PUBKEY_FILE);
+
+    // Immutability: a pinned pubkey is never re-minted.
+    if target.exists() {
+        return Err(VerdictError::AlreadyPinned);
+    }
+
+    let kp = crypto::generate_keypair();
+    let file = VerifierPubkeyFile {
+        pubkey: crypto::verifying_key_to_hex(&kp.verifying),
+        minted_at: Utc::now().to_rfc3339(),
+    };
+
+    // Atomic write: temp sibling + rename.
+    let tmp = slot.join(format!("{PUBKEY_FILE}.tmp"));
+    let json = serde_json::to_string_pretty(&file)?;
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, &target)?;
+
+    Ok(kp.signing)
+}
+
+/// Read the pinned verifying key for a verifier slot.
+///
+/// Returns `Ok(None)` when no pubkey has been pinned (caller treats the slot as
+/// unauthenticated). Returns `Ok(Some(key))` for a well-formed pin file. A present but
+/// malformed file surfaces as `Err` (fail closed rather than silently trusting).
+pub fn read_pinned_pubkey(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+) -> Result<Option<crypto::VerifyingKey>, VerdictError> {
+    let target = pubkey_path(root, goal_id, verifier_id, round).join(PUBKEY_FILE);
+    if !target.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&target)?;
+    let file: VerifierPubkeyFile = serde_json::from_str(&raw)?;
+    let key = crypto::verifying_key_from_hex(&file.pubkey)
+        .map_err(|e| VerdictError::BadSignature(format!("pinned pubkey is malformed: {e}")))?;
+    Ok(Some(key))
+}
+
+/// Verify a `VerdictRecord`'s signature against the pinned verifying key
+/// (signed-verdict-record spec).
+///
+/// Fail-closed chain:
+///   1. A NULL status, or any record without a signature, is `Untrusted` — null never
+///      becomes APPROVE (D9), and an unsigned APPROVE is never trusted.
+///   2. No pinned pubkey supplied → `WrongPubkey` (cannot bind the signature).
+///   3. `pubkeyId` does not match the pinned key's id → `WrongPubkey`.
+///   4. Signature is not valid hex, or does not verify over the canonical bytes →
+///      `BadSignature`. The canonical bytes bind {status, notes, registeredAt, goalId,
+///      verifierId, round}, so any tampering with those fields invalidates the signature.
+pub fn verify_record(
+    record: &VerdictRecord,
+    pinned_pubkey: Option<&crypto::VerifyingKey>,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+) -> Result<(), VerdictError> {
+    // (1) Null status or missing signature => untrusted, regardless of any key.
+    if record.status == VerdictStatus::Null || record.signature.is_none() {
+        return Err(VerdictError::Untrusted);
+    }
+
+    // (2) A signature is only meaningful against a pinned pubkey.
+    let pinned = pinned_pubkey.ok_or(VerdictError::WrongPubkey)?;
+
+    // (3) The record's declared pubkeyId must match the pinned key.
+    let expected_id = crypto::pubkey_id(pinned);
+    if record.pubkey_id.as_deref() != Some(expected_id.as_str()) {
+        return Err(VerdictError::WrongPubkey);
+    }
+
+    // (4) Decode + cryptographically verify the signature over the canonical bytes.
+    let sig_hex = record.signature.as_ref().expect("checked Some above");
+    let sig_bytes = hex::decode(sig_hex).map_err(|_| {
+        VerdictError::BadSignature("signature is not valid hexadecimal".to_string())
+    })?;
+
+    let status_str = match record.status {
+        VerdictStatus::Approve => "APPROVE",
+        VerdictStatus::Reject => "REJECT",
+        VerdictStatus::Null => return Err(VerdictError::Untrusted),
+    };
+    let registered_at_str = record.registered_at.as_deref().unwrap_or("");
+    let canonical = crypto::canonical_record_bytes(
+        status_str,
+        record.notes.as_deref(),
+        registered_at_str,
+        goal_id,
+        verifier_id,
+        round,
+    );
+
+    if !crypto::verify(&sig_bytes, &canonical, pinned) {
+        return Err(VerdictError::BadSignature(
+            "signature does not verify over the canonical record bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Register a SIGNED APPROVE verdict bound to the slot's pinned verifier pubkey
+/// (verdict-registration MODIFIED spec — secret-required gate).
+///
+/// Fail-closed chain:
+///   1. No pinned pubkey for the slot → `Unauthenticated` (no trust anchor).
+///   2. The secret's deriving verifying key does not equal the pinned key →
+///      `Unauthenticated`.
+///   3. Otherwise: sign the canonical record bytes and write atomically
+///      (first-write-wins; an existing non-null verdict yields `AlreadyFinal`).
+pub fn register_signed_approve(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    secret: &crypto::SigningKey,
+) -> Result<(), VerdictError> {
+    let record = build_signed_record(
+        VerdictStatus::Approve,
+        None,
+        root,
+        goal_id,
+        verifier_id,
+        round,
+        secret,
+    )?;
+    write_first_verdict(root, goal_id, verifier_id, round, &record)?;
+    // Hash-chained receipt append (receipt-log spec): every successful signed write
+    // extends the per-goal chain. Fail-closed if the receipt append itself fails —
+    // a missing chain entry means the completion-hash inputs would be incomplete.
+    append_receipt_for_signed_write(
+        root,
+        goal_id,
+        verifier_id,
+        "approve",
+        "APPROVE",
+        record.pubkey_id.as_deref(),
+    )?;
+    Ok(())
+}
+
+/// Register a SIGNED REJECT verdict with notes (atomic first-write-wins). Empty notes
+/// are refused with `NotesRequired` exactly like the unsigned path.
+pub fn register_signed_reject(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    notes: &str,
+    secret: &crypto::SigningKey,
+) -> Result<(), VerdictError> {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return Err(VerdictError::NotesRequired);
+    }
+    let record = build_signed_record(
+        VerdictStatus::Reject,
+        Some(trimmed),
+        root,
+        goal_id,
+        verifier_id,
+        round,
+        secret,
+    )?;
+    write_first_verdict(root, goal_id, verifier_id, round, &record)?;
+    append_receipt_for_signed_write(
+        root,
+        goal_id,
+        verifier_id,
+        "reject",
+        "REJECT",
+        record.pubkey_id.as_deref(),
+    )?;
+    Ok(())
+}
+
+/// Build a signed `VerdictRecord` bound to the slot's pinned verifying key.
+///
+/// Shared by `register_signed_approve` / `register_signed_reject`. Performs the
+/// secret/pinned-pubkey authentication gate, then signs the canonical record bytes.
+fn build_signed_record(
+    status: VerdictStatus,
+    notes: Option<&str>,
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+    secret: &crypto::SigningKey,
+) -> Result<VerdictRecord, VerdictError> {
+    // (1) Trust anchor: the pinned verifying key must exist for this slot.
+    let pinned_vk = read_pinned_pubkey(root, goal_id, verifier_id, round)?
+        .ok_or_else(|| {
+            VerdictError::Unauthenticated("no pinned verifier pubkey for this slot".to_string())
+        })?;
+
+    // (2) The supplied secret must correspond to the pinned pubkey.
+    let derived_vk = secret.verifying_key();
+    if crypto::verifying_key_to_hex(&derived_vk) != crypto::verifying_key_to_hex(&pinned_vk) {
+        return Err(VerdictError::Unauthenticated(
+            "secret's pubkey does not match the pinned verifier pubkey".to_string(),
+        ));
+    }
+
+    // (3) Sign the canonical record bytes (binds status/notes/registeredAt/ids/round).
+    let registered_at = Utc::now().to_rfc3339();
+    let status_str = match status {
+        VerdictStatus::Approve => "APPROVE",
+        VerdictStatus::Reject => "REJECT",
+        VerdictStatus::Null => "null",
+    };
+    let canonical = crypto::canonical_record_bytes(
+        status_str,
+        notes,
+        &registered_at,
+        goal_id,
+        verifier_id,
+        round,
+    );
+    let sig = crypto::sign(&canonical, secret);
+
+    Ok(VerdictRecord {
+        status,
+        notes: notes.map(|s| s.to_string()),
+        registered_at: Some(registered_at),
+        signature: Some(hex::encode(&sig)),
+        pubkey_id: Some(crypto::pubkey_id(&pinned_vk)),
+    })
+}
+
+/// Append a hash-chained receipt entry after a successful signed verdict write.
+///
+/// Fail-closed: if the receipt append errors (disk full, parse error), the error is
+/// surfaced to the caller — the verdict itself is already durably written, but the
+/// completion hash for the goal cannot be considered complete without the chain entry.
+fn append_receipt_for_signed_write(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    kind: &str,
+    status: &str,
+    signed_by: Option<&str>,
+) -> Result<(), VerdictError> {
+    let signed_by = signed_by.unwrap_or("");
+    crate::receipt::append_receipt(root, goal_id, kind, verifier_id, status, signed_by)
+        .map_err(|e| VerdictError::ReceiptFailed(e.to_string()))?;
+    Ok(())
+}
+
+/// Register an (unsigned) APPROVE verdict in the given slot (atomic first-write-wins).
+///
+/// Legacy path retained for slots that are not in the signed regime (no pinned pubkey
+/// and no secret supplied). Signed registration goes through `register_signed_approve`.
 pub fn register_approve(
     root: &Path,
     goal_id: &str,
@@ -126,6 +442,8 @@ pub fn register_approve(
         status: VerdictStatus::Approve,
         notes: None,
         registered_at: Some(Utc::now().to_rfc3339()),
+        signature: None,
+        pubkey_id: None,
     };
     write_first_verdict(root, goal_id, verifier_id, round, &record)
 }
@@ -146,6 +464,8 @@ pub fn register_reject(
         status: VerdictStatus::Reject,
         notes: Some(trimmed.to_string()),
         registered_at: Some(Utc::now().to_rfc3339()),
+        signature: None,
+        pubkey_id: None,
     };
     write_first_verdict(root, goal_id, verifier_id, round, &record)
 }
@@ -229,6 +549,31 @@ pub enum VerdictError {
     Json(#[from] serde_json::Error),
     #[error("store error: {0}")]
     Store(#[from] store::StoreError),
+    /// A pinned verifier pubkey is already present for the slot (immutable pin).
+    #[error("verifier pubkey is already pinned for this slot; cannot be re-minted")]
+    AlreadyPinned,
+    /// A signature failed to verify or was malformed (signed-verdict-record spec).
+    /// Carries a short reason string.
+    #[error("bad signature: {0}")]
+    BadSignature(String),
+    /// The declared/cited pubkey does not match the pinned key, or no pinned key was
+    /// supplied (the signature cannot be bound to a trusted identity).
+    #[error("wrong or missing pinned pubkey; signature cannot be bound")]
+    WrongPubkey,
+    /// The record is unsigned or carries a null status — by spec it is never trusted.
+    #[error("untrusted record: unsigned or null status is never accepted")]
+    Untrusted,
+    /// The verifier could not be authenticated against the slot's pinned pubkey: the
+    /// pinned pubkey is missing, no secret was supplied for a pinned slot, or the
+    /// supplied secret's deriving pubkey does not match the pinned one (verdict-
+    /// registration MODIFIED spec, secret-required gate).
+    #[error("unauthenticated: {0}")]
+    Unauthenticated(String),
+    /// The hash-chained receipt log append failed after the verdict was written.
+    /// The verdict is durable but the goal's completion hash cannot be considered
+    /// complete without the chain entry (receipt-log spec).
+    #[error("receipt log append failed: {0}")]
+    ReceiptFailed(String),
 }
 
 #[cfg(test)]
@@ -266,10 +611,14 @@ mod tests {
             status: VerdictStatus::Approve,
             notes: None,
             registered_at: None,
+            signature: None,
+            pubkey_id: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         assert!(!j.contains("notes"), "{j}");
         assert!(!j.contains("registeredAt"), "{j}");
+        assert!(!j.contains("signature"), "{j}");
+        assert!(!j.contains("pubkeyId"), "{j}");
     }
 
     #[test]

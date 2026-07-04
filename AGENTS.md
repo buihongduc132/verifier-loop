@@ -54,6 +54,17 @@ cargo llvm-cov --fail-under-lines 80
 - `goalText` edit → signature mismatch → hash mismatch.
 - Verdict edit → hash mismatch.
 
+## Security / threat model
+
+The `add-verifier-tamper-hardening` change adds per-verifier Ed25519 signing keys
+(`VERIFIER_LOOP_VERIFIER_SECRET`), pinned pubkeys, signed verdict records, and a
+hash-chained receipt log. This is a **deterrent + detection layer**, not a prevention
+guarantee: on a single host, a process with write access to `~/.verifier-loop/` AND the
+ability to read a V\*'s env can still forge. True prevention requires out-of-process V\*
+on a separate host. Read the full model before relying on the completion hash:
+[`THREAT-MODEL.md`](THREAT-MODEL.md). (Specs: `openspec/changes/add-verifier-tamper-hardening/specs/`;
+design + risks: `openspec/changes/add-verifier-tamper-hardening/design.md`.)
+
 ## Out of scope (do NOT implement)
 
 Deferred: OT1 audit subcommand, OT2 per-verifier maxTurn refresh, OT3 `chattr +a` hardening,

@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::acp;
+use crate::crypto;
 use crate::goal;
 use crate::store;
+use crate::verdict;
 
 /// Subdirectory name for a verifier id under a round directory.
 /// Verifier ids are `v1`, `v2`, … `v{m}` (spec: "v1, v2, ...").
@@ -54,6 +56,17 @@ pub const ENV_ROUND: &str = "VERIFIER_LOOP_ROUND";
 /// otherwise jewije resolves its own default `$HOME/.verifier-loop` and the verdict
 /// write lands in the wrong store, leaving the slot null (no consensus → no hash).
 pub const ENV_HOME: &str = "VERIFIER_LOOP_HOME";
+/// Per-verifier signing secret (hex) injected so the verifier backend's `jewije`
+/// call can register a SIGNED verdict bound to the slot's pinned pubkey (D3,
+/// verifier-spawn MODIFIED). The secret is minted by `verdict::mint_and_pin_pubkey`
+/// at spawn time and is NEVER persisted to disk by the orchestrator.
+pub const ENV_VERIFIER_SECRET: &str = "VERIFIER_LOOP_VERIFIER_SECRET";
+/// Path to the `verifier-verdict` (jewije) binary the stub backend should invoke.
+/// Spawn resolves this as the sibling of the running `verifier-loop` exe so a stub
+/// calling bare `verifier-verdict` from PATH cannot pick up a stale/global install
+/// (which would lack the signed-verdict regime and silently produce unsigned
+/// verdicts). The stub falls back to PATH lookup if this is unset.
+pub const ENV_VERDICT_BIN: &str = "VERIFIER_LOOP_VERDICT_BIN";
 
 /// Inputs to a spawn round. All borrowed; the round is driven to completion synchronously.
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +116,8 @@ pub enum SpawnError {
     Goal(#[from] goal::GoalError),
     #[error("acp parse error: {0}")]
     Acp(#[from] acp::AcpError),
+    #[error("verdict layer error: {0}")]
+    Verdict(#[from] crate::verdict::VerdictError),
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +143,16 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
         pre_create_verifier_dir(&vdir);
 
         let mut cmd = build_spawn_command(&input.adapter.spawn, input.prompt);
-        inject_identity_env(&mut cmd, input.goal_id, &vid, input.round, input.root);
+        let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round)?;
+        inject_identity_env(
+            &mut cmd,
+            input.goal_id,
+            &vid,
+            input.round,
+            input.root,
+            &secret_hex,
+        );
+        inject_verifier_verdict_bin(&mut cmd);
         plan.push((vid, cmd, vdir));
     }
 
@@ -205,7 +229,16 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         };
         pre_create_verifier_dir_with_turns(&vdir, baseline_turns);
 
-        inject_identity_env(&mut cmd, input.goal_id, &vid, input.round, input.root);
+        let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round)?;
+        inject_identity_env(
+            &mut cmd,
+            input.goal_id,
+            &vid,
+            input.round,
+            input.root,
+            &secret_hex,
+        );
+        inject_verifier_verdict_bin(&mut cmd);
         plan.push((vid, cmd, vdir));
     }
 
@@ -413,33 +446,80 @@ fn build_resume_command(template: &str, sid: &str, prompt: &str) -> Command {
     build_spawn_command(&with_sid, prompt)
 }
 
+/// Mint a fresh Ed25519 keypair for the verifier slot and pin its verifying key into
+/// `verifier-pubkey.json` (verifier-spawn MODIFIED D3). Returns the secret signing key
+/// encoded as hex so it can be injected into the verifier process env.
+///
+/// First-write-wins: a pinned slot is left untouched. Spawn is the first caller for a
+/// fresh slot, so a prior pin only exists on resume across rounds (a new slot dir per
+/// round means this is only an error if the same round is spawned twice, which the
+/// orchestrator never does).
+fn mint_verifier_secret(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+) -> Result<String, SpawnError> {
+    let sk = verdict::mint_and_pin_pubkey(root, goal_id, verifier_id, round)?;
+    Ok(crypto::signing_key_to_hex(&sk))
+}
+
 /// The env pairs a spawned verifier needs: identity (D2) plus the store root so its
 /// `verifier-verdict` call writes into the orchestrator's store (fail-closed: a
-/// verdict written to a *different* store would be invisible → null slot → no hash).
+/// verdict written to a *different* store would be invisible → null slot → no hash),
+/// plus the per-verifier signing secret (D3) so its verdict registration is signed.
 fn identity_env_pairs<'a>(
     goal_id: &'a str,
     verifier_id: &'a str,
     round: u32,
     root: &'a Path,
+    secret_hex: &'a str,
 ) -> Vec<(&'static str, std::ffi::OsString)> {
     vec![
         (ENV_GOAL_ID, goal_id.into()),
         (ENV_VERIFIER_ID, verifier_id.into()),
         (ENV_ROUND, round.to_string().into()),
         (ENV_HOME, root.as_os_str().into()),
+        (ENV_VERIFIER_SECRET, secret_hex.into()),
     ]
 }
 
-/// Inject the identity + store-root env vars into a verifier command (D2).
+/// Inject the identity + store-root + signing-secret env vars into a verifier command
+/// (D2 + D3).
 fn inject_identity_env(
     cmd: &mut Command,
     goal_id: &str,
     verifier_id: &str,
     round: u32,
     root: &Path,
+    secret_hex: &str,
 ) {
-    for (k, v) in identity_env_pairs(goal_id, verifier_id, round, root) {
+    for (k, v) in identity_env_pairs(goal_id, verifier_id, round, root, secret_hex) {
         cmd.env(k, v);
+    }
+}
+
+/// Resolve the `verifier-verdict` (jewije) binary that ships beside the running
+/// `verifier-loop` exe, and inject its absolute path so the stub backend invokes the
+/// matching build (not a stale/global `verifier-verdict` on PATH). Best-effort: if the
+/// sibling cannot be resolved (e.g. the orchestrator runs embedded outside a CLI exe),
+/// the env var is left unset and the stub falls back to a PATH lookup.
+fn inject_verifier_verdict_bin(cmd: &mut Command) {
+    if let Some(bin) = sibling_verifier_verdict() {
+        cmd.env(ENV_VERDICT_BIN, &bin);
+    }
+}
+
+/// Locate `verifier-verdict` next to the current executable. Returns `None` if the
+/// current exe cannot be resolved, has no parent, or the sibling is absent.
+fn sibling_verifier_verdict() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join("verifier-verdict");
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
     }
 }
 
@@ -503,7 +583,7 @@ mod tests {
     #[test]
     fn identity_env_pairs_propagate_store_root() {
         let root = Path::new("/tmp/vl-home");
-        let pairs = identity_env_pairs("g1", "v1", 2, root);
+        let pairs = identity_env_pairs("g1", "v1", 2, root, "deadbeef");
         let home = pairs.iter().find(|(k, _)| *k == ENV_HOME);
         assert!(home.is_some(), "VERIFIER_LOOP_HOME must be injected");
         assert_eq!(
@@ -515,6 +595,14 @@ mod tests {
         assert!(pairs.iter().any(|(k, _)| *k == ENV_GOAL_ID));
         assert!(pairs.iter().any(|(k, _)| *k == ENV_VERIFIER_ID));
         assert!(pairs.iter().any(|(k, _)| *k == ENV_ROUND));
+        // D3: per-verifier signing secret is injected.
+        let secret = pairs.iter().find(|(k, _)| *k == ENV_VERIFIER_SECRET);
+        assert!(secret.is_some(), "VERIFIER_LOOP_VERIFIER_SECRET must be injected");
+        assert_eq!(
+            secret.unwrap().1.as_os_str(),
+            "deadbeef",
+            "injected secret must equal the minted signing key hex"
+        );
     }
 
     #[test]

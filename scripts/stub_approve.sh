@@ -11,5 +11,11 @@ printf '{"type":"message_start","message":{"role":"assistant","content":[{"type"
 printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Work verified: cargo build --release clean, cargo test 151 passed, coverage 93pct. Approving."}]}}\n'
 printf '{"type":"turn_end"}\n'
 printf '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"verify"}]},{"role":"assistant","content":[{"type":"text","text":"Work verified: cargo build --release clean, cargo test 151 passed, coverage 93pct. Approving."}]}],"willRetry":false}\n'
-# Register the verdict
-verifier-verdict approve
+# Register the verdict — forward the per-verifier signing secret (D3) so the
+# signed-verdict path is taken. VERIFIER_LOOP_HOME/GOAL_ID/VERIFIER_ID/ROUND are
+# already in our env (injected by spawn); the child inherits them automatically.
+# Prefer the orchestrator-resolved sibling binary so a stale/global
+# `verifier-verdict` on PATH cannot produce an unsigned verdict.
+export VERIFIER_LOOP_VERIFIER_SECRET
+VVERDICT="${VERIFIER_LOOP_VERDICT_BIN:-verifier-verdict}"
+"$VVERDICT" approve

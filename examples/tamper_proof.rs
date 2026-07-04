@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     matching.sort_by(|a, b| a.verifier_id.cmp(&b.verifier_id));
 
     let recomputed =
-        consensus::compute_hash(&salt, &goal_id, &sig, round, &matching, matched_at);
+        consensus::compute_hash(&salt, &goal_id, &sig, round, &matching, matched_at, "");
     println!("[2] recompute hash from stored artifacts");
     println!("    stored:     {stored_hash}");
     println!("    recomputed: {recomputed}");
@@ -92,7 +92,7 @@ fn main() -> ExitCode {
     tampered.goal_text = format!("{} [TAMPERED]", tampered.goal_text);
     let tampered_sig = goal::compute_signature(&salt, &tampered.goal_text, &tampered.created_at);
     let hash_a =
-        consensus::compute_hash(&salt, &goal_id, &tampered_sig, round, &matching, matched_at);
+        consensus::compute_hash(&salt, &goal_id, &tampered_sig, round, &matching, matched_at, "");
     println!("[3] tamper goalText → recompute");
     println!("    sig:    {sig}  → {tampered_sig}");
     println!("    hash:   {stored_hash}  → {hash_a}");
@@ -123,7 +123,7 @@ fn main() -> ExitCode {
     if let Some(slot) = matching_b.iter_mut().find(|m| m.verifier_id == "v1") {
         slot.registered_at = v1_tampered.registered_at.clone().unwrap_or_default();
     }
-    let hash_b = consensus::compute_hash(&salt, &goal_id, &sig, round, &matching_b, matched_at);
+    let hash_b = consensus::compute_hash(&salt, &goal_id, &sig, round, &matching_b, matched_at, "");
     // Restore the file so the goal-dir transcript stays pristine for the audit trail.
     std::fs::write(&v1_path, &v1_raw).unwrap();
     println!("[4] tamper verdict registeredAt → recompute hash");

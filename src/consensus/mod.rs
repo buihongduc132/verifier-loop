@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::goal;
-use crate::verdict::{VerdictRecord, VerdictStatus};
+use crate::verdict::{self, VerdictRecord, VerdictStatus};
 
 /// `~/.verifier-loop/goals/<goalId>/completion.json` — written only on consensus.
 pub const COMPLETION_FILE: &str = "completion.json";
@@ -52,13 +52,18 @@ pub struct MatchingVerdict {
 }
 
 /// The rejection surfaced to A when a round does not pass: each non-APPROVE verifier's
-/// contribution (REJECT notes, or a marker for a null/missing verdict).
+/// contribution (REJECT notes, a marker for a null/missing verdict, or a signature
+/// failure for a verdict whose signature did not verify against its pinned pubkey).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rejection {
     /// `(verifierId, notes)` for every REJECT verdict.
     pub reject_notes: Vec<(String, String)>,
     /// Verifier ids with no verdict (null/missing) — surfaced as a "did not register" marker.
     pub null_verifiers: Vec<String>,
+    /// `(verifierId, reason)` for every APPROVE verdict whose signature failed to verify
+    /// against the slot's pinned pubkey (BadSignature / WrongPubkey / Untrusted). Such a
+    /// verdict is NOT counted toward `n` (signed-verdict-record "Consensus verifies").
+    pub signature_failures: Vec<(String, String)>,
 }
 
 /// Result of consensus evaluation over the gathered verdicts.
@@ -119,34 +124,92 @@ impl std::fmt::Display for CompletionHash {
     }
 }
 
-/// Evaluate n-of-m consensus over the gathered verdicts.
+/// Evaluate n-of-m consensus over the gathered verdicts (signed-verdict-record
+/// "Consensus verifies signature before treating verdict as matching").
 ///
 /// `verdicts` is `[(verifierId, VerdictRecord)]` for the round; entries need not be
 /// sorted and may be fewer than `m` (missing entries are treated as null → fail-closed).
 /// APPROVE verdicts lacking `registered_at` are not counted as matching (fail-closed).
 /// Null/REJECT verdicts never count toward `n` (D9).
-pub fn evaluate(verdicts: &[(String, VerdictRecord)], n: u32, m: u32) -> ConsensusResult {
+///
+/// **Signature gate**: for each APPROVE verdict the slot's pinned pubkey is read via
+/// [`verdict::read_pinned_pubkey`].
+///   * If a pubkey IS pinned, the verdict's signature MUST verify against it
+///     ([`verdict::verify_record`]); otherwise the verdict is recorded in
+///     [`Rejection::signature_failures`] as `(verifierId, reason)` and does NOT count.
+///   * If NO pubkey is pinned (legacy unsigned regime — e.g. a store populated before
+///     signed-verdicts), the APPROVE is trusted as-is (backward-compatible).
+///   * A malformed pin file fail-closes the slot (recorded as a `pubkey` failure).
+pub fn evaluate(
+    root: &Path,
+    goal_id: &str,
+    round: u32,
+    verdicts: &[(String, VerdictRecord)],
+    n: u32,
+    m: u32,
+) -> ConsensusResult {
     let mut matching: Vec<MatchingVerdict> = Vec::new();
     let mut rejection = Rejection::default();
 
     for (vid, rec) in verdicts {
         match rec.status {
             VerdictStatus::Approve => {
-                if let Some(ts) = rec.registered_at.as_ref() {
-                    if !ts.is_empty() {
-                        matching.push(MatchingVerdict {
-                            verifier_id: vid.clone(),
-                            registered_at: ts.clone(),
-                        });
+                // APPROVE requires a non-empty registeredAt to match (fail-closed).
+                let ts = rec.registered_at.as_deref().filter(|s| !s.is_empty());
+                let Some(ts) = ts else {
+                    rejection.null_verifiers.push(vid.clone());
+                    continue;
+                };
+
+                // Signature gate: bind the APPROVE to the slot's pinned pubkey.
+                let pinned = match verdict::read_pinned_pubkey(root, goal_id, vid, round) {
+                    Ok(opt) => opt,
+                    // Malformed pin → cannot trust the slot; fail closed.
+                    Err(_) => {
+                        rejection
+                            .signature_failures
+                            .push((vid.clone(), "WrongPubkey: pinned pubkey is unreadable".to_string()));
                         continue;
                     }
+                };
+
+                if let Some(key) = pinned {
+                    // Pinned slot: the signature MUST verify.
+                    match verdict::verify_record(rec, Some(&key), goal_id, vid, round) {
+                        Ok(()) => matching.push(MatchingVerdict {
+                            verifier_id: vid.clone(),
+                            registered_at: ts.to_string(),
+                        }),
+                        Err(err) => {
+                            rejection
+                                .signature_failures
+                                .push((vid.clone(), signature_failure_reason(&err)));
+                        }
+                    }
+                } else {
+                    // Legacy unsigned regime: no pinned key → trust the APPROVE.
+                    matching.push(MatchingVerdict {
+                        verifier_id: vid.clone(),
+                        registered_at: ts.to_string(),
+                    });
                 }
-                // APPROVE but missing/empty timestamp — cannot match (fail-closed).
-                rejection.null_verifiers.push(vid.clone());
             }
             VerdictStatus::Reject => {
                 let notes = rec.notes.clone().unwrap_or_default();
                 rejection.reject_notes.push((vid.clone(), notes));
+
+                // Signature gate for REJECT verdicts too: a tampered verdict (e.g.
+                // APPROVE flipped to REJECT without re-signing) must surface as a
+                // signature failure, not silently pass as a benign reject.
+                // Only check when a pinned key exists (legacy unsigned regime is
+                // exempt — there is no signature to verify).
+                if let Ok(Some(key)) = verdict::read_pinned_pubkey(root, goal_id, vid, round) {
+                    if let Err(err) = verdict::verify_record(rec, Some(&key), goal_id, vid, round) {
+                        rejection
+                            .signature_failures
+                            .push((vid.clone(), signature_failure_reason(&err)));
+                    }
+                }
             }
             VerdictStatus::Null => {
                 rejection.null_verifiers.push(vid.clone());
@@ -174,6 +237,21 @@ pub fn evaluate(verdicts: &[(String, VerdictRecord)], n: u32, m: u32) -> Consens
         m,
         matching_verdicts: matching,
         rejection,
+    }
+}
+
+/// Render a human-readable reason for a signature-verification failure, embedding the
+/// variant keyword the rejection summary is matched on (`signature`, `pubkey`,
+/// `unsigned`/`untrusted`).
+fn signature_failure_reason(err: &verdict::VerdictError) -> String {
+    use verdict::VerdictError::*;
+    match err {
+        BadSignature(msg) => {
+            format!("BadSignature: signature verification failed ({msg})")
+        }
+        WrongPubkey => "WrongPubkey: declared pubkey does not match pinned key".to_string(),
+        Untrusted => "Untrusted: unsigned or null verdict is never trusted".to_string(),
+        other => format!("signature verification failed: {other}"),
     }
 }
 
@@ -235,14 +313,16 @@ fn mmddyy_of(matched_at_iso: &str) -> String {
     format!("{mm}{dd}{yy}")
 }
 
-/// Compute the tamper-evident completion hash (completion-proof spec, D6 rev 2).
+/// Compute the tamper-evident completion hash (completion-proof MODIFIED, D6 rev 3).
 ///
 /// Produces BOTH:
 ///   * `short_hash()`  = `mmddyy + "-" + first8hex(SHA256(inputs))` — displayed/printed
 ///   * `full_digest()` = full 64-hex SHA-256(inputs) — stored in `completion.json`
 ///
 /// where `inputs = salt + goalId + goalSignature + String(roundNumber) +
-/// canonicalJSON(matchingVerdicts sorted by verifierId) + matchedAtISO`.
+/// canonicalJSON(matchingVerdicts sorted by verifierId) + matchedAtISO + receiptHead`,
+/// and `receiptHead` is the chain tip of the goal's hash-chained receipt log ("" when
+/// the log is absent — e.g. a fresh goal).
 ///
 /// Deterministic: identical inputs yield identical short hash and full digest. Each
 /// input guards a distinct tamper vector (see module docs). SHA-256 is computed exactly
@@ -254,9 +334,15 @@ pub fn compute_hash(
     round: u32,
     matching: &[MatchingVerdict],
     matched_at_iso: &str,
+    receipt_head: &str,
 ) -> CompletionHash {
     let canon = canonical_matching_json(matching);
-    let input = format!("{salt}{goal_id}{goal_sig}{round}{canon}{matched_at_iso}");
+    // inputs = salt + goalId + goalSignature + String(roundNumber)
+    //        + canonicalJSON(matchingVerdicts) + matchedAtISO + receiptHead
+    // The receipt head (chain tip of the goal's hash-chained receipt log) binds the
+    // completion proof to the exact sequence of registered verdicts (completion-proof
+    // MODIFIED, D6). Empty for a fresh goal with no receipt log.
+    let input = format!("{salt}{goal_id}{goal_sig}{round}{canon}{matched_at_iso}{receipt_head}");
     let full = hex::encode(Sha256::digest(input.as_bytes()));
     debug_assert_eq!(full.len(), HASH_FULL_HEX_LEN, "SHA-256 hex digest must be 64 chars");
     let short = format!("{}-{}", mmddyy_of(matched_at_iso), &full[..HASH_SHORT_HEX_LEN]);
@@ -343,11 +429,11 @@ mod tests {
     #[test]
     fn compute_hash_uses_exact_concatenation_order() {
         let matching = vec![mv("v1", "2026-07-03T10:00:00Z")];
-        let h = compute_hash("SALT", "GID", "SIG", 1, &matching, "2026-07-03T10:05:00Z");
+        let h = compute_hash("SALT", "GID", "SIG", 1, &matching, "2026-07-03T10:05:00Z", "head0");
 
-        // Independent recompute — full digest + short form.
+        // Independent recompute — full digest + short form (head appended last).
         let canon = canonical_matching_json(&matching);
-        let input = format!("SALTGIDSIG1{canon}2026-07-03T10:05:00Z");
+        let input = format!("SALTGIDSIG1{canon}2026-07-03T10:05:00Zhead0");
         let digest = hex::encode(Sha256::digest(input.as_bytes()));
         assert_eq!(h.full_digest(), digest, "full digest must match exact concat order");
         assert_eq!(h.short_hash(), format!("070326-{}", &digest[..HASH_SHORT_HEX_LEN]));
@@ -360,14 +446,18 @@ mod tests {
                 status: VerdictStatus::Approve,
                 notes: None,
                 registered_at: Some("t".into()),
+                signature: None,
+                pubkey_id: None,
             }),
             ("v2".to_string(), VerdictRecord {
                 status: VerdictStatus::Reject,
                 notes: Some("needs work".into()),
                 registered_at: Some("t".into()),
+                signature: None,
+                pubkey_id: None,
             }),
         ];
-        let r = evaluate(&verdicts, 2, 2);
+        let r = evaluate(std::path::Path::new("/nonexistent-consensus-internal-test"), "g", 1, &verdicts, 2, 2);
         assert!(!r.passed);
         assert_eq!(r.rejection.reject_notes, vec![("v2".to_string(), "needs work".to_string())]);
     }

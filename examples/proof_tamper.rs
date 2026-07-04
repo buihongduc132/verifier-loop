@@ -53,7 +53,7 @@ fn main() {
             verdicts.push((vid.to_string(), rec));
         }
     }
-    let result = consensus::evaluate(&verdicts, cfg.n, cfg.m);
+    let result = consensus::evaluate(root, &gid, round, &verdicts, cfg.n, cfg.m);
     let salt = std::fs::read_to_string(root.join(".salt")).unwrap();
     let goal_sig = {
         #[derive(Deserialize)]
@@ -73,6 +73,7 @@ fn main() {
             round,
             &result.matching_verdicts,
             &completion.matched_at,
+            "",
         ))
     } else {
         None

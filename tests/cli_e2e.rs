@@ -428,6 +428,7 @@ fn hash_recomputes_and_tamper_breaks_it() {
         })
         .collect();
 
+    let receipt_head = verifier_loop::receipt::read_receipt_head(home, &goal_id);
     let recomputed = verifier_loop::consensus::compute_hash(
         salt.trim(),
         &goal_id,
@@ -435,6 +436,7 @@ fn hash_recomputes_and_tamper_breaks_it() {
         round,
         &mvs,
         matched_at,
+        &receipt_head,
     );
     assert_eq!(recomputed.short_hash(), stored_hash, "audit recomputes the stored short hash");
     assert_eq!(recomputed.full_digest(), completion["fullDigest"].as_str().unwrap(), "audit recomputes the stored fullDigest");
@@ -452,6 +454,7 @@ fn hash_recomputes_and_tamper_breaks_it() {
         round,
         &mvs,
         matched_at,
+        &receipt_head,
     );
     assert_ne!(
         tampered_hash.short_hash(), stored_hash,
@@ -468,6 +471,7 @@ fn hash_recomputes_and_tamper_breaks_it() {
         round,
         &tampered_mvs,
         matched_at,
+        &receipt_head,
     );
     assert_ne!(
         tampered_v_hash.short_hash(), stored_hash,
