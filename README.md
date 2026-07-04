@@ -79,6 +79,23 @@ Semantics (fail-closed):
 - **Missing** `config.json` → fully defaulted [`Config`].
 - **Partial** `config.json` → present fields honoured, missing fields defaulted.
 - **Malformed** `config.json` → hard error; never silently defaulted.
+- **Unknown key** `config.json` → hard error; the schema is closed. Any field outside the
+  eight canonical keys above (e.g. a stale `cwd`, `model`, or `verifierPromptTemplate`) is
+  rejected at parse time with an error naming the offending field, so a legacy/tampered
+  file can never silently mask runtime behaviour.
+
+### `cwd` is runtime-derived (NOT configurable)
+
+The frozen artifact snapshot's `cwd` is ALWAYS `std::env::current_dir()` at the time `jewilo`
+is invoked. There is **no** `cwd` config key — pointing jewilo at a worktree requires only:
+
+```bash
+cd /path/to/worktree && jewilo NEW "<goal>"
+```
+
+A `cwd` (or `model`, `verifierPromptTemplate`, `verifierResumePromptTemplate`) key left in
+`config.json` by an older release is now a hard parse error rather than a silent no-op; remove
+it (the runtime cwd is the single source of truth).
 
 ## Usage examples
 

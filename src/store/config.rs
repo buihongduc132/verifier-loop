@@ -9,6 +9,9 @@
 //!   * Missing `config.json`            → fully defaulted [`Config`].
 //!   * Partial `config.json`            → present fields honoured, missing fields defaulted.
 //!   * Malformed `config.json`          → hard error (fail-closed); never silently defaulted.
+//!   * Unknown key in `config.json`     → hard error (fail-closed); the canonical key
+//!     set is closed and any extra field (e.g. a stale `cwd`) is rejected at parse
+//!     time so a tampered/legacy file can never silently mask runtime behaviour.
 
 use std::path::Path;
 
@@ -25,7 +28,12 @@ use super::StoreError;
 ///   * `git_diff_max_chars = 10000`  — cap on the frozen `git diff` snapshot fed to V*
 ///   * `verifier_timeout_sec = 1800` — per-verifier wall-clock timeout (D9)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+///
+/// `deny_unknown_fields` closes the on-disk schema: any key outside the eight
+/// canonical fields (e.g. a legacy `cwd`, `model`, or stray prompt template) is a
+/// hard parse error rather than silently dropped. `cwd` is sourced at runtime
+/// from `std::env::current_dir()` and is *never* read from `config.json`.
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Consensus threshold — minimum APPROVE verdicts required to pass (n of m).
     pub n: u32,
@@ -130,5 +138,40 @@ mod tests {
 
         let back: Config = serde_json::from_str(&j).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn config_rejects_unknown_key_at_parse_time() {
+        // The canonical key set is closed. Any extra field (here a stale `cwd`) must be
+        // a hard parse error — `cwd` is sourced from `std::env::current_dir()` at runtime,
+        // never from config.json.
+        let raw = r#"{
+            "n": 2,
+            "m": 2,
+            "maxTurn": 3,
+            "backend": "pi",
+            "gitDiffMaxChars": 10000,
+            "verifierTimeoutSec": 1800,
+            "cwd": "/tmp/should-be-ignored"
+        }"#;
+        let err = serde_json::from_str::<Config>(raw);
+        assert!(err.is_err(), "unknown `cwd` key must be rejected");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("cwd"),
+            "error must name the offending field, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn config_partial_still_defaults_under_deny_unknown_fields() {
+        // (a) partial config + (b) reject-unknown must coexist: a missing canonical key
+        // is still filled from `Default`, not rejected.
+        let raw = r#"{ "n": 5 }"#;
+        let cfg: Config = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.n, 5);
+        assert_eq!(cfg.m, 2);
+        assert_eq!(cfg.backend, "pi");
+        assert_eq!(cfg.verifier_timeout_sec, 1800);
     }
 }

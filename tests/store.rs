@@ -191,3 +191,85 @@ fn config_camel_case_round_trips_verifier_prompt_file_and_min_goal_chars() {
     let back: store::Config = serde_json::from_str(&j).unwrap();
     assert_eq!(back, cfg, "round-trip preserves verifier_prompt_file + min_goal_chars");
 }
+
+// ---------------------------------------------------------------------------
+// RED phase (cwd-runtime-source) — Config MUST reject unknown keys (deny_unknown_fields).
+// The live config.json historically carried dead no-op keys (cwd, model,
+// verifierPromptTemplate, verifierResumePromptTemplate) that serde silently ignored,
+// hiding misconfiguration from the operator. The fix is fail-closed: any unknown
+// key MUST produce a load error mentioning the offending field.
+// These tests currently FAIL because Config lacks #[serde(deny_unknown_fields)].
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_rejects_unknown_key_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"cwd":"/nonexistent/wrong/path"}"#,
+    )
+    .unwrap();
+    let err = store::load_config_in(dir.path())
+        .expect_err("cwd is runtime-derived; config.json cwd key MUST be rejected");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("cwd"),
+        "error must name the offending unknown field 'cwd': {msg}"
+    );
+}
+
+#[test]
+fn config_rejects_unknown_key_model() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"model":null}"#,
+    )
+    .unwrap();
+    let err = store::load_config_in(dir.path())
+        .expect_err("model is not a config key; MUST be rejected");
+    assert!(
+        err.to_string().to_lowercase().contains("model"),
+        "error must name 'model': {}",
+        err
+    );
+}
+
+#[test]
+fn config_rejects_unknown_key_verifier_prompt_template() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"verifierPromptTemplate":null}"#,
+    )
+    .unwrap();
+    store::load_config_in(dir.path())
+        .expect_err("verifierPromptTemplate is a dead key; MUST be rejected");
+}
+
+#[test]
+fn config_rejects_unknown_key_verifier_resume_prompt_template() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"verifierResumePromptTemplate":null}"#,
+    )
+    .unwrap();
+    store::load_config_in(dir.path())
+        .expect_err("verifierResumePromptTemplate is a dead key; MUST be rejected");
+}
+
+#[test]
+fn config_accepts_canonical_keys_only() {
+    // The full canonical set: n, m, maxTurn, backend, gitDiffMaxChars, verifierTimeoutSec,
+    // verifierPromptFile, minGoalChars. No dead keys. MUST parse cleanly.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.json"),
+        r#"{"n":2,"m":2,"maxTurn":3,"backend":"pi","gitDiffMaxChars":10000,"verifierTimeoutSec":1800,"verifierPromptFile":null,"minGoalChars":0}"#,
+    )
+    .unwrap();
+    let cfg = store::load_config_in(dir.path())
+        .expect("canonical keys only must parse without error");
+    assert_eq!((cfg.n, cfg.m), (2, 2));
+}
