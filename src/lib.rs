@@ -30,6 +30,7 @@ pub mod consensus;
 pub mod crypto;
 pub mod goal;
 pub mod prompt;
+pub mod receipt;
 pub mod spawn;
 pub mod store;
 pub mod verdict;

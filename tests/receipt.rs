@@ -270,7 +270,11 @@ fn append_uses_pipe_separated_canonical_fields() {
         "entryHash MUST be hex(SHA256(prevHash|seq|kind|verdictId|status)) — pipe-separated, no whitespace"
     );
     assert_eq!(pinned.len(), 64, "SHA256 hex digest must be 64 chars");
-    assert!(pinned.chars().all(|c| c.is_ascii_lowercase()), "digest must be lowercase hex");
+    assert!(
+        pinned.chars().all(|c| c.is_ascii_hexdigit())
+            && !pinned.chars().any(|c| c.is_ascii_uppercase()),
+        "digest must be lowercase hex"
+    );
 }
 
 #[test]
