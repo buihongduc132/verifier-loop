@@ -764,3 +764,353 @@ fn verify_record_untrusted_for_null_status() {
         "null-status error must be Untrusted-shaped; got: {err}"
     );
 }
+
+// ===========================================================================
+// Secret-required verdict registration (verdict-registration MODIFIED spec)
+// RED phase for add-verifier-tamper-hardening §4 (tasks.md). The `jewije` binary
+// now MUST read VERIFIER_LOOP_VERIFIER_SECRET (hex Ed25519 signing key), derive the
+// verifying pubkey, compare to the slot's pinned verifier-pubkey.json, and FAIL CLOSED
+// (VerdictError::Unauthenticated) on absence / non-match. On success the written
+// verdict.json is SIGNED (signature + pubkeyId) and verifies against the pinned key.
+//
+// These tests drive the BUILT `verifier-verdict` binary via assert_cmd (the real
+// user-facing contract). They will FAIL today because:
+//   * bin/verifier_verdict.rs does not yet read VERIFIER_LOOP_VERIFIER_SECRET, so
+//     approve-without-secret currently SUCCEEDS (must fail closed).
+//   * the written verdict.json carries no signature (must be signed).
+// ===========================================================================
+
+/// Build a fresh temp store + goal with a pre-created null verdict slot AND a pinned
+/// pubkey for v1, returning (TempDir, goal_id, signing_key_hex). The signing key hex
+/// is what a verifier process would receive as VERIFIER_LOOP_VERIFIER_SECRET.
+fn fresh_goal_with_pinned_v1(round: u32) -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let goal_id = goal::new(dir.path(), "build it", None).unwrap();
+
+    // Pre-create the null verdict placeholder (mirrors the spawn layer).
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round);
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
+
+    // Pin a real pubkey and capture the signing key hex.
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", round)
+        .expect("mint_and_pin_pubkey must succeed on a fresh slot");
+    let secret_hex = crypto::signing_key_to_hex(&sk);
+    (dir, goal_id, secret_hex)
+}
+
+/// A verdict slot file path under a temp store.
+fn slot_verdict_file(root: &Path, goal_id: &str, vid: &str, round: u32) -> PathBuf {
+    verdict::verdict_path(root, goal_id, vid, round).join(verdict::VERDICT_FILE)
+}
+
+use std::path::PathBuf;
+
+// ---------------------------------------------------------------------------
+// Scenario: Missing signing secret fails closed
+// ---------------------------------------------------------------------------
+
+/// jewije approve with identity env but NO VERIFIER_LOOP_VERIFIER_SECRET must exit
+/// non-zero, write NO verdict.json change (slot stays null), and surface an
+/// unauthenticated/secret-shaped error on stderr.
+#[test]
+fn jewije_approve_without_secret_fails_closed() {
+    let (dir, goal_id, _secret) = fresh_goal_with_pinned_v1(1);
+    let slot = slot_verdict_file(dir.path(), &goal_id, "v1", 1);
+
+    let assert = Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        // VERIFIER_LOOP_VERIFIER_SECRET deliberately NOT set.
+        .arg("approve")
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_lowercase();
+    assert!(
+        stderr.contains("secret") || stderr.contains("unauthenticated") || stderr.contains("auth"),
+        "stderr must name the missing-secret / unauthenticated reason; got: {stderr}"
+    );
+
+    // The slot must remain null — no verdict written.
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    assert_eq!(rec.status, verdict::VerdictStatus::Null, "no write on missing secret");
+    // And no stray signature/pubkeyId appear.
+    assert!(rec.signature.is_none(), "no signature may be written without a secret");
+    assert!(rec.pubkey_id.is_none(), "no pubkeyId may be written without a secret");
+    // Sanity: the file itself was not turned into an APPROVE record on disk.
+    let raw = fs::read_to_string(&slot).unwrap();
+    assert!(!raw.contains("APPROVE"), "raw slot must not have been mutated: {raw}");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Signing secret that does not match the pinned pubkey fails closed
+// ---------------------------------------------------------------------------
+
+/// jewije approve with a VERIFIER_LOOP_VERIFIER_SECRET whose pubkey does NOT equal
+/// the slot's pinned verifier-pubkey.json must exit non-zero, leave the slot null,
+/// and surface an unauthenticated/pubkey/pin-shaped error.
+#[test]
+fn jewije_approve_with_wrong_secret_fails_closed() {
+    let (dir, goal_id, _correct_secret) = fresh_goal_with_pinned_v1(1);
+
+    // Mint a SECOND, unrelated keypair whose pubkey is NOT the slot's pinned key.
+    let wrong = crypto::generate_keypair();
+    let wrong_hex = crypto::signing_key_to_hex(&wrong.signing);
+
+    let assert = Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .env("VERIFIER_LOOP_VERIFIER_SECRET", &wrong_hex)
+        .arg("approve")
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_lowercase();
+    assert!(
+        stderr.contains("unauthenticated")
+            || stderr.contains("pubkey")
+            || stderr.contains("pin")
+            || stderr.contains("mismatch"),
+        "stderr must name the wrong-secret / wrong-pubkey reason; got: {stderr}"
+    );
+
+    // Slot must be unchanged (still null placeholder, no APPROVE written).
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    assert_eq!(
+        rec.status,
+        verdict::VerdictStatus::Null,
+        "wrong-secret approve must not mutate the slot"
+    );
+    assert!(rec.signature.is_none(), "no signature written on wrong-secret");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: First verdict registers and is signed (APPROVE)
+// ---------------------------------------------------------------------------
+
+/// jewije approve with the CORRECT secret must exit 0, write a verdict.json whose
+/// status is APPROVE, carries a 128-hex signature and 16-hex pubkeyId, and whose
+/// signature verifies against the pinned verifying key.
+#[test]
+fn jewije_approve_with_correct_secret_writes_signed_verdict() {
+    let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
+
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .env("VERIFIER_LOOP_VERIFIER_SECRET", &secret)
+        .arg("approve")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Verdict registered"));
+
+    // On-disk schema: status=APPROVE, signature (128 hex), pubkeyId (16 hex).
+    let slot = slot_verdict_file(dir.path(), &goal_id, "v1", 1);
+    let raw: Value = serde_json::from_str(&fs::read_to_string(&slot).unwrap()).unwrap();
+    assert_eq!(raw["status"], Value::String(APPROVE.into()));
+    let sig = raw["signature"].as_str().expect("signature must be present on signed verdict");
+    assert_eq!(
+        sig.len(),
+        128,
+        "signature must be the 128-hex encoding of a 64-byte Ed25519 signature; got len {}",
+        sig.len()
+    );
+    hex::decode(sig).expect("signature must be valid hex");
+    let pub_id = raw["pubkeyId"].as_str().expect("pubkeyId must be present");
+    assert_eq!(pub_id.len(), 16, "pubkeyId must be the 16-hex prefix; got len {}", pub_id.len());
+
+    // The written record MUST verify against the slot's pinned pubkey.
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+        .expect("read pinned pubkey")
+        .expect("pinned pubkey must be present after fresh_goal_with_pinned_v1");
+    let record = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::verify_record(&record, Some(&pinned_vk), &goal_id, "v1", 1)
+        .expect("the written verdict must verify against the pinned verifying key");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: First verdict registers and is signed (REJECT + notes)
+// ---------------------------------------------------------------------------
+
+/// jewije reject --notes 'reason' with the CORRECT secret must exit 0, write a
+/// REJECT record carrying the notes, with a signature that verifies.
+#[test]
+fn jewije_reject_with_correct_secret_writes_signed_verdict_with_notes() {
+    let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
+
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .env("VERIFIER_LOOP_VERIFIER_SECRET", &secret)
+        .args(["reject", "--notes", "reason: missing tests"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Verdict registered"));
+
+    let slot = slot_verdict_file(dir.path(), &goal_id, "v1", 1);
+    let raw: Value = serde_json::from_str(&fs::read_to_string(&slot).unwrap()).unwrap();
+    assert_eq!(raw["status"], Value::String(REJECT.into()));
+    assert_eq!(
+        raw["notes"].as_str(),
+        Some("reason: missing tests"),
+        "notes must be persisted verbatim"
+    );
+    assert_eq!(
+        raw["signature"].as_str().map(str::len),
+        Some(128),
+        "signed REJECT must carry a 128-hex signature"
+    );
+    assert_eq!(
+        raw["pubkeyId"].as_str().map(str::len),
+        Some(16),
+        "signed REJECT must carry a 16-hex pubkeyId"
+    );
+
+    // Signature must verify against the pinned pubkey.
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+        .unwrap()
+        .expect("pinned pubkey present");
+    let record = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::verify_record(&record, Some(&pinned_vk), &goal_id, "v1", 1)
+        .expect("signed REJECT must verify against the pinned verifying key");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: reject without notes is still refused (existing behavior preserved)
+// ---------------------------------------------------------------------------
+
+/// Even WITH the correct secret, reject --notes '' (empty) must fail. The secret gate
+/// does not bypass the notes-required check (existing behavior preserved).
+#[test]
+fn jewije_reject_without_notes_fails() {
+    let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
+
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .env("VERIFIER_LOOP_VERIFIER_SECRET", &secret)
+        .args(["reject", "--notes", ""])
+        .assert()
+        .failure();
+
+    // Slot stays null.
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    assert_eq!(rec.status, verdict::VerdictStatus::Null, "empty-notes reject must not write");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Second verdict for the same slot is rejected (AlreadyFinal)
+// ---------------------------------------------------------------------------
+
+/// After a successful signed APPROVE, a second jewije approve on the same slot must
+/// fail (AlreadyFinal) and leave the original signed verdict byte-for-byte unchanged.
+#[test]
+fn jewije_second_verdict_on_same_slot_fails_already_final() {
+    let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
+
+    // First verdict: signed APPROVE via the correct secret.
+    Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .env("VERIFIER_LOOP_VERIFIER_SECRET", &secret)
+        .arg("approve")
+        .assert()
+        .success();
+
+    // Snapshot the signed verdict bytes AFTER the first write so we can prove the
+    // second attempt does not mutate it.
+    let slot = slot_verdict_file(dir.path(), &goal_id, "v1", 1);
+    let first_bytes = fs::read_to_string(&slot).unwrap();
+    assert!(first_bytes.contains("signature"), "first verdict must be signed (RED if unsigned)");
+
+    // Second attempt — even with the same correct secret — must fail (AlreadyFinal).
+    let assert = Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .env("VERIFIER_LOOP_VERIFIER_SECRET", &secret)
+        .arg("approve")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_lowercase();
+    assert!(
+        stderr.contains("already") || stderr.contains("final"),
+        "second verdict must surface AlreadyFinal; got: {stderr}"
+    );
+
+    // The original signed verdict must be byte-for-byte unchanged.
+    let after_bytes = fs::read_to_string(&slot).unwrap();
+    assert_eq!(
+        first_bytes, after_bytes,
+        "already-final slot must NOT be mutated by a second attempt"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Null-slot first-fill without the pinned secret fails closed
+// ---------------------------------------------------------------------------
+
+/// A goal dir whose slot has NO pinned verifier-pubkey.json (a pre-change goal layout)
+/// must reject any jewije approve, regardless of which secret is supplied. The pinned
+/// pubkey is the trust anchor — no anchor => Unauthenticated.
+#[test]
+fn jewije_approve_on_slot_without_pinned_pubkey_fails_closed() {
+    // Build a fresh goal + null slot WITHOUT minting a pinned pubkey.
+    let dir = tempfile::tempdir().unwrap();
+    let goal_id = goal::new(dir.path(), "build it", None).unwrap();
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", 1);
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
+    assert!(
+        !verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join(verdict::PUBKEY_FILE).exists(),
+        "test precondition: no pinned pubkey for this slot"
+    );
+
+    // Any secret — even a freshly-minted valid one — must fail because there is no
+    // pinned anchor to match against.
+    let arbitrary = crypto::generate_keypair();
+    let arbitrary_hex = crypto::signing_key_to_hex(&arbitrary.signing);
+
+    let assert = Command::cargo_bin("verifier-verdict")
+        .unwrap()
+        .env("VERIFIER_LOOP_HOME", dir.path())
+        .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
+        .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
+        .env("VERIFIER_LOOP_ROUND", "1")
+        .env("VERIFIER_LOOP_VERIFIER_SECRET", &arbitrary_hex)
+        .arg("approve")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_lowercase();
+    assert!(
+        stderr.contains("unauthenticated")
+            || stderr.contains("pubkey")
+            || stderr.contains("pin"),
+        "approve on a slot without a pinned pubkey must surface an unauthenticated/pubkey-shaped error; got: {stderr}"
+    );
+
+    // The slot stays null.
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    assert_eq!(rec.status, verdict::VerdictStatus::Null, "slot must remain null");
+}
