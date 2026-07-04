@@ -105,6 +105,21 @@ char count must be `>= minGoalChars`. Empty/whitespace-only `goalText` is ALWAYS
 regardless of `minGoalChars`. Below-threshold → fail-closed error before any goal dir / signature
 is written.
 
+## Closed schema + runtime `cwd`
+
+The `config.json` schema is **closed**: any key outside the canonical set
+(`n`, `m`, `maxTurn`, `backend`, `gitDiffMaxChars`, `verifierTimeoutSec`, `verifierPromptFile`,
+`minGoalChars`) is a hard parse error. Notably there is **no `cwd` key** — the frozen snapshot's
+`cwd` is always `std::env::current_dir()` at invocation time. To verify work in a worktree:
+
+```bash
+cd /path/to/worktree && jewilo NEW "<goal>"
+```
+
+Legacy keys from older releases (`cwd`, `model`, `verifierPromptTemplate`,
+`verifierResumePromptTemplate`) must be removed; jewilo exits non-zero with an error naming the
+offending field if any are present.
+
 ## Stub / custom backend
 
 Built-in adapters are `pi`, `hermes`, `acpx` (resolved from `config.backend`). Any **other**
