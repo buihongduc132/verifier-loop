@@ -25,8 +25,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use verifier_loop::{acp, spawn, store};
-use verifier_loop::goal;
+use verifier_loop::{acp, consensus, goal, receipt, spawn, store, verdict};
+
+use sha2::{Digest, Sha256};
 
 /// A blank prompt is fine: the fake adapters carry no `{prompt}` placeholder, so the
 /// orchestrator's whitespace split yields just the script path.
@@ -315,6 +316,390 @@ EOF
     let meta: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(vdir.join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["sid"], "abc-123", "meta.json carries captured sid");
+}
+
+// ===========================================================================
+// verifier-spawn MODIFIED (tamper-hardening) — RED phase
+//
+// New contract (D3 / tasks.md §6 of add-verifier-tamper-hardening):
+//   1. Before launching each V*, spawn mints a fresh Ed25519 keypair via
+//      `verdict::mint_and_pin_pubkey` and pins the pubkey into the slot as
+//      `verifier-pubkey.json`.
+//   2. The minted SigningKey's hex is injected into the V* process env as
+//      `VERIFIER_LOOP_VERIFIER_SECRET`.
+//   3. The stub backend forwards that env to its `jewije approve` call so the
+//      signed-verdict path is taken.
+//   4. End-to-end `jewilo NEW` (stub_approve backend) produces, per slot,
+//      `verifier-pubkey.json` + a SIGNED `verdict.json` (signature + pubkeyId),
+//      a populated `receipt-log.jsonl` (one entry per APPROVE), and a
+//      `completion.json` whose hash inputs fold in the receipt head.
+//
+// These tests are written FIRST and are expected to FAIL until the GREEN
+// spawn/consensus/stub tasks land. DO NOT implement here.
+// ===========================================================================
+
+/// Absolute path to the in-repo `scripts/stub_approve.sh` backend.
+fn stub_approve_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/stub_approve.sh")
+}
+
+/// Seed a git work tree (the frozen snapshot requires one) + config + return goal dir.
+/// Mirrors the cli_e2e.rs pattern: tempdir, `git init`, write `config.json`.
+fn seed_worktree(home: &Path, n: u32, m: u32) {
+    let git_ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(home)
+        .args(["init", "-q"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(git_ok, "git init failed in tempdir");
+
+    let cfg = serde_json::json!({
+        "n": n, "m": m, "maxTurn": 3, "backend": "stub",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 30
+    });
+    fs::write(home.join("config.json"), cfg.to_string()).unwrap();
+}
+
+/// Drive `verifier-loop NEW "<goal>"` with the stub_approve backend against `home`.
+/// Returns the raw process output regardless of exit status (some tests assert failure).
+fn run_jewilo_new(home: &Path, goal_text: &str) -> std::process::Output {
+    let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("verifier-loop"));
+    c.arg("NEW")
+        .arg(goal_text)
+        .env("VERIFIER_LOOP_HOME", home)
+        .env("VERIFIER_LOOP_BACKEND_CMD", stub_approve_path())
+        .current_dir(home);
+    c.output().expect("verifier-loop subprocess ran")
+}
+
+/// Read the per-goal completion.json, return as a JSON value.
+fn read_completion(home: &Path, goal_id: &str) -> serde_json::Value {
+    let p = goal::goal_dir(home, goal_id).join(consensus::COMPLETION_FILE);
+    serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// #1 — spawn mints a per-verifier pubkey BEFORE launching each V*
+// ---------------------------------------------------------------------------
+
+#[test]
+fn spawn_mints_pubkey_for_each_verifier_before_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = serde_json::json!({
+        "n": 1, "m": 2, "maxTurn": 3, "backend": "custom",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10
+    });
+    let goal_id = seed_goal(root, "g", &config);
+
+    // A backend that does NOT touch the slot: just emits an ACP stream + exits.
+    let script = write_script(
+        dir.path(),
+        "noop.sh",
+        r#"#!/bin/sh
+cat <<'EOF'
+{"type":"session","id":"s-$VERIFIER_LOOP_VERIFIER_ID"}
+{"type":"agent_end","messages":[],"willRetry":false}
+EOF
+"#,
+    );
+    let adapter = script_adapter(&script);
+
+    rt().block_on(spawn::spawn_round(spawn::SpawnInput {
+        root,
+        goal_id: &goal_id,
+        round: 1,
+        config: &store::Config::load_in(root).unwrap(),
+        prompt: PROMPT,
+        adapter: &adapter,
+    }))
+    .expect("spawn round succeeds");
+
+    for vid in ["v1", "v2"] {
+        let p = verifier_dir(root, &goal_id, 1, vid).join(verdict::PUBKEY_FILE);
+        assert!(p.exists(), "{vid} verifier-pubkey.json should be pinned at spawn time");
+        let raw = fs::read_to_string(&p).unwrap();
+        let file: verdict::VerifierPubkeyFile = serde_json::from_str(&raw).unwrap();
+        // 64 hex chars = 32-byte Ed25519 verifying key.
+        assert_eq!(file.pubkey.len(), 64, "{vid} pubkey is 64 hex chars");
+        assert!(
+            file.pubkey.chars().all(|c| c.is_ascii_hexdigit()),
+            "{vid} pubkey is lowercase hex"
+        );
+        assert!(!file.minted_at.is_empty(), "{vid} mintedAt present");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #2 — distinct pubkeys across verifiers (fresh keypair per slot)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn spawn_distinct_pubkeys_across_verifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = serde_json::json!({
+        "n": 1, "m": 2, "maxTurn": 3, "backend": "custom",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10
+    });
+    let goal_id = seed_goal(root, "g", &config);
+
+    let script = write_script(
+        dir.path(),
+        "noop.sh",
+        r#"#!/bin/sh
+cat <<'EOF'
+{"type":"session","id":"s"}
+{"type":"agent_end","messages":[],"willRetry":false}
+EOF
+"#,
+    );
+    let adapter = script_adapter(&script);
+
+    rt().block_on(spawn::spawn_round(spawn::SpawnInput {
+        root,
+        goal_id: &goal_id,
+        round: 1,
+        config: &store::Config::load_in(root).unwrap(),
+        prompt: PROMPT,
+        adapter: &adapter,
+    }))
+    .expect("spawn succeeds");
+
+    let v1 = fs::read_to_string(verifier_dir(root, &goal_id, 1, "v1").join(verdict::PUBKEY_FILE))
+        .unwrap();
+    let v2 = fs::read_to_string(verifier_dir(root, &goal_id, 1, "v2").join(verdict::PUBKEY_FILE))
+        .unwrap();
+    let pk1: verdict::VerifierPubkeyFile = serde_json::from_str(&v1).unwrap();
+    let pk2: verdict::VerifierPubkeyFile = serde_json::from_str(&v2).unwrap();
+    assert_ne!(
+        pk1.pubkey, pk2.pubkey,
+        "each verifier gets its own fresh keypair (no shared key)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #3 — closed loop (jewilo NEW + stub_approve) yields SIGNED verdicts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_loop_produces_signed_verdicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    seed_worktree(home, 2, 2);
+
+    let out = run_jewilo_new(home, "ship the feature");
+    assert!(
+        out.status.success(),
+        "jewilo NEW should reach consensus; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Discover the goal id (single goal dir under goals/).
+    let goals_dir = home.join("goals");
+    let goal_id = fs::read_dir(&goals_dir)
+        .unwrap()
+        .next()
+        .and_then(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .expect("one goal dir exists");
+
+    for vid in ["v1", "v2"] {
+        // (a) pinned pubkey present.
+        let pinned = verdict::read_pinned_pubkey(home, &goal_id, vid, 1)
+            .expect("pinned pubkey reads")
+            .expect("pubkey was pinned at spawn");
+
+        // (b) verdict.json is signed.
+        let rec = verdict::read_verdict(home, &goal_id, vid, 1).expect("verdict reads");
+        assert_eq!(rec.status, verdict::VerdictStatus::Approve, "{vid} APPROVE");
+        let sig = rec.signature.as_ref().expect("{vid} signature present");
+        assert_eq!(sig.len(), 128, "{vid} signature is 128 hex (64-byte Ed25519)");
+        let pkid = rec.pubkey_id.as_ref().expect("{vid} pubkeyId present");
+        assert_eq!(pkid.len(), 16, "{vid} pubkeyId is 16 hex");
+
+        // (c) the signature verifies against the pinned key.
+        verdict::verify_record(&rec, Some(&pinned), &goal_id, vid, 1)
+            .expect("{vid} signature verifies against pinned pubkey");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #4 — closed loop writes receipt-log entries (one per APPROVE), chain verifies
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_loop_writes_receipt_log_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    seed_worktree(home, 2, 2);
+
+    let out = run_jewilo_new(home, "ship the feature");
+    assert!(out.status.success(), "jewilo NEW should pass");
+
+    let goal_id = fs::read_dir(home.join("goals"))
+        .unwrap()
+        .next()
+        .and_then(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .unwrap();
+
+    let log_path = receipt::receipt_log_path(home, &goal_id);
+    assert!(log_path.exists(), "receipt-log.jsonl exists");
+
+    let entries = receipt::read_receipt_log(home, &goal_id).expect("log parses");
+    assert_eq!(entries.len(), 2, "exactly one entry per APPROVE (m=2)");
+    for e in &entries {
+        assert_eq!(e.status, "APPROVE", "entry status");
+        assert_eq!(e.kind, "approve", "entry kind");
+    }
+
+    receipt::verify_chain(&entries).expect("chain verifies end-to-end");
+
+    let head = receipt::read_receipt_head(home, &goal_id);
+    assert_eq!(
+        head,
+        entries.last().unwrap().entry_hash,
+        "read_receipt_head returns the last entry_hash"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5 — completion.json hash inputs fold in the receipt head
+//
+// RED today: the consensus hash does NOT yet include the receipt head. This test
+// recomputes the hash WITH the head and asserts it equals the stored fullDigest.
+// GREEN-consensus task makes it pass.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_loop_completion_hash_inputs_include_receipt_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    seed_worktree(home, 2, 2);
+
+    let out = run_jewilo_new(home, "ship the feature");
+    assert!(out.status.success(), "jewilo NEW should pass");
+
+    let goal_id = fs::read_dir(home.join("goals"))
+        .unwrap()
+        .next()
+        .and_then(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .unwrap();
+
+    let completion = read_completion(home, &goal_id);
+    let stored_full = completion["fullDigest"].as_str().expect("fullDigest present").to_string();
+    let matched_at = completion["matchedAt"].as_str().expect("matchedAt present").to_string();
+    let round = completion["roundNumber"].as_u64().expect("roundNumber present") as u32;
+
+    // Recompute the inputs we can read back.
+    let salt = store::salt_in(home).expect("salt reads");
+    let sig_record: goal::SignatureRecord = serde_json::from_str(&fs::read_to_string(
+        goal::goal_dir(home, &goal_id).join(goal::SIGNATURE_FILE),
+    )
+    .unwrap())
+    .unwrap();
+
+    // Reconstruct matching verdicts from completion.json (already canonical order).
+    let matching: Vec<consensus::MatchingVerdict> = completion["matchingVerdicts"]
+        .as_array()
+        .expect("matchingVerdicts array")
+        .iter()
+        .map(|v| consensus::MatchingVerdict {
+            verifier_id: v["verifierId"].as_str().unwrap().to_string(),
+            registered_at: v["registeredAt"].as_str().unwrap().to_string(),
+        })
+        .collect();
+
+    // Sanity: the existing (head-less) compute_hash reproduces the stored digest.
+    // This proves our reconstructed inputs are correct. (Should pass today.)
+    let without_head = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &sig_record.signature,
+        round,
+        &matching,
+        &matched_at,
+    );
+    assert_eq!(
+        without_head.full_digest(),
+        stored_full,
+        "sanity: head-less recompute matches stored digest (inputs reconstructed correctly)"
+    );
+
+    // The NEW contract: the digest must fold in the receipt head. Recompute WITH the
+    // head appended to the canonical input string and assert it equals the stored
+    // digest. Today this FAILS (head not yet in inputs) → RED.
+    let head = receipt::read_receipt_head(home, &goal_id);
+    assert!(!head.is_empty(), "receipt head is non-empty after m=2 approves");
+
+    // Mirror consensus::compute_hash's input assembly, then append the head.
+    // (The exact insertion point is the GREEN task's choice; this test pins the
+    // contract that the head IS part of the hashed bytes by appending it.)
+    let canon_json = serde_json::to_string(
+        &matching
+            .iter()
+            .map(|m| {
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("registeredAt", serde_json::Value::String(m.registered_at.clone()));
+                map.insert("verifierId", serde_json::Value::String(m.verifier_id.clone()));
+                serde_json::to_value(&map).unwrap()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let input_with_head = format!(
+        "{salt}{goal_id}{sig}{round}{canon_json}{matched_at}{head}",
+        sig = sig_record.signature,
+    );
+    let recompute_with_head = hex::encode(Sha256::digest(input_with_head.as_bytes()));
+
+    assert_eq!(
+        recompute_with_head, stored_full,
+        "completion hash MUST fold in the receipt head (verifier-spawn MODIFIED D3)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #6 — stub_approve receives VERIFIER_LOOP_VERIFIER_SECRET and forwards it
+//
+// Proven indirectly: the only way `register_signed_approve` succeeds (and thus a
+// signed verdict.json lands) is if the secret arrived at jewije. A signed verdict
+// with a verifying pubkeyId therefore proves the env was injected + forwarded.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stub_approve_receives_secret_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    seed_worktree(home, 1, 1);
+
+    let out = run_jewilo_new(home, "ship the feature");
+    assert!(out.status.success(), "jewilo NEW should pass");
+
+    let goal_id = fs::read_dir(home.join("goals"))
+        .unwrap()
+        .next()
+        .and_then(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .unwrap();
+
+    // The verdict must be SIGNED — which only happens if VERIFIER_LOOP_VERIFIER_SECRET
+    // reached jewije via the stub. An unsigned APPROVE (or a null verdict) means the
+    // secret was never injected/forwarded.
+    let rec = verdict::read_verdict(home, &goal_id, "v1", 1).expect("verdict reads");
+    assert_eq!(rec.status, verdict::VerdictStatus::Approve);
+    assert!(
+        rec.signature.is_some(),
+        "verdict is signed ⇒ secret reached jewije via the stub backend"
+    );
+    assert!(
+        rec.pubkey_id.is_some(),
+        "signed verdict carries a pubkeyId bound to the pinned key"
+    );
 }
 
 // ---------------------------------------------------------------------------
