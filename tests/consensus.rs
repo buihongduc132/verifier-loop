@@ -138,7 +138,8 @@ fn evaluate_2_of_2_unanimous_pass() {
         ("v1".to_string(), approve_at("2026-07-03T10:00:00Z")),
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
     ];
-    let r = consensus::evaluate(&verdicts, 2, 2);
+    // Legacy unsigned regime: no pinned pubkeys → unsigned APPROVEs are trusted.
+    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 2);
     assert!(r.passed, "2/2 unanimous must pass");
     assert_eq!(r.approve_count, 2);
     assert_eq!(r.n, 2);
@@ -153,7 +154,7 @@ fn evaluate_2_of_3_majority_pass() {
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
         ("v3".to_string(), reject_at("bad", "2026-07-03T10:02:00Z")),
     ];
-    let r = consensus::evaluate(&verdicts, 2, 3);
+    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 3);
     assert!(r.passed, "2 of 3 APPROVE must pass");
     assert_eq!(r.approve_count, 2);
     assert_eq!(r.matching_verdicts.len(), 2, "only approvers match");
@@ -166,7 +167,7 @@ fn evaluate_below_threshold_fails() {
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
         ("v3".to_string(), reject_at("missing X", "2026-07-03T10:02:00Z")),
     ];
-    let r = consensus::evaluate(&verdicts, 3, 3);
+    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 3, 3);
     assert!(!r.passed, "2 of 3 with n=3 must fail");
 }
 
@@ -177,7 +178,7 @@ fn evaluate_null_and_reject_do_not_count_toward_n() {
         ("v2".to_string(), null_verdict()),
         ("v3".to_string(), reject_at("notes here", "2026-07-03T10:02:00Z")),
     ];
-    let r = consensus::evaluate(&verdicts, 2, 3);
+    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 3);
     assert!(!r.passed, "1 APPROVE + null + reject cannot reach n=2");
     assert_eq!(r.approve_count, 1);
     // Rejection surfaces the reject notes and the null marker.
@@ -191,7 +192,7 @@ fn evaluate_null_and_reject_do_not_count_toward_n() {
 fn evaluate_missing_verdict_treated_as_null_fail_closed() {
     // Fewer verdicts than m: the missing ones are absent entirely.
     let verdicts = vec![("v1".to_string(), approve_at("2026-07-03T10:00:00Z"))];
-    let r = consensus::evaluate(&verdicts, 2, 2);
+    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 2);
     assert!(!r.passed, "missing verdicts must fail closed");
 }
 
@@ -202,7 +203,7 @@ fn matching_verdicts_sorted_by_verifier_id() {
         ("v1".to_string(), approve_at("2026-07-03T10:00:00Z")),
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
     ];
-    let r = consensus::evaluate(&verdicts, 3, 3);
+    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 3, 3);
     assert!(r.passed);
     let ids: Vec<&str> = r.matching_verdicts.iter().map(|m| m.verifier_id.as_str()).collect();
     assert_eq!(ids, vec!["v1", "v2", "v3"], "must be sorted asc by verifierId");
@@ -231,6 +232,7 @@ fn compute_hash_formula_matches_spec_recompute() {
         1,
         &matching,
         "2026-07-03T10:05:00Z",
+        "",
     );
     let (exp_short, exp_full) = spec_recompute("deadbeef", "goal-123", "sig-abc", 1, &matching, "2026-07-03T10:05:00Z");
     assert_eq!(out.short_hash(), exp_short, "short hash must match independent recompute");
@@ -243,8 +245,8 @@ fn compute_hash_deterministic_identical_inputs() {
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
-    let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
+    let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
+    let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
     assert_eq!(a.short_hash(), b.short_hash(), "identical inputs -> identical short hash");
     assert_eq!(a.full_digest(), b.full_digest(), "identical inputs -> identical full digest");
 
@@ -253,7 +255,7 @@ fn compute_hash_deterministic_identical_inputs() {
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let c = consensus::compute_hash("s", "g", "sig", 1, &matching_rev, "2026-07-03T10:05:00Z");
+    let c = consensus::compute_hash("s", "g", "sig", 1, &matching_rev, "2026-07-03T10:05:00Z", "");
     assert_eq!(a.short_hash(), c.short_hash());
 }
 
@@ -263,7 +265,7 @@ fn compute_hash_short_form_is_mmddyy_dash_8hex() {
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let out = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
+    let out = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
     let short = out.short_hash();
     // mmddyy from matchedAt UTC (2026-07-03 -> 070326), hyphen, 8 lowercase hex.
     assert_eq!(&short[..7], "070326-", "prefix must be mmddyy- from matchedAt: {short}");
@@ -281,7 +283,7 @@ fn compute_hash_full_digest_is_64_lowercase_hex() {
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let out = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
+    let out = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
     let full = out.full_digest();
     assert_eq!(full.len(), 64, "full digest must be 64 hex chars: {full}");
     assert!(
@@ -298,8 +300,8 @@ fn compute_hash_mmddyy_tracks_matched_at_not_created_at() {
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z");
-    let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-08-15T10:05:00Z");
+    let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
+    let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-08-15T10:05:00Z", "");
     assert_ne!(a.short_hash()[..6], b.short_hash()[..6], "mmddyy must come from matchedAt");
     assert_ne!(a.full_digest(), b.full_digest(), "full digest must change with matchedAt");
 }
@@ -320,7 +322,7 @@ fn tamper_goal_text_invalidates_both_short_and_full_digest() {
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let original = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching, "2026-07-03T10:05:00Z");
+    let original = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching, "2026-07-03T10:05:00Z", "");
 
     // Tamper goalText on disk.
     let mut tampered = record.clone();
@@ -333,7 +335,7 @@ fn tamper_goal_text_invalidates_both_short_and_full_digest() {
 
     // Recompute signature from the now-tampered goalText -> different signature -> different hash.
     let tampered_sig = goal::compute_signature(&salt, &tampered.goal_text, &record.created_at);
-    let after = consensus::compute_hash(&salt, &goal_id, &tampered_sig, 1, &matching, "2026-07-03T10:05:00Z");
+    let after = consensus::compute_hash(&salt, &goal_id, &tampered_sig, 1, &matching, "2026-07-03T10:05:00Z", "");
 
     assert_ne!(original.short_hash(), after.short_hash(), "edited goalText MUST invalidate short hash");
     assert_ne!(original.full_digest(), after.full_digest(), "edited goalText MUST invalidate full digest");
@@ -355,7 +357,7 @@ fn tamper_verdict_notes_invalidates_full_digest() {
         verifier_id: "v1".into(),
         registered_at: v.registered_at.clone().unwrap(),
     }];
-    let original = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching, "2026-07-03T10:05:00Z");
+    let original = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching, "2026-07-03T10:05:00Z", "");
 
     // Tamper the verdict: edit registeredAt (and notes to force a value-bearing change).
     let tampered = verdict::VerdictRecord {
@@ -376,7 +378,7 @@ fn tamper_verdict_notes_invalidates_full_digest() {
         verifier_id: "v1".into(),
         registered_at: v2.registered_at.clone().unwrap(),
     }];
-    let after = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching2, "2026-07-03T10:05:00Z");
+    let after = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching2, "2026-07-03T10:05:00Z", "");
 
     assert_ne!(original.full_digest(), after.full_digest(), "edited verdict MUST invalidate full digest");
 }
@@ -400,14 +402,14 @@ fn write_completion_writes_record_on_success() {
         ("v1".to_string(), v1),
         ("v2".to_string(), v2),
     ];
-    let r = consensus::evaluate(&verdicts, cfg.n, cfg.m);
+    let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, cfg.n, cfg.m);
     assert!(r.passed);
 
     let salt = store::salt_in(dir.path()).unwrap();
     let record = goal::load(dir.path(), &goal_id).unwrap();
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
     let matched_at = "2026-07-03T10:05:00Z";
-    let hash = consensus::compute_hash(&salt, &goal_id, &sig, 1, &r.matching_verdicts, matched_at);
+    let hash = consensus::compute_hash(&salt, &goal_id, &sig, 1, &r.matching_verdicts, matched_at, "");
 
     let path = consensus::write_completion(dir.path(), &goal_id, &r, 1, &hash, matched_at).unwrap();
     assert!(path.exists(), "completion.json must exist");
@@ -430,11 +432,11 @@ fn no_completion_on_failure() {
         ("v1".to_string(), approve_at("2026-07-03T10:00:00Z")),
         ("v2".to_string(), reject_at("nope", "2026-07-03T10:01:00Z")),
     ];
-    let r = consensus::evaluate(&verdicts, 2, 2);
+    let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, 2, 2);
     assert!(!r.passed);
 
     // write_completion must refuse on a non-passing round.
-    let dummy = consensus::compute_hash("s", "g", "sig", 1, &[], "2026-07-03T10:05:00Z");
+    let dummy = consensus::compute_hash("s", "g", "sig", 1, &[], "2026-07-03T10:05:00Z", "");
     let res = consensus::write_completion(dir.path(), &goal_id, &r, 1, &dummy, "2026-07-03T10:05:00Z");
     assert!(res.is_err(), "must refuse to write completion on failure");
 
@@ -458,14 +460,14 @@ fn audit_recompute_matches_stored_hash() {
     let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
     let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
     let verdicts = vec![("v1".to_string(), v1), ("v2".to_string(), v2)];
-    let r = consensus::evaluate(&verdicts, cfg.n, cfg.m);
+    let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, cfg.n, cfg.m);
     assert!(r.passed);
 
     let salt = store::salt_in(dir.path()).unwrap();
     let record = goal::load(dir.path(), &goal_id).unwrap();
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
     let matched_at = "2026-07-03T10:05:00Z";
-    let hash = consensus::compute_hash(&salt, &goal_id, &sig, 1, &r.matching_verdicts, matched_at);
+    let hash = consensus::compute_hash(&salt, &goal_id, &sig, 1, &r.matching_verdicts, matched_at, "");
     consensus::write_completion(dir.path(), &goal_id, &r, 1, &hash, matched_at).unwrap();
 
     // --- Auditor recompute, reading ONLY goal-dir + .salt ---
@@ -485,7 +487,7 @@ fn audit_recompute_matches_stored_hash() {
             registered_at: vb.registered_at.unwrap(),
         },
     ];
-    let recomputed = consensus::compute_hash(&salt2, &goal_id, &sig2, 1, &audit_matching, matched_at);
+    let recomputed = consensus::compute_hash(&salt2, &goal_id, &sig2, 1, &audit_matching, matched_at, "");
 
     let completion_raw = fs::read_to_string(
         goal::goal_dir(dir.path(), &goal_id).join("completion.json"),
@@ -518,7 +520,7 @@ fn n_m_static_from_config_json() {
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
         ("v3".to_string(), reject_at("x", "2026-07-03T10:02:00Z")),
     ];
-    let r = consensus::evaluate(&verdicts, cfg.n, cfg.m);
+    let r = consensus::evaluate(dir.path(), "config-test-goal", 1, &verdicts, cfg.n, cfg.m);
     assert!(r.passed, "2-of-3 config threshold met");
 }
 

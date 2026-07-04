@@ -202,7 +202,7 @@ fn run_round(
         verdicts.push((vid, rec));
     }
 
-    let result = verifier_loop::consensus::evaluate(&verdicts, config.n, config.m);
+    let result = verifier_loop::consensus::evaluate(root, goal_id, round, &verdicts, config.n, config.m);
     if result.passed {
         let salt = verifier_loop::store::salt_in(root).map_err(|e| format!("salt: {e}"))?;
         let sig_record: verifier_loop::goal::SignatureRecord = serde_json::from_str(
@@ -211,6 +211,7 @@ fn run_round(
         )
         .map_err(|e| format!("signature parse: {e}"))?;
         let matched_at = Utc::now().to_rfc3339();
+        let receipt_head = verifier_loop::receipt::read_receipt_head(root, goal_id);
         let hash = verifier_loop::consensus::compute_hash(
             &salt,
             goal_id,
@@ -218,6 +219,7 @@ fn run_round(
             round,
             &result.matching_verdicts,
             &matched_at,
+            &receipt_head,
         );
         verifier_loop::consensus::write_completion(root, goal_id, &result, round, &hash, &matched_at)
             .map_err(|e| format!("completion write: {e}"))?;
@@ -234,6 +236,12 @@ fn run_round(
                 "  no verdict from: {}",
                 result.rejection.null_verifiers.join(", ")
             );
+        }
+        if !result.rejection.signature_failures.is_empty() {
+            eprintln!("  signature failures:");
+            for (vid, reason) in &result.rejection.signature_failures {
+                eprintln!("    {vid}: {reason}");
+            }
         }
         Err(format!("round {round} rejected"))
     }
