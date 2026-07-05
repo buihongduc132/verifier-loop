@@ -129,10 +129,7 @@ pub fn render(template: Option<&str>, vars: &PromptVars<'_>) -> Result<String, P
 }
 
 /// Renders the RESUME prompt. `template = None` -> baked-in resume default.
-pub fn render_resume(
-    template: Option<&str>,
-    vars: &PromptVars<'_>,
-) -> Result<String, PromptError> {
+pub fn render_resume(template: Option<&str>, vars: &PromptVars<'_>) -> Result<String, PromptError> {
     let tpl = match template {
         Some(t) => t,
         None => default_resume_template(),
@@ -273,7 +270,12 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
 /// Asserts `cwd` is inside a git work tree; errors otherwise (fail-closed).
 fn git_check(cwd: &Path) -> Result<(), PromptError> {
     let out = Command::new("git")
-        .args(["-C", &cwd.to_string_lossy(), "rev-parse", "--is-inside-work-tree"])
+        .args([
+            "-C",
+            &cwd.to_string_lossy(),
+            "rev-parse",
+            "--is-inside-work-tree",
+        ])
         .output()
         .map_err(|e| PromptError::SnapshotCapture(format!("git not available: {e}")))?;
     if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim() != "true" {
@@ -490,6 +492,23 @@ mod tests {
         assert!(
             VERIFIER_POLICY.contains("Verifier") || VERIFIER_POLICY.contains("ZERO trust"),
             "policy must embed the detective contract"
+        );
+        // The policy heading must appear EXACTLY ONCE in each composed const
+        // (the canonical policy is composed only via the `concat!` preamble; the
+        // template body files must NOT carry an inline duplicate). design D3.
+        let count_template = DEFAULT_TEMPLATE
+            .matches("# Verifier Detective Policy")
+            .count();
+        let count_resume = DEFAULT_RESUME_TEMPLATE
+            .matches("# Verifier Detective Policy")
+            .count();
+        assert_eq!(
+            count_template, 1,
+            "DEFAULT_TEMPLATE must contain the policy heading exactly once (got {count_template})"
+        );
+        assert_eq!(
+            count_resume, 1,
+            "DEFAULT_RESUME_TEMPLATE must contain the policy heading exactly once (got {count_resume})"
         );
     }
 }

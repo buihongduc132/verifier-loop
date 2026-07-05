@@ -63,7 +63,7 @@ fn read_status(root: &Path, goal_id: &str, vid: &str, round: u32) -> Value {
 fn approve_writes_verdict_with_status_and_registered_at() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
 
     let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
     assert_eq!(
@@ -177,7 +177,7 @@ fn cli_reject_with_notes_prints_verdict_registered_and_exits_zero() {
 fn second_verdict_attempt_is_rejected_and_stored_unchanged() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let err = verdict::register_reject(dir.path(), &goal_id, "v1", 1, "too late").unwrap_err();
     assert!(
         matches!(err, verdict::VerdictError::AlreadyFinal),
@@ -406,8 +406,8 @@ fn cli_with_home_unset_falls_back_to_dot_verifier_loop() {
 fn first_write_wins_is_atomic_across_two_approves() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
-    let err = verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap_err();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let err = verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap_err();
     assert!(matches!(err, verdict::VerdictError::AlreadyFinal));
 }
 
