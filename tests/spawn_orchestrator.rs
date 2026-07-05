@@ -198,7 +198,7 @@ fn parallel_spawn_does_not_serialize() {
         dir.path(),
         "slow.sh",
         r#"#!/bin/sh
-sleep 0.3
+sleep 1
 cat <<'EOF'
 {"type":"session","id":"s"}
 {"type":"agent_end","messages":[],"willRetry":false}
@@ -219,9 +219,14 @@ EOF
     .expect("spawn succeeds");
     let elapsed = start.elapsed();
 
-    // Parallel upper bound: well below 2x the single sleep. Allow generous slack.
+    // Parallel upper bound: well below 2x the single sleep. Each verifier sleeps 1s, so
+    // a serialized run would take >= 2s; a parallel run takes ~1s + per-child spawn
+    // overhead (fork/exec/load, observed up to ~500ms on a busy host). The 1.7s
+    // threshold sits comfortably between the realistic parallel ceiling (~1.5s) and
+    // the serialized floor (2.0s), giving ~300ms margin on each side so the test does
+    // not flake under load while still detecting true serialization.
     assert!(
-        elapsed < Duration::from_millis(550),
+        elapsed < Duration::from_millis(1700),
         "spawn was serialized (elapsed={elapsed:?})"
     );
 }

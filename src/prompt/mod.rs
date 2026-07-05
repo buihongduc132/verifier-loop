@@ -240,7 +240,7 @@ pub fn truncate_diff(s: &str, max_chars: u64) -> (String, bool) {
 ///
 /// Runs, in `cwd`:
 ///   * `git status --porcelain`
-///   * `git diff` (unpaged)
+///   * `git diff HEAD` (unpaged; staged + unstaged vs last commit)
 ///   * `git ls-files` then reads each file's mtime (best-effort; a missing/unreadable
 ///     file is skipped, never fatal).
 ///   * `git rev-parse --show-toplevel` is checked first; a non-git cwd fails closed.
@@ -253,7 +253,17 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
     git_check(cwd)?;
 
     let git_status = git_capture(cwd, &["status", "--porcelain"])?;
-    let raw_diff = git_capture(cwd, &["diff"])?;
+    // Full working-tree delta vs the last commit (staged AND unstaged). Bare
+    // `git diff` would hide staged changes, letting an author `git add` a
+    // regression and keep it invisible to every verifier. On a repo with no
+    // commits yet (fresh `git init`), `git diff HEAD` errors — fall back to
+    // `git diff --cached` so staged intent is still captured (unstaged changes
+    // to untracked files are listed by `git status --porcelain` above).
+    let raw_diff = match git_capture(cwd, &["diff", "HEAD"]) {
+        Ok(d) => d,
+        Err(_) if !head_exists(cwd)? => git_capture(cwd, &["diff", "--cached"])?,
+        Err(e) => return Err(e),
+    };
     let (git_diff, truncated) = truncate_diff(&raw_diff, max_chars);
     let file_edit_times = capture_file_edit_times(cwd)?;
 
@@ -265,6 +275,19 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
         git_diff_max_chars: max_chars,
         truncated,
     })
+}
+
+/// Returns true iff `cwd` has at least one commit (HEAD resolves). Used to pick
+/// between `git diff HEAD` and the fresh-repo fallback without swallowing real
+/// git errors (fail-closed still holds for `git diff` failures on a real repo).
+fn head_exists(cwd: &Path) -> Result<bool, PromptError> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()
+        .map_err(|e| PromptError::SnapshotCapture(format!("git rev-parse failed: {e}")))?;
+    Ok(out.status.success())
 }
 
 /// Asserts `cwd` is inside a git work tree; errors otherwise (fail-closed).

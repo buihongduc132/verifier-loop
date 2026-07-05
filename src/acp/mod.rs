@@ -2,7 +2,9 @@
 //!
 //! Exhaustive `AcpEvent` enum + exhaustive `match` (D0 rationale): an unhandled event type
 //! is a compile error, guarding the silent no-SID / no-agent_end bug that breaks fail-closed.
-//! Built-in adapters: pi (`pi -p "…" --mode json`), hermes, acpx. Custom adapter via config.
+//! Built-in adapters (post fix-spawn-argv-overflow §8/D6): pi/hermes/acpx all use the
+//! stdin transport — `pi --mode json` etc., with the prompt piped to the child's stdin
+//! (no `{prompt}` token in argv). Custom adapter via config.
 //!
 //! Module layout:
 //! * [`parser`]    — `AcpEvent` enum, `parse_event`, `extract_sid`, `extract_final_output`.
@@ -11,5 +13,5 @@
 mod adapters;
 mod parser;
 
-pub use adapters::{adapter_for, render_resume, render_spawn, Adapter};
+pub use adapters::{adapter_for, render_resume, render_spawn, Adapter, Transport};
 pub use parser::{extract_final_output, extract_sid, parse_event, AcpError, AcpEvent, Message};
