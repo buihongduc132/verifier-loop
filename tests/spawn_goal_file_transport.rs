@@ -418,6 +418,10 @@ fn stale_tempfiles_swept_at_startup() {
     assert!(unrelated.exists(), "unrelated file pre-exists");
 
     // Invoke the sweep entry point (§7.3 GREEN implements the real scan).
+    // Age threshold (SWEEP_MIN_AGE_SECS): the sweep only removes files older than this
+    // so a freshly-started jewilo can't delete a concurrent sibling's active
+    // tempfile. The fixtures above were just created, so age them past the threshold.
+    std::thread::sleep(std::time::Duration::from_secs(spawn::SWEEP_MIN_AGE_SECS));
     spawn::sweep_stale_tempfiles();
 
     // The stale verifier-loop-* tempfiles MUST be gone.
