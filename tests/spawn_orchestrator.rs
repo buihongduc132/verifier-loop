@@ -187,7 +187,7 @@ ACP
 fn parallel_spawn_does_not_serialize() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    // m=2; each verifier sleeps 300ms. If serialized → ~600ms; parallel → ~300ms.
+    // m=2; each verifier sleeps 1s. If serialized → ~2s; parallel → ~1s.
     let config = serde_json::json!({
         "n": 1, "m": 2, "maxTurn": 3, "backend": "custom",
         "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10

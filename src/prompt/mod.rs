@@ -257,11 +257,22 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
     // `git diff` would hide staged changes, letting an author `git add` a
     // regression and keep it invisible to every verifier. On a repo with no
     // commits yet (fresh `git init`), `git diff HEAD` errors — fall back to
-    // `git diff --cached` so staged intent is still captured (unstaged changes
-    // to untracked files are listed by `git status --porcelain` above).
+    // BOTH `git diff --cached` (staged) AND `git diff` (unstaged) so the
+    // verifier still sees the full working tree (untracked files are listed by
+    // `git status --porcelain` above).
     let raw_diff = match git_capture(cwd, &["diff", "HEAD"]) {
         Ok(d) => d,
-        Err(_) if !head_exists(cwd)? => git_capture(cwd, &["diff", "--cached"])?,
+        Err(_) if !head_exists(cwd)? => {
+            let staged = git_capture(cwd, &["diff", "--cached"])?;
+            let unstaged = git_capture(cwd, &["diff"])?;
+            if staged.is_empty() {
+                unstaged
+            } else if unstaged.is_empty() {
+                staged
+            } else {
+                format!("{staged}\n{unstaged}")
+            }
+        }
         Err(e) => return Err(e),
     };
     let (git_diff, truncated) = truncate_diff(&raw_diff, max_chars);
