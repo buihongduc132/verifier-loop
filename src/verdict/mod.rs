@@ -460,8 +460,9 @@ pub fn register_approve(
 /// non-empty enforcement in [`register_reject`].
 fn normalize_optional_notes(notes: Option<&str>) -> Option<String> {
     notes
-        .map(|s| s.trim().to_string())
+        .map(|s| s.trim())
         .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Register a REJECT verdict with notes (atomic first-write-wins). Empty notes are refused.
