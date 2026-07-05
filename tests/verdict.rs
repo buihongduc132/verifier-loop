@@ -26,11 +26,36 @@ const REJECT: &str = "REJECT";
 
 // ===========================================================================
 // approve --notes (verdict-registration MODIFIED spec, fix-approve-notes change)
-// RED phase for fix-approve-notes-and-prompt-merge §1. Demands the NEW optional
-// `notes: Option<&str>` parameter on `register_approve` / `register_signed_approve`
-// (design D2). FAILS TO COMPILE against the current code, which has the old arity —
-// that IS RED.
+// §1 tests for the optional `notes: Option<&str>` parameter on `register_approve` /
+// `register_signed_approve` (design D2).
 // ===========================================================================
+
+// Env vars injected by jewilo (the spawn orchestrator) into every verifier child.
+// When `cargo test` runs UNDER jewilo (e.g. as a verifier-loop verifier itself), the
+// test process inherits these. assert_cmd's `Command` inherits the parent env by
+// default, so the `verifier-verdict` subprocess would pick up a STALE secret / identity
+// that doesn't match the test's temp-dir goal (which has no pinned pubkey), producing
+// `unauthenticated: invalid verifier secret`. Each test sets its OWN identity env
+// explicitly below; we scrub the inherited ones here so the subprocess is hermetic.
+// VERIFIER_LOOP_HOME is intentionally KEPT (cleared per-test when needed) because every
+// test sets it explicitly to its temp dir.
+const INHERITED_JEWILO_ENV: &[&str] = &[
+    "VERIFIER_LOOP_VERIFIER_SECRET",
+    "VERIFIER_LOOP_GOAL_ID",
+    "VERIFIER_LOOP_VERIFIER_ID",
+    "VERIFIER_LOOP_ROUND",
+];
+
+/// Build a hermetic `verifier-verdict` Command: resolves the cargo binary AND scrubs
+/// any jewilo-injected identity/secret env vars inherited from the parent process so
+/// the subprocess only sees what each test sets explicitly (hermetic-by-construction).
+fn hermetic_verifier_cmd() -> Command {
+    let mut cmd = Command::cargo_bin("verifier-verdict").expect("verifier-verdict cargo bin");
+    for var in INHERITED_JEWILO_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
 
 /// Helper: create a goal under a fresh temp store root and pre-create the round-1 v1
 /// verifier dir (mirroring what the spawn layer does at spawn time), returning the goalId.
@@ -79,8 +104,7 @@ fn approve_writes_verdict_with_status_and_registered_at() {
 fn cli_approve_prints_verdict_registered_and_exits_zero() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -131,8 +155,7 @@ fn register_reject_without_notes_is_refused_and_writes_nothing() {
 fn cli_reject_without_notes_exits_non_zero_and_writes_nothing() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -152,8 +175,7 @@ fn cli_reject_without_notes_exits_non_zero_and_writes_nothing() {
 fn cli_reject_with_notes_prints_verdict_registered_and_exits_zero() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -197,8 +219,7 @@ fn cli_second_attempt_exits_non_zero_without_altering_stored_verdict() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
     // First verdict via CLI.
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -208,8 +229,7 @@ fn cli_second_attempt_exits_non_zero_without_altering_stored_verdict() {
         .success();
 
     // Second attempt must fail.
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -259,8 +279,7 @@ fn verdict_writes_to_env_derived_slot_regardless_of_args() {
 
     // Env-derived identity (abc / v1 / round 1) — even though no conflicting arg is
     // accepted, the env vars alone must be sufficient to locate the slot.
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -280,8 +299,7 @@ fn cli_missing_identity_env_exits_non_zero() {
     let (dir, _goal_id) = fresh_goal_with_null_verdict(1);
 
     // No VERIFIER_LOOP_* identity env -> must fail closed.
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env_clear()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .arg("approve")
@@ -302,8 +320,7 @@ fn cli_missing_identity_env_exits_non_zero() {
 fn cli_reject_with_empty_notes_string_is_refused() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -327,8 +344,7 @@ fn cli_reject_with_empty_notes_string_is_refused() {
 fn cli_approve_for_unknown_goal_id_returns_goal_not_found() {
     let (dir, _goal_id) = fresh_goal_with_null_verdict(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", "goal-does-not-exist")
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -347,8 +363,7 @@ fn cli_with_home_unset_and_no_home_env_fails_closed() {
     // Remove VERIFIER_LOOP_HOME and HOME individually (not env_clear) so the
     // llvm-cov profiling env (LLVM_PROFILE_FILE) is preserved and the spawned
     // binary's coverage is still merged into the report.
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env_remove("VERIFIER_LOOP_HOME")
         .env_remove("HOME")
         .env("VERIFIER_LOOP_GOAL_ID", "any-goal")
@@ -379,8 +394,7 @@ fn cli_with_home_unset_falls_back_to_dot_verifier_loop() {
 
     // VERIFIER_LOOP_HOME deliberately unset; only HOME is provided. env_remove
     // (not env_clear) preserves the llvm-cov profiling env for the subprocess.
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env_remove("VERIFIER_LOOP_HOME")
         .env("HOME", home.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
@@ -826,8 +840,7 @@ fn jewije_approve_without_secret_fails_closed() {
     let (dir, goal_id, _secret) = fresh_goal_with_pinned_v1(1);
     let slot = slot_verdict_file(dir.path(), &goal_id, "v1", 1);
 
-    let assert = Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    let assert = hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -869,8 +882,7 @@ fn jewije_approve_with_wrong_secret_fails_closed() {
     let wrong = crypto::generate_keypair();
     let wrong_hex = crypto::signing_key_to_hex(&wrong.signing);
 
-    let assert = Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    let assert = hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -910,8 +922,7 @@ fn jewije_approve_with_wrong_secret_fails_closed() {
 fn jewije_approve_with_correct_secret_writes_signed_verdict() {
     let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -956,8 +967,7 @@ fn jewije_approve_with_correct_secret_writes_signed_verdict() {
 fn jewije_reject_with_correct_secret_writes_signed_verdict_with_notes() {
     let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -1006,8 +1016,7 @@ fn jewije_reject_with_correct_secret_writes_signed_verdict_with_notes() {
 fn jewije_reject_without_notes_fails() {
     let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
 
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -1033,8 +1042,7 @@ fn jewije_second_verdict_on_same_slot_fails_already_final() {
     let (dir, goal_id, secret) = fresh_goal_with_pinned_v1(1);
 
     // First verdict: signed APPROVE via the correct secret.
-    Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -1051,8 +1059,7 @@ fn jewije_second_verdict_on_same_slot_fails_already_final() {
     assert!(first_bytes.contains("signature"), "first verdict must be signed (RED if unsigned)");
 
     // Second attempt — even with the same correct secret — must fail (AlreadyFinal).
-    let assert = Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    let assert = hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -1100,8 +1107,7 @@ fn jewije_approve_on_slot_without_pinned_pubkey_fails_closed() {
     let arbitrary = crypto::generate_keypair();
     let arbitrary_hex = crypto::signing_key_to_hex(&arbitrary.signing);
 
-    let assert = Command::cargo_bin("verifier-verdict")
-        .unwrap()
+    let assert = hermetic_verifier_cmd()
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
