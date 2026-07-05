@@ -4,12 +4,12 @@
 //! atomically. The slot is `<store-root>/goals/<goalId>/rounds/<round>/<verifierId>/`.
 //!
 //! Semantics:
-//!   * `approve`            → write `{status:"APPROVE", registeredAt}`.
+//!   * `approve [--notes]` → write `{status:"APPROVE", registeredAt, notes?}`; notes optional (D1).
 //!   * `reject --notes`     → write `{status:"REJECT", notes, registeredAt}`.
 //!   * reject w/o notes     → refused, no write.
 //!   * first verdict final  → a non-null verdict is never overwritten (D4).
 //!   * null baseline        → a spawn-time pre-created `{status:null}` is overwritten by
-//!                            the first real verdict (null is not a verdict, only a placeholder).
+//!     the first real verdict (null is not a verdict, only a placeholder).
 //!   * fail-closed          → NULL never becomes APPROVE (D9).
 //!
 //! Identity (goalId / verifierId / round) is resolved by the CLI from `VERIFIER_LOOP_*`
@@ -72,7 +72,9 @@ impl<'de> Deserialize<'de> for VerdictStatus {
                     "unknown verdict status: {s}"
                 ))),
             },
-            _ => Err(serde::de::Error::custom("verdict status must be a string or null")),
+            _ => Err(serde::de::Error::custom(
+                "verdict status must be a string or null",
+            )),
         }
     }
 }
@@ -295,11 +297,13 @@ pub fn register_signed_approve(
     goal_id: &str,
     verifier_id: &str,
     round: u32,
+    notes: Option<&str>,
     secret: &crypto::SigningKey,
 ) -> Result<(), VerdictError> {
+    let normalized = normalize_optional_notes(notes);
     let record = build_signed_record(
         VerdictStatus::Approve,
-        None,
+        normalized,
         root,
         goal_id,
         verifier_id,
@@ -370,10 +374,9 @@ fn build_signed_record(
     secret: &crypto::SigningKey,
 ) -> Result<VerdictRecord, VerdictError> {
     // (1) Trust anchor: the pinned verifying key must exist for this slot.
-    let pinned_vk = read_pinned_pubkey(root, goal_id, verifier_id, round)?
-        .ok_or_else(|| {
-            VerdictError::Unauthenticated("no pinned verifier pubkey for this slot".to_string())
-        })?;
+    let pinned_vk = read_pinned_pubkey(root, goal_id, verifier_id, round)?.ok_or_else(|| {
+        VerdictError::Unauthenticated("no pinned verifier pubkey for this slot".to_string())
+    })?;
 
     // (2) The supplied secret must correspond to the pinned pubkey.
     let derived_vk = secret.verifying_key();
@@ -437,15 +440,27 @@ pub fn register_approve(
     goal_id: &str,
     verifier_id: &str,
     round: u32,
+    notes: Option<&str>,
 ) -> Result<(), VerdictError> {
     let record = VerdictRecord {
         status: VerdictStatus::Approve,
-        notes: None,
+        notes: normalize_optional_notes(notes).map(str::to_string),
         registered_at: Some(Utc::now().to_rfc3339()),
         signature: None,
         pubkey_id: None,
     };
     write_first_verdict(root, goal_id, verifier_id, round, &record)
+}
+
+/// Normalize optional notes for an APPROVE verdict (design D2).
+///
+/// Trims and drops empty/whitespace-only input so `approve --notes ""` serializes
+/// identically to `approve` with no `--notes` (the `notes` key is absent from the
+/// on-disk JSON via `skip_serializing_if = "Option::is_none"`). Reject keeps its own
+/// non-empty enforcement in [`register_reject`]. Returns a borrowed `&str` (trimmed)
+/// so no allocation occurs until the caller builds the `VerdictRecord`.
+fn normalize_optional_notes(notes: Option<&str>) -> Option<&str> {
+    notes.map(str::trim).filter(|s| !s.is_empty())
 }
 
 /// Register a REJECT verdict with notes (atomic first-write-wins). Empty notes are refused.
@@ -590,15 +605,16 @@ mod tests {
             serde_json::to_string(&VerdictStatus::Reject).unwrap(),
             r#""REJECT""#
         );
-        assert_eq!(
-            serde_json::to_string(&VerdictStatus::Null).unwrap(),
-            "null"
-        );
+        assert_eq!(serde_json::to_string(&VerdictStatus::Null).unwrap(), "null");
     }
 
     #[test]
     fn status_round_trips() {
-        for s in [VerdictStatus::Approve, VerdictStatus::Reject, VerdictStatus::Null] {
+        for s in [
+            VerdictStatus::Approve,
+            VerdictStatus::Reject,
+            VerdictStatus::Null,
+        ] {
             let j = serde_json::to_string(&s).unwrap();
             let back: VerdictStatus = serde_json::from_str(&j).unwrap();
             assert_eq!(back, s);

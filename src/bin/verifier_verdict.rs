@@ -42,7 +42,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Register an APPROVE verdict for this verifier's slot.
-    Approve,
+    ///
+    /// `--notes` (or `-n`) is OPTIONAL on approve (design D1). When supplied and
+    /// non-empty, the notes are stored on the verdict record; when omitted or empty,
+    /// behavior is unchanged (legacy approve). Reject keeps `--notes` required.
+    Approve {
+        /// Optional approval evidence/notes. Trimmed; empty/whitespace -> no notes key.
+        #[arg(long, short = 'n')]
+        notes: Option<String>,
+    },
     /// Register a REJECT verdict; `--notes` is required (non-empty).
     Reject {
         /// Required: the reason for rejection. Must be non-empty.
@@ -93,16 +101,21 @@ fn run(cli: &Cli) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let result = match (&cli.command, pinned, signing_key.as_ref()) {
-        (Cmd::Approve, None, None) => {
-            verdict::register_approve(&root, &goal_id, &verifier_id, round)
+        (Cmd::Approve { ref notes }, None, None) => {
+            verdict::register_approve(&root, &goal_id, &verifier_id, round, notes.as_deref())
         }
-        (Cmd::Approve, Some(_), Some(sk)) => {
-            verdict::register_signed_approve(&root, &goal_id, &verifier_id, round, sk)
-        }
-        (Cmd::Approve, _, None) => Err(VerdictError::Unauthenticated(
+        (Cmd::Approve { ref notes }, Some(_), Some(sk)) => verdict::register_signed_approve(
+            &root,
+            &goal_id,
+            &verifier_id,
+            round,
+            notes.as_deref(),
+            sk,
+        ),
+        (Cmd::Approve { .. }, _, None) => Err(VerdictError::Unauthenticated(
             "verifier secret missing; set $VERIFIER_LOOP_VERIFIER_SECRET".to_string(),
         )),
-        (Cmd::Approve, None, Some(_)) => Err(VerdictError::Unauthenticated(
+        (Cmd::Approve { .. }, None, Some(_)) => Err(VerdictError::Unauthenticated(
             "no pinned verifier pubkey for this slot".to_string(),
         )),
         (Cmd::Reject { ref notes }, None, None) => {
@@ -145,8 +158,7 @@ fn resolve_home() -> Result<PathBuf, String> {
 
 /// Resolve a required identity value from env (env wins; there is no arg override).
 fn resolve_required(env_key: &str, label: &str) -> Result<String, String> {
-    std::env::var(env_key)
-        .map_err(|_| format!("{label} not set (expected ${env_key})"))
+    std::env::var(env_key).map_err(|_| format!("{label} not set (expected ${env_key})"))
 }
 
 /// Parse the round from `VERIFIER_LOOP_ROUND` (u32).
