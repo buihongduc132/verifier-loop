@@ -303,7 +303,7 @@ pub fn register_signed_approve(
     let normalized = normalize_optional_notes(notes);
     let record = build_signed_record(
         VerdictStatus::Approve,
-        normalized.as_deref(),
+        normalized,
         root,
         goal_id,
         verifier_id,
@@ -444,7 +444,7 @@ pub fn register_approve(
 ) -> Result<(), VerdictError> {
     let record = VerdictRecord {
         status: VerdictStatus::Approve,
-        notes: normalize_optional_notes(notes),
+        notes: normalize_optional_notes(notes).map(str::to_string),
         registered_at: Some(Utc::now().to_rfc3339()),
         signature: None,
         pubkey_id: None,
@@ -457,12 +457,10 @@ pub fn register_approve(
 /// Trims and drops empty/whitespace-only input so `approve --notes ""` serializes
 /// identically to `approve` with no `--notes` (the `notes` key is absent from the
 /// on-disk JSON via `skip_serializing_if = "Option::is_none"`). Reject keeps its own
-/// non-empty enforcement in [`register_reject`].
-fn normalize_optional_notes(notes: Option<&str>) -> Option<String> {
-    notes
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+/// non-empty enforcement in [`register_reject`]. Returns a borrowed `&str` (trimmed)
+/// so no allocation occurs until the caller builds the `VerdictRecord`.
+fn normalize_optional_notes(notes: Option<&str>) -> Option<&str> {
+    notes.map(str::trim).filter(|s| !s.is_empty())
 }
 
 /// Register a REJECT verdict with notes (atomic first-write-wins). Empty notes are refused.
