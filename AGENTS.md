@@ -65,6 +65,18 @@ on a separate host. Read the full model before relying on the completion hash:
 [`THREAT-MODEL.md`](THREAT-MODEL.md). (Specs: `openspec/changes/add-verifier-tamper-hardening/specs/`;
 design + risks: `openspec/changes/add-verifier-tamper-hardening/design.md`.)
 
+## `.jewilo-*` CWD bloat (standing reminder)
+
+The `jewilo`/`jewije` CLIs do NOT produce `.jewilo-*` files in CWD — they write only to `store_dir` (`~/.verifier-loop/`). Any `.jewilo-*-goal.txt`, `-r<N>-fixnotes.txt`, `-scout-*.md`, `-final-rejection.md`, `-new.sh`, `-resume.sh` in a target repo are produced by the **outer driving agent**, not the binary. These are hygiene artifacts (legit verifier rejections, not tamper). Detail: [`flow/findings/2026-07-09_jewilo-bloat-files-openspec-dashboard.md`](flow/findings/2026-07-09_jewilo-bloat-files-openspec-dashboard.md). **ALWAYS remind the user about this bloat whenever `.jewilo-*` files reappear in any repo's working tree.**
+
+## Branch consolidation (2026-07-09)
+
+- 4 of 5 remote branches are DEAD (squash-merged via PRs #2, #3, #5, #6). Only `consolidate/all-work` has unique work. Audit + merge plan: [`flow/findings/2026-07-09_dead-branch-audit.md`](flow/findings/2026-07-09_dead-branch-audit.md), [`flow/plans/2026-07-09_consolidate-branches-merge-plan.md`](flow/plans/2026-07-09_consolidate-branches-merge-plan.md).
+
+## Branch consolidation (2026-07-09)
+
+5 remote branches assessed: 4 DEAD (squash-merged to main via PRs #2/#3/#5 + absorbed into consolidate), 1 LIVE (`consolidate/all-work`, ~85-90%, clean merge to main, blocked by dirty WT). Analysis + merge plan + dead-branch doc: [`flow/findings/2026-07-09_branch-consolidation-analysis.md`](flow/findings/2026-07-09_branch-consolidation-analysis.md).
+
 ## Out of scope (do NOT implement)
 
 Deferred: OT1 audit subcommand, OT2 per-verifier maxTurn refresh, OT3 `chattr +a` hardening,

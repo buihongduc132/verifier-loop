@@ -247,6 +247,46 @@ fn snapshot_consistent_within_round() {
 }
 
 #[test]
+fn snapshot_includes_staged_changes_not_just_unstaged() {
+    // Regression: `git diff` (no rev) shows only unstaged changes. A verifier must
+    // see the FULL working-tree delta vs HEAD — staged + unstaged — otherwise an
+    // author who `git add`s a regression hides it from every verifier.
+    let dir = temp_git_repo();
+    let p = dir.path();
+    // Stage a change on a tracked file (file.txt was committed by temp_git_repo).
+    fs::write(p.join("file.txt"), "staged-regression\n").unwrap();
+    run(p, "git", &["add", "file.txt"]);
+    // No unstaged changes remain — `git diff` alone would emit nothing.
+
+    let snap = prompt::capture_snapshot(p, 10_000).unwrap();
+    assert!(
+        snap.git_diff.contains("staged-regression"),
+        "staged change MUST be visible to verifiers (git diff HEAD), got: {}",
+        snap.git_diff
+    );
+}
+
+#[test]
+fn snapshot_on_repo_with_no_commits_captures_staged_without_error() {
+    // A fresh `git init` with no commits must NOT crash capture_snapshot.
+    // Staged content (author intent) should still be visible to verifiers.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
+    run(p, "git", &["init", "-q"]);
+    run(p, "git", &["config", "user.email", "t@t.t"]);
+    run(p, "git", &["config", "user.name", "t"]);
+    fs::write(p.join("new.txt"), "fresh-content\n").unwrap();
+    run(p, "git", &["add", "new.txt"]);
+
+    let snap = prompt::capture_snapshot(p, 10_000).unwrap();
+    assert!(
+        snap.git_diff.contains("fresh-content"),
+        "staged content on a commit-less repo MUST be visible, got: {}",
+        snap.git_diff
+    );
+}
+
+#[test]
 fn snapshot_in_non_git_repo_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let res = prompt::capture_snapshot(dir.path(), 10_000);
