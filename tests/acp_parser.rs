@@ -193,28 +193,29 @@ fn parser_is_conformant_over_full_fixture_stream() {
 
 // ---------------------------------------------------------------------------
 // §4.2 / §4.3 / §4.4 — backend adapter templates + rendering
+// (post fix-spawn-argv-overflow §8/D6: built-ins migrated to stdin transport)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn pi_adapter_spawn_uses_pi_flag_p_and_mode_json() {
-    // verifier-spawn spec: "spawn uses `pi -p "<prompt>" --mode json`".
+fn pi_adapter_spawn_uses_stdin_transport_no_prompt_token() {
+    // verifier-spawn spec (post §8/D6): built-in `pi` spawn is `pi --mode json` — the
+    // prompt travels on stdin, NOT in argv (no `-p`, no `{prompt}` token).
     let t = acp::adapter_for("pi").expect("pi is a built-in adapter");
-    assert!(
-        t.spawn.contains("pi") && t.spawn.contains("-p") && t.spawn.contains("--mode json"),
-        "pi spawn template must match spec, got: {}",
-        t.spawn
-    );
+    assert_eq!(t.spawn, "pi --mode json", "pi spawn template must be the stdin form, got: {}", t.spawn);
+    assert!(!t.spawn.contains("-p"), "spawn must NOT inline the prompt via -p (E2BIG risk)");
+    assert!(!t.spawn.contains("{prompt}"), "spawn must NOT carry a {{prompt}} token");
+    assert!(t.transport == acp::Transport::Stdin, "built-in pi transport must be Stdin");
 }
 
 #[test]
 fn pi_adapter_resume_uses_session_flag_and_mode_json() {
-    // verifier-spawn spec: "resume uses `pi --session <sid> -p "<prompt>" --mode json`".
+    // verifier-spawn spec (post §8/D6): resume is `pi --session {sid} --mode json` —
+    // `{sid}` is the only placeholder; the prompt still travels on stdin.
     let t = acp::adapter_for("pi").expect("pi is a built-in adapter");
-    assert!(
-        t.resume.contains("--session") && t.resume.contains("-p") && t.resume.contains("--mode json"),
-        "pi resume template must match spec, got: {}",
-        t.resume
-    );
+    assert_eq!(t.resume, "pi --session {sid} --mode json", "pi resume template, got: {}", t.resume);
+    assert!(t.resume.contains("--session") && t.resume.contains("--mode json"));
+    assert!(!t.resume.contains("-p"), "resume must NOT inline the prompt via -p");
+    assert!(!t.resume.contains("{prompt}"), "resume must NOT carry a {{prompt}} token");
 }
 
 #[test]

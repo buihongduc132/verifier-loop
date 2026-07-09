@@ -345,7 +345,7 @@ fn tamper_goal_text_invalidates_both_short_and_full_digest() {
 fn tamper_verdict_notes_invalidates_full_digest() {
     let (dir, goal_id) = fresh_goal("goal");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
 
     let salt = store::salt_in(dir.path()).unwrap();
     let record = goal::load(dir.path(), &goal_id).unwrap();
@@ -392,8 +392,8 @@ fn write_completion_writes_record_on_success() {
     let (dir, goal_id) = fresh_goal("goal");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
     pre_create_null(dir.path(), &goal_id, "v2", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
-    verdict::register_approve(dir.path(), &goal_id, "v2", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None).unwrap();
 
     let cfg = store::Config::load_in(dir.path()).unwrap(); // defaults n=2,m=2
     let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
@@ -453,8 +453,8 @@ fn audit_recompute_matches_stored_hash() {
     let (dir, goal_id) = fresh_goal("build the thing");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
     pre_create_null(dir.path(), &goal_id, "v2", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
-    verdict::register_approve(dir.path(), &goal_id, "v2", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None).unwrap();
 
     let cfg = store::Config::load_in(dir.path()).unwrap();
     let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
@@ -560,7 +560,7 @@ const SIGNED_TS: &str = "2026-07-04T09:00:00Z";
 /// matching secret and writes the verdict (+ appends a receipt entry).
 fn mint_pin_and_signed_approve(root: &Path, goal_id: &str, vid: &str, round: u32) {
     let secret = verdict::mint_and_pin_pubkey(root, goal_id, vid, round).unwrap();
-    verdict::register_signed_approve(root, goal_id, vid, round, &secret).unwrap();
+    verdict::register_signed_approve(root, goal_id, vid, round, None, &secret).unwrap();
 }
 
 /// Build + atomically write a verdict signed by `secret`, declaring `claim_pubkey_id`.

@@ -129,10 +129,7 @@ pub fn render(template: Option<&str>, vars: &PromptVars<'_>) -> Result<String, P
 }
 
 /// Renders the RESUME prompt. `template = None` -> baked-in resume default.
-pub fn render_resume(
-    template: Option<&str>,
-    vars: &PromptVars<'_>,
-) -> Result<String, PromptError> {
+pub fn render_resume(template: Option<&str>, vars: &PromptVars<'_>) -> Result<String, PromptError> {
     let tpl = match template {
         Some(t) => t,
         None => default_resume_template(),
@@ -260,11 +257,22 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
     // `git diff` would hide staged changes, letting an author `git add` a
     // regression and keep it invisible to every verifier. On a repo with no
     // commits yet (fresh `git init`), `git diff HEAD` errors — fall back to
-    // `git diff --cached` so staged intent is still captured (unstaged changes
-    // to untracked files are listed by `git status --porcelain` above).
+    // BOTH `git diff --cached` (staged) AND `git diff` (unstaged) so the
+    // verifier still sees the full working tree (untracked files are listed by
+    // `git status --porcelain` above).
     let raw_diff = match git_capture(cwd, &["diff", "HEAD"]) {
         Ok(d) => d,
-        Err(_) if !head_exists(cwd)? => git_capture(cwd, &["diff", "--cached"])?,
+        Err(_) if !head_exists(cwd)? => {
+            let staged = git_capture(cwd, &["diff", "--cached"])?;
+            let unstaged = git_capture(cwd, &["diff"])?;
+            if staged.is_empty() {
+                unstaged
+            } else if unstaged.is_empty() {
+                staged
+            } else {
+                format!("{staged}\n{unstaged}")
+            }
+        }
         Err(e) => return Err(e),
     };
     let (git_diff, truncated) = truncate_diff(&raw_diff, max_chars);
@@ -296,7 +304,12 @@ fn head_exists(cwd: &Path) -> Result<bool, PromptError> {
 /// Asserts `cwd` is inside a git work tree; errors otherwise (fail-closed).
 fn git_check(cwd: &Path) -> Result<(), PromptError> {
     let out = Command::new("git")
-        .args(["-C", &cwd.to_string_lossy(), "rev-parse", "--is-inside-work-tree"])
+        .args([
+            "-C",
+            &cwd.to_string_lossy(),
+            "rev-parse",
+            "--is-inside-work-tree",
+        ])
         .output()
         .map_err(|e| PromptError::SnapshotCapture(format!("git not available: {e}")))?;
     if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim() != "true" {
@@ -513,6 +526,23 @@ mod tests {
         assert!(
             VERIFIER_POLICY.contains("Verifier") || VERIFIER_POLICY.contains("ZERO trust"),
             "policy must embed the detective contract"
+        );
+        // The policy heading must appear EXACTLY ONCE in each composed const
+        // (the canonical policy is composed only via the `concat!` preamble; the
+        // template body files must NOT carry an inline duplicate). design D3.
+        let count_template = DEFAULT_TEMPLATE
+            .matches("# Verifier Detective Policy")
+            .count();
+        let count_resume = DEFAULT_RESUME_TEMPLATE
+            .matches("# Verifier Detective Policy")
+            .count();
+        assert_eq!(
+            count_template, 1,
+            "DEFAULT_TEMPLATE must contain the policy heading exactly once (got {count_template})"
+        );
+        assert_eq!(
+            count_resume, 1,
+            "DEFAULT_RESUME_TEMPLATE must contain the policy heading exactly once (got {count_resume})"
         );
     }
 }

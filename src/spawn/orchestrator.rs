@@ -17,17 +17,22 @@
 //! command rendering + process lifecycle live here.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::task::JoinHandle;
 
 use crate::acp;
+use crate::acp::Transport;
 use crate::crypto;
 use crate::goal;
+use crate::spawn::tempfile::TempPromptFile;
 use crate::store;
 use crate::verdict;
 
@@ -134,15 +139,27 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
     let rounds_dir = round_dir(input.root, input.goal_id, input.round);
     fs::create_dir_all(&rounds_dir)?;
 
-    // Build the launch plan: (verifierId, command, vdir) for each of m verifiers.
-    let mut plan: Vec<(String, Command, PathBuf)> = Vec::new();
+    // Build the launch plan: (verifierId, command, vdir, goal_file_guard) for each
+    // of m verifiers. The goal_file_guard is `Some` only for `GoalFile` transport;
+    // it is held in the plan / children vec so the tempfile lives until the gather
+    // barrier reaps the child (design D3 — unlink after the child has opened the file).
+    let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>)> = Vec::new();
     for i in 0..input.config.m as usize {
         let vid = verifier_id(i);
         let vdir = rounds_dir.join(&vid);
         fs::create_dir_all(&vdir)?;
         pre_create_verifier_dir(&vdir);
 
-        let mut cmd = build_spawn_command(&input.adapter.spawn, input.prompt);
+        // GoalFile transport: create the tempfile BEFORE building the command so its
+        // path can be substituted into `{goalFile}`. On spawn failure (later), the
+        // guard drops here via `?` propagation, unlinking the tempfile.
+        let goal_file_guard = match input.adapter.transport {
+            Transport::GoalFile => Some(TempPromptFile::new(input.prompt.as_bytes())?),
+            Transport::Stdin => None,
+        };
+        let goal_file_path = goal_file_guard.as_ref().map(|g| g.path());
+
+        let mut cmd = build_spawn_command(input.adapter, goal_file_path);
         let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round)?;
         inject_identity_env(
             &mut cmd,
@@ -153,19 +170,36 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
             &secret_hex,
         );
         inject_verifier_verdict_bin(&mut cmd);
-        plan.push((vid, cmd, vdir));
+        plan.push((vid, cmd, vdir, goal_file_guard));
     }
 
     // Launch every child BEFORE awaiting any (non-blocking spawn). Each `spawn()` starts
     // the OS process immediately; awaiting is the gather barrier.
-    let mut children: Vec<(String, tokio::process::Child, PathBuf)> = Vec::new();
-    for (vid, mut cmd, vdir) in plan {
-        cmd.stdin(Stdio::null())
+    //
+    // For `Stdin` transport (design D1/D7): child stdin is piped and the rendered prompt
+    // is written by a background task (D4). For `GoalFile`: stdin stays null (§7 will
+    // substitute a tempfile path into the argv instead).
+    let mut children: Vec<(
+        String,
+        tokio::process::Child,
+        PathBuf,
+        Option<JoinHandle<io::Result<()>>>,
+        Option<TempPromptFile>,
+    )> = Vec::new();
+    for (vid, mut cmd, vdir, goal_file_guard) in plan {
+        let stdin_config = match input.adapter.transport {
+            Transport::Stdin => Stdio::piped(),
+            Transport::GoalFile => Stdio::null(),
+        };
+        cmd.stdin(stdin_config)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = cmd.spawn()?;
-        children.push((vid, child, vdir));
+        let mut child = cmd.spawn()?;
+        // Take the stdin pipe (if piped) and spawn a background writer that streams the
+        // full prompt bytes, then closes the pipe (D4 async write).
+        let write_handle = spawn_stdin_writer(child.stdin.take(), input.prompt.as_bytes());
+        children.push((vid, child, vdir, write_handle, goal_file_guard));
     }
 
     gather(input, children).await
@@ -189,7 +223,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
     let rounds_dir = round_dir(input.root, input.goal_id, input.round);
     fs::create_dir_all(&rounds_dir)?;
 
-    let mut plan: Vec<(String, Command, PathBuf)> = Vec::new();
+    let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>)> = Vec::new();
     for i in 0..input.config.m as usize {
         let vid = verifier_id(i);
         let vdir = rounds_dir.join(&vid);
@@ -198,13 +232,21 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         let prev_vdir = round_dir(input.root, input.goal_id, prev_round).join(&vid);
         let prior = read_meta(&prev_vdir)?;
 
+        // GoalFile transport: create the tempfile BEFORE building the command so its
+        // path can be substituted into `{goalFile}` (same as spawn_round).
+        let goal_file_guard = match input.adapter.transport {
+            Transport::GoalFile => Some(TempPromptFile::new(input.prompt.as_bytes())?),
+            Transport::Stdin => None,
+        };
+        let goal_file_path = goal_file_guard.as_ref().map(|g| g.path());
+
         let mut cmd;
         let fresh;
         match &prior {
             Some(meta) if meta.turns_used < input.config.max_turn => {
                 // Reuse: resume on the prior SID.
                 let sid = meta.sid.clone().unwrap_or_default();
-                cmd = build_resume_command(&input.adapter.resume, &sid, input.prompt);
+                cmd = build_resume_command(input.adapter, &sid, goal_file_path);
                 fresh = false;
             }
             _ => {
@@ -214,7 +256,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
                         archive_prior_sid(&prev_vdir, sid)?;
                     }
                 }
-                cmd = build_spawn_command(&input.adapter.spawn, input.prompt);
+                cmd = build_spawn_command(input.adapter, goal_file_path);
                 fresh = true;
             }
         }
@@ -239,17 +281,28 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
             &secret_hex,
         );
         inject_verifier_verdict_bin(&mut cmd);
-        plan.push((vid, cmd, vdir));
+        plan.push((vid, cmd, vdir, goal_file_guard));
     }
 
-    let mut children: Vec<(String, tokio::process::Child, PathBuf)> = Vec::new();
-    for (vid, mut cmd, vdir) in plan {
-        cmd.stdin(Stdio::null())
+    let mut children: Vec<(
+        String,
+        tokio::process::Child,
+        PathBuf,
+        Option<JoinHandle<io::Result<()>>>,
+        Option<TempPromptFile>,
+    )> = Vec::new();
+    for (vid, mut cmd, vdir, goal_file_guard) in plan {
+        let stdin_config = match input.adapter.transport {
+            Transport::Stdin => Stdio::piped(),
+            Transport::GoalFile => Stdio::null(),
+        };
+        cmd.stdin(stdin_config)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let child = cmd.spawn()?;
-        children.push((vid, child, vdir));
+        let mut child = cmd.spawn()?;
+        let write_handle = spawn_stdin_writer(child.stdin.take(), input.prompt.as_bytes());
+        children.push((vid, child, vdir, write_handle, goal_file_guard));
     }
 
     gather(input, children).await
@@ -263,14 +316,33 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
 /// killed and the run is marked `timed_out`; the pre-created null verdict is left in
 /// place. Captured stdout is parsed for the SID + final output, and `meta.json` +
 /// `final-output.txt` are updated accordingly.
+///
+/// For the `Stdin` transport the background stdin-writer's `JoinHandle` is awaited
+/// after the child exits (D4). Per design D4/R2, a write error (typically `EPIPE` when
+/// the child exits before draining the pipe) is treated as:
+///   - **non-fatal** when the child already produced a recognizable ACP stream (a SID
+///     was captured), and
+///   - **fatal / fail-closed** when no ACP event was parsed (the verdict stays `null`).
+///
+/// In practice the fail-closed outcome is already guaranteed by the ACP parse: if no
+/// `session` event was emitted, `sid` is `None` and the null verdict on disk is left
+/// untouched. The write result is checked here only to short-circuit `meta.json` /
+/// `final-output.txt` updates when the run is fail-closed (so a crashed verifier leaves
+/// no stale SID/output artifacts).
 async fn gather(
     input: SpawnInput<'_>,
-    mut children: Vec<(String, tokio::process::Child, PathBuf)>,
+    mut children: Vec<(
+        String,
+        tokio::process::Child,
+        PathBuf,
+        Option<JoinHandle<io::Result<()>>>,
+        Option<TempPromptFile>,
+    )>,
 ) -> Result<Vec<VerifierRun>, SpawnError> {
     let timeout = Duration::from_secs(input.config.verifier_timeout_sec.max(1));
     let mut runs = Vec::with_capacity(children.len());
 
-    for (vid, mut child, vdir) in children.drain(..) {
+    for (vid, mut child, vdir, write_handle, _goal_file_guard) in children.drain(..) {
         // Take the stdout pipe out of the child and drain it on a background task.
         // Draining concurrently with `wait()` is required because an OS pipe holds only
         // ~64KB: a verifier emitting MBs of ACP events would fill the buffer, block on
@@ -303,6 +375,9 @@ async fn gather(
                 // Timeout (D9): kill, reap, leave null verdict. No SID / final output.
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                // Reap the stdin writer so it is not leaked (its result is irrelevant
+                // for a timed-out run — the verdict is already null via timeout).
+                if let Some(h) = write_handle { let _ = h.await; }
                 VerifierRun { verifier_id: vid, sid: None, final_output: None, timed_out: true }
             }
             status = child.wait() => {
@@ -311,17 +386,36 @@ async fn gather(
                 let stdout = String::from_utf8_lossy(&buf);
                 let sid = acp::extract_sid(&stdout);
                 let final_output = acp::extract_final_output(&stdout);
-                if let Some(text) = &final_output {
-                    let _ = fs::write(vdir.join(FINAL_OUTPUT_FILE), text);
+
+                // Await the stdin writer (D4). For `Stdin` transport this surfaces
+                // EPIPE if the child exited without draining the pipe; for `GoalFile`
+                // there is no writer (`write_handle` is `None`).
+                //
+                // EPIPE handling (D4/R2):
+                //   - write OK, or EPIPE after ACP output  → non-fatal (run gathered).
+                //   - write failed AND no ACP output       → fail-closed (null verdict).
+                // The fail-closed case is already realized by `sid.is_none()` below:
+                // we skip writing `final-output.txt` and leave the pre-created null
+                // verdict untouched. No panic — the error is swallowed.
+                let write_ok = match write_handle {
+                    Some(h) => h.await.unwrap_or(Err(io::Error::other("stdin writer join failed"))).is_ok(),
+                    None => true,
+                };
+                let fail_closed = !write_ok && sid.is_none();
+
+                if !fail_closed {
+                    if let Some(text) = &final_output {
+                        let _ = fs::write(vdir.join(FINAL_OUTPUT_FILE), text);
+                    }
+                    update_meta_after_run(&vdir, sid.as_deref(), &input)?;
                 }
                 // Status failures still parse whatever stdout was emitted; the null
                 // verdict is left in place if no SID/output was captured (fail-closed).
                 let _ = status;
-                update_meta_after_run(&vdir, sid.as_deref(), &input)?;
                 VerifierRun {
                     verifier_id: vid,
-                    sid,
-                    final_output,
+                    sid: if fail_closed { None } else { sid },
+                    final_output: if fail_closed { None } else { final_output },
                     timed_out: false,
                 }
             }
@@ -414,36 +508,92 @@ fn archive_prior_sid(prev_vdir: &Path, sid: &str) -> Result<(), SpawnError> {
     Ok(())
 }
 
-/// Split a rendered command string into argv and build a `tokio::process::Command`.
+/// Build a `Command` from a rendered template string according to the adapter's
+/// [`Transport`] (fix-spawn-argv-overflow design D1/D5/D7; prompt-transport spec).
 ///
-/// Splitting on whitespace matches the §4 contract ("the orchestrator splits the rendered
-/// command on whitespace"). The first token is the program; the rest are args. Prompts
-/// needing shell quoting are the caller's responsibility (D2 note in adapters.rs).
-/// Parse a rendered command string into a `Command`.
-///
-/// Adapter templates embed the prompt via `{prompt}` substitution inside shell quotes
-/// (e.g. `pi -p "{prompt}" --mode json`). The prompt is arbitrary multi-KB text with
-/// spaces, newlines, and quotes, so naive `split_whitespace()` would shatter it into
-/// thousands of args. We delegate to `sh -c` so the shell handles quoting correctly.
-fn build_spawn_command(template: &str, prompt: &str) -> Command {
-    let (left, right) = template.split_once("{prompt}")
-        .unwrap_or((template, ""));
-    let mut left_parts = left.split_whitespace();
-    let program = left_parts.next().expect("spawn template has a non-empty program");
-    let mut cmd = Command::new(program);
-    for a in left_parts {
-        cmd.arg(a);
+/// * `Stdin` — the prompt travels on the child's stdin pipe, NOT in argv. The
+///   template MUST NOT contain `{prompt}` (validated at config load for custom
+///   adapters); it is split on whitespace into program + args verbatim. `goal_file`
+///   is ignored.
+/// * `GoalFile` — the prompt was written to a tempfile by [`TempPromptFile`]; its
+///   absolute path is substituted for every `{goalFile}` placeholder (design D5:
+///   single substitution, replace all occurrences). The substituted template is split
+///   on whitespace into program + args. `goal_file` MUST be `Some` for this transport.
+fn build_command_from_template(
+    template: &str,
+    transport: Transport,
+    goal_file: Option<&Path>,
+) -> Command {
+    match transport {
+        Transport::Stdin => {
+            // Stdin transport: NO prompt bytes in argv. Split the template on
+            // whitespace into program + args. The prompt is piped to stdin by
+            // [`spawn_stdin_writer`] after the child is spawned.
+            split_into_command(template)
+        }
+        Transport::GoalFile => {
+            // GoalFile transport: substitute the tempfile path into {goalFile}, then
+            // split on whitespace. The path is short and shell-safe in argv (no quoting
+            // needed). `goal_file` is required for this transport.
+            let path = goal_file.unwrap_or_else(|| {
+                panic!("GoalFile transport requires a goal_file path (TempPromptFile)")
+            });
+            let rendered = template.replace("{goalFile}", &path.to_string_lossy());
+            split_into_command(&rendered)
+        }
     }
-    cmd.arg(prompt);
-    for a in right.split_whitespace() {
+}
+
+/// Split a (already-substituted) command template on whitespace into a `Command`:
+/// first token is the program, the rest are args. Shared by both transports — neither
+/// places prompt bytes in argv.
+fn split_into_command(template: &str) -> Command {
+    let mut parts = template.split_whitespace();
+    let program = parts.next().expect("spawn template has a non-empty program");
+    let mut cmd = Command::new(program);
+    for a in parts {
         cmd.arg(a);
     }
     cmd
 }
 
-fn build_resume_command(template: &str, sid: &str, prompt: &str) -> Command {
-    let with_sid = template.replace("{sid}", sid);
-    build_spawn_command(&with_sid, prompt)
+/// Build the spawn `Command` for an adapter (transport-aware). See
+/// [`build_command_from_template`] for the per-transport argv construction. For
+/// `GoalFile`, `goal_file` must be the path of the tempfile created by the caller.
+fn build_spawn_command(adapter: &acp::Adapter, goal_file: Option<&Path>) -> Command {
+    build_command_from_template(&adapter.spawn, adapter.transport, goal_file)
+}
+
+/// Build the resume `Command` for an adapter: substitute `{sid}` into the resume
+/// template, then delegate to [`build_command_from_template`] with the adapter's
+/// transport and (for `GoalFile`) the tempfile path.
+fn build_resume_command(adapter: &acp::Adapter, sid: &str, goal_file: Option<&Path>) -> Command {
+    let with_sid = adapter.resume.replace("{sid}", sid);
+    build_command_from_template(&with_sid, adapter.transport, goal_file)
+}
+
+/// Spawn a background task that writes the full prompt bytes to the child's stdin
+/// pipe, then closes it (design D4 — async stdin write so a slow-reading child never
+/// stalls parallel spawns). Returns `None` when there is no stdin pipe (e.g. the
+/// `GoalFile` transport, which sets `stdin = Stdio::null()`).
+///
+/// The returned `JoinHandle` resolves to `io::Result<()>`. A `BrokenPipe` (`EPIPE`)
+/// error is expected when the child exits before draining the pipe; [`gather`] treats
+/// it as non-fatal when ACP output was produced, and as fail-closed otherwise (D4/R2).
+fn spawn_stdin_writer(stdin: Option<tokio::process::ChildStdin>, prompt: &[u8]) -> Option<JoinHandle<io::Result<()>>> {
+    let mut stdin = stdin?;
+    let prompt = prompt.to_vec();
+    Some(tokio::spawn(async move {
+        if let Err(e) = stdin.write_all(&prompt).await {
+            // The pipe may still be flushed up to the kernel buffer; attempt a
+            // graceful shutdown but surface the original write error.
+            let _ = stdin.shutdown().await;
+            return Err(e);
+        }
+        // Close the write end so the child sees EOF.
+        let _ = stdin.shutdown().await;
+        Ok(())
+    }))
 }
 
 /// Mint a fresh Ed25519 keypair for the verifier slot and pin its verifying key into
@@ -523,6 +673,12 @@ fn sibling_verifier_verdict() -> Option<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// §7 — goal-file transport helpers live in [`crate::spawn::tempfile`] (TempPromptFile
+// RAII guard + sweep_stale_tempfiles). The orchestrator only constructs the guard and
+// substitutes its path into `{goalFile}`; the guard's `Drop` handles unlinking.
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,26 +691,59 @@ mod tests {
 
     #[test]
     fn build_spawn_command_passes_prompt_as_single_arg_without_shell() {
-        let template = "pi -p {prompt} --mode json";
-        let prompt = "hello `world` $(rm -rf /) \"quoted\"";
-        let cmd = build_spawn_command(template, prompt);
+        // GoalFile transport: substitutes the tempfile path into {goalFile}. The prompt
+        // itself NEVER touches argv (it lives in the tempfile). The Stdin transport
+        // path is covered by tests/spawn_stdin_transport.rs; the goal-file integration
+        // is covered by tests/spawn_goal_file_transport.rs. This unit test pins the
+        // argv-shape contract for the {goalFile} substitution.
+        let tmp = tempfile::tempdir().unwrap();
+        let goal_path = tmp.path().join("fake-goal.txt");
+        fs::write(&goal_path, b"irrelevant").unwrap();
+        let adapter = acp::Adapter {
+            spawn: "pi --goal-file {goalFile} --mode json".into(),
+            resume: "pi --goal-file {goalFile} --mode json".into(),
+            transport: Transport::GoalFile,
+        };
+        let cmd = build_spawn_command(&adapter, Some(&goal_path));
         let s = format!("{:?}", cmd.as_std());
         assert!(s.contains("pi"), "program is pi");
         assert!(!s.contains("sh"), "must NOT use sh");
-        // The shell-unsafe substring `$(rm -rf /)` must survive inside ONE arg. If the
-        // prompt were split on spaces, "$(rm" and "-rf" would be separate args. The
-        // Debug format quotes each arg, so the whole prompt appears as one quoted unit.
-        assert!(s.contains("$(rm -rf /)"), "prompt body intact as single arg: {s}");
+        assert!(
+            s.contains("--goal-file"),
+            "pre-placeholder args preserved: {s}"
+        );
+        assert!(
+            s.contains(goal_path.to_str().unwrap()),
+            "the {{goalFile}} placeholder must be substituted with the tempfile path: {s}"
+        );
+        assert!(
+            !s.contains("{goalFile}"),
+            "no literal {{goalFile}} token may survive substitution: {s}"
+        );
         assert!(s.contains("--mode"), "post-args preserved");
     }
 
     #[test]
     fn build_resume_command_substitutes_sid_then_prompt() {
-        let template = "pi --session {sid} -p {prompt} --mode json";
-        let cmd = build_resume_command(template, "abc-123", "hello world");
+        // GoalFile transport: {sid} and {goalFile} are both substituted. The prompt
+        // itself is in the tempfile, not argv.
+        let tmp = tempfile::tempdir().unwrap();
+        let goal_path = tmp.path().join("fake-goal-resume.txt");
+        fs::write(&goal_path, b"irrelevant").unwrap();
+        let adapter = acp::Adapter {
+            spawn: "pi --goal-file {goalFile} --mode json".into(),
+            resume: "pi --session {sid} --goal-file {goalFile} --mode json".into(),
+            transport: Transport::GoalFile,
+        };
+        let cmd = build_resume_command(&adapter, "abc-123", Some(&goal_path));
         let s = format!("{:?}", cmd.as_std());
         assert!(s.contains("abc-123"), "sid substituted: {s}");
-        assert!(s.contains("hello world"), "prompt intact: {s}");
+        assert!(
+            s.contains(goal_path.to_str().unwrap()),
+            "goalFile path substituted: {s}"
+        );
+        assert!(!s.contains("{sid}"), "no literal {{sid}} survives: {s}");
+        assert!(!s.contains("{goalFile}"), "no literal {{goalFile}} survives: {s}");
     }
 
     #[test]

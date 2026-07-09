@@ -478,3 +478,160 @@ fn snapshot_is_serializable() {
     let back: Snapshot = serde_json::from_str(&j).unwrap();
     assert_eq!(back.cwd, "/r");
 }
+
+// ===========================================================================
+// §3 RED tests: verifier prompt policy appears EXACTLY ONCE
+// fix-approve-notes-and-prompt-merge verifier-prompt spec delta + design D3.
+//
+// Today DEFAULT_TEMPLATE is `concat!(identity, "# Verifier Detective Policy
+// (canonical...)", verifier_policy.txt, "---", default_template.txt)` AND
+// default_template.txt ALSO opens with its own inline "# Verifier Detective Policy"
+// block. So the rendered round-1 / resume prompts carry the policy heading TWICE and
+// the canonical policy body (sourced from verifier_policy.txt) is duplicated in
+// perceived message layout. GREEN strips the inline block from the .txt files so the
+// policy appears exactly once (composed only via the concat! preamble).
+//
+// These tests assert EXACTLY-ONCE; they FAIL today because the count is 2 — RED.
+// ===========================================================================
+
+/// Count non-overlapping occurrences of `needle` in `haystack`.
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    let mut n = 0;
+    let mut start = 0;
+    while let Some(idx) = haystack[start..].find(needle) {
+        n += 1;
+        start += idx + needle.len();
+    }
+    n
+}
+
+// ---------------------------------------------------------------------------
+// §3.1 RED: round-1 rendered prompt contains the policy marker + heading EXACTLY ONCE.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn round1_prompt_renders_policy_marker_exactly_once() {
+    let v = vars_default();
+    let out = prompt::render(None, &v).unwrap();
+
+    // The canonical policy (verifier_policy.txt) opens with `<_unfold.md>` — this marker
+    // must appear EXACTLY ONCE in the rendered round-1 prompt (it currently appears twice
+    // because the policy text is composed once via concat! AND the inline block in
+    // default_template.txt duplicates the body — though note the marker substring
+    // `<_unfold.md>` itself matches both `<_unfold.md>` and `<_unfold.md/>` in the
+    // canonical policy, plus any duplication drives the count above 1).
+    let marker_count = count_occurrences(&out, "<_unfold.md>");
+    assert_eq!(
+        marker_count, 1,
+        "round-1 prompt must contain the canonical policy marker `<_unfold.md>` exactly \
+         once (got {marker_count}); the policy is duplicated today — design D3",
+    );
+}
+
+#[test]
+fn round1_prompt_renders_policy_heading_exactly_once() {
+    let v = vars_default();
+    let out = prompt::render(None, &v).unwrap();
+
+    let heading_count = count_occurrences(&out, "# Verifier Detective Policy");
+    assert_eq!(
+        heading_count, 1,
+        "round-1 prompt must contain the `# Verifier Detective Policy` heading exactly \
+         once (got {heading_count}); default_template.txt still carries an inline copy \
+         that the concat! preamble already provides — design D3",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §3.2 RED: resume rendered prompt contains the policy marker EXACTLY ONCE.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resume_prompt_renders_policy_marker_exactly_once() {
+    let v = vars_default();
+    let out = prompt::render_resume(None, &v).unwrap();
+
+    let marker_count = count_occurrences(&out, "<_unfold.md>");
+    assert_eq!(
+        marker_count, 1,
+        "resume prompt must contain the canonical policy marker `<_unfold.md>` exactly \
+         once (got {marker_count}); default_resume_template.txt duplicates the inline \
+         policy block that the concat! preamble already provides — design D3",
+    );
+}
+
+#[test]
+fn resume_prompt_renders_policy_heading_exactly_once() {
+    let v = vars_default();
+    let out = prompt::render_resume(None, &v).unwrap();
+
+    let heading_count = count_occurrences(&out, "# Verifier Detective Policy");
+    assert_eq!(
+        heading_count, 1,
+        "resume prompt must contain the `# Verifier Detective Policy` heading exactly \
+         once (got {heading_count}) — design D3",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §3.3 RED regression: round-1 body structure is preserved after the inline block
+// is stripped (the .txt edit must NOT drop # Goal / # Context / # Frozen artifact
+// snapshot / # Your duty, and {{goalText}} substitution must still happen).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn round1_prompt_body_structure_preserved_after_dedup() {
+    let v = vars_default();
+    let out = prompt::render(None, &v).unwrap();
+
+    // Body sections required by verifier-prompt spec (single-message layout).
+    assert!(out.contains("# Goal"), "round-1 prompt must keep # Goal: {out}");
+    assert!(out.contains("# Context"), "round-1 prompt must keep # Context: {out}");
+    assert!(
+        out.contains("# Frozen artifact snapshot"),
+        "round-1 prompt must keep # Frozen artifact snapshot: {out}"
+    );
+    assert!(out.contains("# Your duty"), "round-1 prompt must keep # Your duty: {out}");
+
+    // Variable substitution must still happen.
+    assert!(
+        out.contains("build the thing"),
+        "round-1 prompt must substitute {{goalText}}: {out}"
+    );
+    assert!(out.contains("v1"), "round-1 prompt must substitute {{verifierId}}: {out}");
+}
+
+// ---------------------------------------------------------------------------
+// §3.4 RED regression: resume body structure preserved after dedup.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resume_prompt_body_structure_preserved_after_dedup() {
+    let v = PromptVars {
+        fix_notes: Some("fixed the off-by-one"),
+        prev_notes: Some("my prior notes"),
+        ..vars_default()
+    };
+    let out = prompt::render_resume(None, &v).unwrap();
+
+    assert!(out.contains("# Goal"), "resume prompt must keep # Goal: {out}");
+    assert!(out.contains("# Context"), "resume prompt must keep # Context: {out}");
+    assert!(out.contains("# Your duty"), "resume prompt must keep # Your duty: {out}");
+    // Resume-only sections.
+    assert!(
+        out.contains("fix notes") || out.contains("Author fix notes"),
+        "resume prompt must keep the author-fix-notes section: {out}"
+    );
+    // {{fixNotes}} / {{prevNotes}} substitution still works.
+    assert!(
+        out.contains("fixed the off-by-one"),
+        "resume prompt must substitute {{fixNotes}}: {out}"
+    );
+    assert!(
+        out.contains("my prior notes"),
+        "resume prompt must substitute {{prevNotes}}: {out}"
+    );
+}
