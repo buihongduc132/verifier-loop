@@ -236,6 +236,23 @@ fn run_round(
                 "  no verdict from: {}",
                 result.rejection.null_verifiers.join(", ")
             );
+            // Surface captured stderr so a crashed backend's error reaches the user
+            // instead of a silent null verdict. Truncated to the first 10 lines to
+            // avoid flooding the console on a chatty backend.
+            for vid in &result.rejection.null_verifiers {
+                let stderr_path = verifier_loop::goal::goal_dir(root, goal_id)
+                    .join(verifier_loop::goal::ROUNDS_DIR)
+                    .join(round.to_string())
+                    .join(vid)
+                    .join(verifier_loop::spawn::STDERR_FILE);
+                if let Ok(text) = std::fs::read_to_string(&stderr_path) {
+                    if !text.trim().is_empty() {
+                        let preview: String =
+                            text.lines().take(10).collect::<Vec<_>>().join("\n");
+                        eprintln!("  {vid} stderr:\n{preview}");
+                    }
+                }
+            }
         }
         if !result.rejection.signature_failures.is_empty() {
             eprintln!("  signature failures:");
