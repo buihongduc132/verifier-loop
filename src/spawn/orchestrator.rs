@@ -51,6 +51,11 @@ pub const FINAL_OUTPUT_FILE: &str = "final-output.txt";
 /// Per-verifier captured stderr filename. Written whenever the backend emitted any
 /// stderr (success or crash) so the user can always inspect why a run failed closed.
 pub const STDERR_FILE: &str = "stderr.txt";
+/// Maximum bytes of backend stderr retained in RAM + persisted to `stderr.txt`.
+/// Only the diagnostic TAIL matters (error messages live at the end of a run), so we
+/// keep a bounded tail instead of buffering an unbounded chatty backend into RAM.
+/// A run exceeding this is truncated with a `[...truncated N bytes...]` marker.
+pub const STDERR_CAP_BYTES: usize = 8 * 1024;
 /// `archive.json` written under a prior round dir when a session is freshly respawned
 /// (§6): records the superseded SID for audit.
 pub const ARCHIVE_FILE: &str = "archive.json";
@@ -335,6 +340,47 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
 /// untouched. The write result is checked here only to short-circuit `meta.json` /
 /// `final-output.txt` updates when the run is fail-closed (so a crashed verifier leaves
 /// no stale SID/output artifacts).
+/// Read a stderr pipe keeping only the last `cap` bytes (the diagnostic tail).
+/// Errors live at the end of a run; earlier chatter is discarded to bound RAM.
+/// If the stream exceeds `cap`, the returned buffer is prefixed with a truncation
+/// marker so the user knows output was elided.
+async fn bounded_stderr_tail<R: tokio::io::AsyncRead + Unpin>(
+    pipe: &mut R,
+    cap: usize,
+) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut chunk = [0u8; 1024];
+    let mut total_seen: u64 = 0;
+    let mut tail: Vec<u8> = Vec::new();
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                total_seen += n as u64;
+                tail.extend_from_slice(&chunk[..n]);
+                // Trim to keep only the last `cap` bytes in memory.
+                if tail.len() > cap {
+                    let excess = tail.len() - cap;
+                    tail.drain(..excess);
+                }
+            }
+            Err(_) => break, // best-effort: stop on read error
+        }
+    }
+    if total_seen as usize > cap {
+        let marker = format!(
+            "[...truncated {} bytes of stderr above the {}-byte cap...]\n",
+            total_seen.saturating_sub(cap as u64),
+            cap,
+        );
+        let mut out = marker.into_bytes();
+        out.extend_from_slice(&tail);
+        out
+    } else {
+        tail
+    }
+}
+
 async fn gather(
     input: SpawnInput<'_>,
     mut children: Vec<(
@@ -357,13 +403,9 @@ async fn gather(
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
         let drain = tokio::spawn(async move {
-            // Capture stderr (do NOT discard): a crashed backend's error must reach
-            // the user, not vanish into a silent null verdict.
-            let mut stderr_buf = Vec::<u8>::new();
-            if let Some(mut p) = stderr_pipe {
-                use tokio::io::AsyncReadExt;
-                let _ = p.read_to_end(&mut stderr_buf).await;
-            }
+            // stdout: full-buffer (the ACP parser must see the whole stream to find
+            // session/agent_end events). Pre-existing behaviour; a chatty backend
+            // emits bounded ACP JSON so this is acceptable.
             let buf = match stdout_pipe {
                 Some(mut pipe) => {
                     use tokio::io::AsyncReadExt;
@@ -371,6 +413,13 @@ async fn gather(
                     let _ = pipe.read_to_end(&mut buf).await;
                     buf
                 }
+                None => Vec::new(),
+            };
+            // stderr: BOUNDED tail. Only the diagnostic tail matters (errors live at
+            // the end of a run), so keep at most STDERR_CAP_BYTES instead of buffering
+            // an unbounded chatty backend into RAM. A run exceeding the cap is marked.
+            let stderr_buf = match stderr_pipe {
+                Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
                 None => Vec::new(),
             };
             (buf, stderr_buf)
