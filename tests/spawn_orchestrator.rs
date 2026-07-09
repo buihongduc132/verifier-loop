@@ -832,3 +832,82 @@ exit 1
         serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
     assert_eq!(verdict["status"], serde_json::Value::Null, "fail-closed: verdict stays null");
 }
+
+// ---------------------------------------------------------------------------
+// §5.7 — chatty stderr is bounded (RAM-safe), not fully buffered
+//
+// A backend that spews megabytes of stderr must NOT cause unbounded RAM growth.
+// The drain keeps only the last STDERR_CAP_BYTES and marks the elision.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chatty_stderr_is_bounded_to_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = serde_json::json!({
+        "n": 1, "m": 1, "maxTurn": 3, "backend": "custom",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10
+    });
+    let goal_id = seed_goal(root, "g", &config);
+
+    // Emit 4× the cap of stderr, then exit non-zero. The useful error is at the END.
+    let cap = spawn::STDERR_CAP_BYTES;
+    let oversize = cap * 4;
+    let script = write_script(
+        dir.path(),
+        "chatty.sh",
+        &format!(
+            r#"#!/bin/sh
+# Write {oversize} bytes of noise, then the real error at the end.
+dd if=/dev/zero bs=1024 count={oversize_kb} 2>/dev/null | tr '\0' 'x' >&2
+echo "FATAL: the actual error is here" >&2
+exit 1
+"#,
+            oversize = oversize,
+            oversize_kb = oversize / 1024,
+        ),
+    );
+    let adapter = script_adapter(&script);
+
+    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
+        root,
+        goal_id: &goal_id,
+        round: 1,
+        config: &store::Config::load_in(root).unwrap(),
+        prompt: PROMPT,
+        adapter: &adapter,
+    }))
+    .expect("spawn round returns");
+
+    let surfaced = runs[0].stderr.as_deref().expect("stderr surfaced");
+
+    // (a) The surfaced buffer is bounded — well under the oversize payload.
+    assert!(
+        surfaced.len() <= cap + 256,
+        "surfaced stderr ({} bytes) must be bounded near the cap ({cap}), got way more",
+        surfaced.len(),
+    );
+    assert!(
+        surfaced.len() < oversize,
+        "surfaced stderr must be smaller than the {}-byte payload",
+        oversize,
+    );
+
+    // (b) The real error at the END is retained (we keep the tail, not the head).
+    assert!(
+        surfaced.contains("FATAL: the actual error is here"),
+        "tail error must survive truncation: {surfaced}"
+    );
+
+    // (c) A truncation marker is present so the user knows output was elided.
+    assert!(
+        surfaced.contains("[...truncated"),
+        "truncation marker must be present when stderr exceeds cap: {surfaced}"
+    );
+
+    // (d) Persisted file is the same bounded content.
+    let persisted = fs::read_to_string(verifier_dir(root, &goal_id, 1, "v1").join(spawn::STDERR_FILE))
+        .unwrap();
+    assert!(persisted.contains("FATAL: the actual error is here"));
+    assert!(persisted.contains("[...truncated"));
+}
