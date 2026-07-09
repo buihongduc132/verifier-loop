@@ -48,6 +48,9 @@ pub const VERDICT_FILE: &str = "verdict.json";
 pub const META_FILE: &str = "meta.json";
 /// `final-output.txt` written after gather if the verifier emitted an `agent_end`.
 pub const FINAL_OUTPUT_FILE: &str = "final-output.txt";
+/// Per-verifier captured stderr filename. Written whenever the backend emitted any
+/// stderr (success or crash) so the user can always inspect why a run failed closed.
+pub const STDERR_FILE: &str = "stderr.txt";
 /// `archive.json` written under a prior round dir when a session is freshly respawned
 /// (§6): records the superseded SID for audit.
 pub const ARCHIVE_FILE: &str = "archive.json";
@@ -92,6 +95,9 @@ pub struct VerifierRun {
     pub sid: Option<String>,
     /// Final assistant message captured from `agent_end`, if any.
     pub final_output: Option<String>,
+    /// Stderr captured from the backend process. Surfaced (not swallowed) so a
+    /// crashed backend's error reaches the user instead of a silent null verdict.
+    pub stderr: Option<String>,
     /// True iff the verifier was killed by `verifierTimeoutSec`.
     pub timed_out: bool,
 }
@@ -351,11 +357,12 @@ async fn gather(
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
         let drain = tokio::spawn(async move {
-            // Best-effort stderr drain so a chatty backend never blocks on a full pipe.
+            // Capture stderr (do NOT discard): a crashed backend's error must reach
+            // the user, not vanish into a silent null verdict.
+            let mut stderr_buf = Vec::<u8>::new();
             if let Some(mut p) = stderr_pipe {
                 use tokio::io::AsyncReadExt;
-                let mut sink = Vec::<u8>::new();
-                let _ = p.read_to_end(&mut sink).await;
+                let _ = p.read_to_end(&mut stderr_buf).await;
             }
             let buf = match stdout_pipe {
                 Some(mut pipe) => {
@@ -366,7 +373,7 @@ async fn gather(
                 }
                 None => Vec::new(),
             };
-            buf
+            (buf, stderr_buf)
         });
 
         let run = tokio::select! {
@@ -378,12 +385,29 @@ async fn gather(
                 // Reap the stdin writer so it is not leaked (its result is irrelevant
                 // for a timed-out run — the verdict is already null via timeout).
                 if let Some(h) = write_handle { let _ = h.await; }
-                VerifierRun { verifier_id: vid, sid: None, final_output: None, timed_out: true }
+                // Drain whatever stderr was captured before the kill, for post-mortem.
+                let stderr = drain.await.ok().and_then(|(_s, e)| {
+                    let t = String::from_utf8_lossy(&e);
+                    if t.is_empty() { None } else { Some(t.into_owned()) }
+                });
+                if let Some(text) = &stderr {
+                    let _ = fs::write(vdir.join(STDERR_FILE), text);
+                }
+                VerifierRun { verifier_id: vid, sid: None, final_output: None, stderr, timed_out: true }
             }
             status = child.wait() => {
                 // Child exited; the drain task finishes shortly after (pipe hits EOF).
-                let buf = drain.await.unwrap_or_default();
-                let stdout = String::from_utf8_lossy(&buf);
+                let (stdout_buf, stderr_buf) = drain.await.unwrap_or_default();
+                let stdout = String::from_utf8_lossy(&stdout_buf);
+                let stderr_text: Option<String> = {
+                    let t = String::from_utf8_lossy(&stderr_buf);
+                    if t.is_empty() { None } else { Some(t.into_owned()) }
+                };
+                // Persist stderr whenever present (success or crash) so the user can
+                // always inspect backend diagnostics.
+                if let Some(text) = &stderr_text {
+                    let _ = fs::write(vdir.join(STDERR_FILE), text);
+                }
                 let sid = acp::extract_sid(&stdout);
                 let final_output = acp::extract_final_output(&stdout);
 
@@ -416,6 +440,7 @@ async fn gather(
                     verifier_id: vid,
                     sid: if fail_closed { None } else { sid },
                     final_output: if fail_closed { None } else { final_output },
+                    stderr: stderr_text,
                     timed_out: false,
                 }
             }

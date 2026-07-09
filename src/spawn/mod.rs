@@ -12,6 +12,7 @@ mod tempfile;
 
 pub use orchestrator::{
     spawn_resume, spawn_round, SpawnError, SpawnInput, VerifierMeta, VerifierRun, ARCHIVE_FILE,
-    ENV_GOAL_ID, ENV_ROUND, ENV_VERIFIER_ID, FINAL_OUTPUT_FILE, META_FILE, VERDICT_FILE,
+    ENV_GOAL_ID, ENV_ROUND, ENV_VERIFIER_ID, FINAL_OUTPUT_FILE, META_FILE, STDERR_FILE,
+    VERDICT_FILE,
 };
 pub use tempfile::{sweep_stale_tempfiles, TempPromptFile, SWEEP_MIN_AGE_SECS};
