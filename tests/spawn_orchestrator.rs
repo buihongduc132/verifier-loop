@@ -766,3 +766,69 @@ EOF
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// §5.6 — crashed backend stderr is surfaced, not swallowed
+//
+// When a backend (e.g. pi with a broken extension) exits non-zero with an error
+// on stderr and emits NO ACP session event, the run fails closed (null verdict).
+// The stderr MUST be persisted to `stderr.txt` in the verifier dir and surfaced on
+// the `VerifierRun.stderr` field so the CLI can show the user WHY it failed — not
+// a silent `{status:null}`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn crashed_backend_stderr_is_persisted_and_surfaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = serde_json::json!({
+        "n": 1, "m": 1, "maxTurn": 3, "backend": "custom",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10
+    });
+    let goal_id = seed_goal(root, "g", &config);
+
+    // A backend that mimics the broken-pi failure: writes a real error to stderr,
+    // emits NOTHING on stdout, exits non-zero. No ACP session event ⇒ null verdict.
+    let script = write_script(
+        dir.path(),
+        "crash.sh",
+        r#"#!/bin/sh
+echo "Error: Failed to load extension bridge.ts: Cannot find module @blackbelt-technology/pi-dashboard-shared/session-meta.js" >&2
+exit 1
+"#,
+    );
+    let adapter = script_adapter(&script);
+
+    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
+        root,
+        goal_id: &goal_id,
+        round: 1,
+        config: &store::Config::load_in(root).unwrap(),
+        prompt: PROMPT,
+        adapter: &adapter,
+    }))
+    .expect("spawn round still returns (crash is not a hard error)");
+
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].sid.is_none(), "no SID from a crashed backend");
+
+    // (a) stderr is surfaced on the run so the CLI can print it.
+    let surfaced = runs[0].stderr.as_deref().expect("stderr surfaced on the run");
+    assert!(
+        surfaced.contains("Failed to load extension bridge.ts"),
+        "surfaced stderr carries the backend error: {surfaced}"
+    );
+
+    // (b) stderr is persisted to disk next to the verdict for post-mortem.
+    let vdir = verifier_dir(root, &goal_id, 1, "v1");
+    let stderr_file = fs::read_to_string(vdir.join(spawn::STDERR_FILE)).unwrap();
+    assert!(
+        stderr_file.contains("Cannot find module"),
+        "stderr.txt carries the backend error: {stderr_file}"
+    );
+
+    // (c) the verdict is still null (fail-closed intact — we surface, we do NOT fake).
+    let verdict: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
+    assert_eq!(verdict["status"], serde_json::Value::Null, "fail-closed: verdict stays null");
+}
