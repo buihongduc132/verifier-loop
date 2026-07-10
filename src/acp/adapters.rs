@@ -152,7 +152,7 @@ impl Adapter {
 /// Built-ins: `pi`, `hermes`, `acpx`. Returns `Err` for any unknown name (fail-closed:
 /// never silently fall back to pi, which would produce an unparseable stream and a null
 /// verdict indistinguishable from a real crash).
-pub fn adapter_for(backend: &str) -> Result<Adapter, AcpError> {
+pub fn adapter_for(backend: &str, profile: Option<&str>) -> Result<Adapter, AcpError> {
     match backend {
         // Built-in adapters (design D6 / fix-spawn-argv-overflow §8): the prompt is
         // delivered on the child's stdin pipe (transport = Stdin). argv contains NO
@@ -169,11 +169,26 @@ pub fn adapter_for(backend: &str) -> Result<Adapter, AcpError> {
             resume: "pi --session {sid} --mode json".to_string(),
             ..Default::default()
         }),
-        "hermes" => Ok(Adapter {
-            spawn: "hermes --mode json".to_string(),
-            resume: "hermes --session {sid} --mode json".to_string(),
-            ..Default::default()
-        }),
+        "hermes" => {
+            // When a profile is specified, inject `-p <profile>` into both templates.
+            // Spawn: `hermes -p <profile> --mode json`
+            // Resume: `hermes -p <profile> --session {sid} --mode json`
+            let (spawn, resume) = match profile {
+                Some(p) => (
+                    format!("hermes -p {p} --mode json"),
+                    format!("hermes -p {p} --session {{sid}} --mode json"),
+                ),
+                None => (
+                    "hermes --mode json".to_string(),
+                    "hermes --session {sid} --mode json".to_string(),
+                ),
+            };
+            Ok(Adapter {
+                spawn,
+                resume,
+                ..Default::default()
+            })
+        }
         "acpx" => Ok(Adapter {
             spawn: "acpx --mode json".to_string(),
             resume: "acpx --session {sid} --mode json".to_string(),
@@ -206,7 +221,7 @@ mod tests {
     /// §8 (D6) — built-in pi templates use stdin transport: NO `{prompt}` token.
     #[test]
     fn pi_templates_match_spec() {
-        let a = adapter_for("pi").unwrap();
+        let a = adapter_for("pi", None).unwrap();
         assert_eq!(a.spawn, "pi --mode json");
         assert_eq!(a.resume, "pi --session {sid} --mode json");
         // Hard fail-closed: the spawn argv must carry ZERO prompt-derived bytes.
@@ -219,7 +234,7 @@ mod tests {
     /// asserts the template contract only, not that hermes reads stdin.
     #[test]
     fn hermes_templates_match_spec() {
-        let a = adapter_for("hermes").unwrap();
+        let a = adapter_for("hermes", None).unwrap();
         assert_eq!(a.spawn, "hermes --mode json");
         assert_eq!(a.resume, "hermes --session {sid} --mode json");
         assert!(!a.spawn.contains("{prompt}") && !a.resume.contains("{prompt}"));
@@ -228,7 +243,7 @@ mod tests {
     /// §8 (D6) — acpx templates mirror pi for spec parity (stdin transport).
     #[test]
     fn acpx_templates_match_spec() {
-        let a = adapter_for("acpx").unwrap();
+        let a = adapter_for("acpx", None).unwrap();
         assert_eq!(a.spawn, "acpx --mode json");
         assert_eq!(a.resume, "acpx --session {sid} --mode json");
         assert!(!a.spawn.contains("{prompt}") && !a.resume.contains("{prompt}"));
@@ -236,7 +251,7 @@ mod tests {
 
     #[test]
     fn unknown_backend_errors() {
-        assert!(adapter_for("claude").is_err());
+        assert!(adapter_for("claude", None).is_err());
     }
 
     #[test]
@@ -270,7 +285,7 @@ mod tests {
     /// §1.4 — built-in `pi` adapter defaults to `transport == Transport::Stdin`.
     #[test]
     fn transport_field_defaults_to_stdin_for_builtin_pi() {
-        let a = adapter_for("pi").expect("pi is a built-in adapter");
+        let a = adapter_for("pi", None).expect("pi is a built-in adapter");
         assert_eq!(
             a.transport,
             Transport::Stdin,
@@ -281,13 +296,13 @@ mod tests {
     /// §1.4 — built-in `hermes` and `acpx` adapters also default to Stdin.
     #[test]
     fn transport_field_defaults_to_stdin_for_builtin_hermes_and_acpx() {
-        let hermes = adapter_for("hermes").expect("hermes is a built-in adapter");
+        let hermes = adapter_for("hermes", None).expect("hermes is a built-in adapter");
         assert_eq!(
             hermes.transport,
             Transport::Stdin,
             "built-in hermes adapter must default to the stdin transport"
         );
-        let acpx = adapter_for("acpx").expect("acpx is a built-in adapter");
+        let acpx = adapter_for("acpx", None).expect("acpx is a built-in adapter");
         assert_eq!(
             acpx.transport,
             Transport::Stdin,
@@ -368,6 +383,93 @@ mod tests {
             Transport::GoalFile,
             "transport must round-trip to Transport::GoalFile"
         );
+    }
+
+    // ── RED tests for hermes-profile-adapter: adapter_for with profile ────────
+    // These tests encode the NOT-YET-IMPLEMENTED behaviour: adapter_for must
+    // accept an optional profile parameter. They are expected to FAIL (RED)
+    // until the GREEN author implements the profile-aware signature.
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// hermes-profile: adapter_for("hermes", Some("verifier")) must produce
+    /// spawn template "hermes -p verifier --mode json".
+    #[test]
+    fn hermes_with_profile_renders_spawn_with_profile_flag() {
+        let a = adapter_for("hermes", Some("verifier")).unwrap();
+        assert_eq!(
+            a.spawn, "hermes -p verifier --mode json",
+            "hermes spawn with profile must include `-p <profile>` flag"
+        );
+    }
+
+    /// hermes-profile: adapter_for("hermes", Some("verifier")) must produce
+    /// resume template "hermes -p verifier --session {sid} --mode json".
+    #[test]
+    fn hermes_with_profile_renders_resume_with_profile_flag() {
+        let a = adapter_for("hermes", Some("verifier")).unwrap();
+        assert_eq!(
+            a.resume, "hermes -p verifier --session {sid} --mode json",
+            "hermes resume with profile must include `-p <profile>` before --session"
+        );
+    }
+
+    /// hermes-profile: adapter_for("hermes", None) must produce the same
+    /// templates as before (no profile flag).
+    #[test]
+    fn hermes_without_profile_unchanged() {
+        let a = adapter_for("hermes", None).unwrap();
+        assert_eq!(a.spawn, "hermes --mode json");
+        assert_eq!(a.resume, "hermes --session {sid} --mode json");
+    }
+
+    /// hermes-profile: pi adapter must ignore the profile parameter entirely.
+    #[test]
+    fn pi_ignores_profile_param() {
+        let with_profile = adapter_for("pi", Some("verifier")).unwrap();
+        let without_profile = adapter_for("pi", None).unwrap();
+        assert_eq!(with_profile.spawn, without_profile.spawn,
+            "pi spawn must be identical regardless of profile param");
+        assert_eq!(with_profile.resume, without_profile.resume,
+            "pi resume must be identical regardless of profile param");
+        assert_eq!(with_profile.spawn, "pi --mode json");
+        assert_eq!(with_profile.resume, "pi --session {sid} --mode json");
+    }
+
+    /// hermes-profile: acpx adapter must ignore the profile parameter entirely.
+    #[test]
+    fn acpx_ignores_profile_param() {
+        let with_profile = adapter_for("acpx", Some("verifier")).unwrap();
+        let without_profile = adapter_for("acpx", None).unwrap();
+        assert_eq!(with_profile.spawn, without_profile.spawn,
+            "acpx spawn must be identical regardless of profile param");
+        assert_eq!(with_profile.resume, without_profile.resume,
+            "acpx resume must be identical regardless of profile param");
+        assert_eq!(with_profile.spawn, "acpx --mode json");
+        assert_eq!(with_profile.resume, "acpx --session {sid} --mode json");
+    }
+
+    /// hermes-profile edge case: empty profile string is treated as a profile name
+    /// (produces `hermes -p  --mode json`). This is technically valid but unusual.
+    #[test]
+    fn hermes_with_empty_profile_string() {
+        let a = adapter_for("hermes", Some("")).unwrap();
+        assert_eq!(a.spawn, "hermes -p  --mode json");
+        assert_eq!(a.resume, "hermes -p  --session {sid} --mode json");
+    }
+
+    /// hermes-profile edge case: profile with spaces is rendered as-is (single token).
+    #[test]
+    fn hermes_with_profile_containing_spaces() {
+        let a = adapter_for("hermes", Some("my profile")).unwrap();
+        assert_eq!(a.spawn, "hermes -p my profile --mode json");
+    }
+
+    /// hermes-profile edge case: profile with special chars is rendered as-is.
+    #[test]
+    fn hermes_with_profile_containing_special_chars() {
+        let a = adapter_for("hermes", Some("verifier-2")).unwrap();
+        assert_eq!(a.spawn, "hermes -p verifier-2 --mode json");
+        assert_eq!(a.resume, "hermes -p verifier-2 --session {sid} --mode json");
     }
 
     /// §1.1 — `Transport` serde round-trip: `"stdin"` <-> `Transport::Stdin`,

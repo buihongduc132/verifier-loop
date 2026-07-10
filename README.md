@@ -73,6 +73,7 @@ diff fed to verifiers (tasks.md §2.2). On-disk keys are camelCase; all fields a
 | `verifierTimeoutSec` | u64     | `1800`      | per-verifier wall-clock timeout in seconds (D9); a timeout leaves a null verdict. |
 | `verifierPromptFile` | string? | `null`      | optional override file whose **raw** contents are prepended to the baked-in verifier prompt for every NEW + RESUME round. Relative paths resolve against the store root (`VERIFIER_LOOP_HOME`); absolute paths used as-is. Missing/unreadable → fail-closed error (no goal dir written). No `{{var}}` expansion. |
 | `minGoalChars`       | u64     | `0`         | minimum trimmed `goalText` char length. `0` disables the check. Empty/whitespace-only `goalText` is ALWAYS an error regardless. Below-threshold → fail-closed error before any goal dir/signature is written. |
+| `hermesProfile`      | string? | `null`      | optional Hermes profile name (e.g. `"verifier"`). Only valid when `backend` is `"hermes"`. When set, spawn/resume templates become `hermes -p <profile> --mode json` and `hermes -p <profile> --session {sid} --mode json`. Rejected for non-hermes backends (fail-closed). |
 
 Semantics (fail-closed):
 
@@ -110,6 +111,23 @@ verifier-loop RESUME <goalId> --fix "addressed the missing error path"
 verifier-verdict approve
 verifier-verdict reject --notes "issue 1: missing test for the error path"
 ```
+
+### Hermes profile support
+
+When `backend` is `hermes`, an optional `hermesProfile` field selects a Hermes
+profile (e.g. `hermes -p verifier`) so all verifiers run under a specialized
+profile with its own skills, tools, and system prompts:
+
+```json
+{
+  "backend": "hermes",
+  "hermesProfile": "verifier"
+}
+```
+
+This produces spawn command `hermes -p verifier --mode json` and resume command
+`hermes -p verifier --session <sid> --mode json`. The field is rejected for
+non-hermes backends (pi, acpx, custom) with a fail-closed error.
 
 On n/m APPROVE consensus the short completion hash (`mmddyy-XXXXXXXX`) is printed to stdout and
 `completion.json` is written under the goal directory (carrying both the short `hash` and the
