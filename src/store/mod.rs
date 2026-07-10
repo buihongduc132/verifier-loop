@@ -17,7 +17,7 @@ mod salt;
 
 use std::path::{Path, PathBuf};
 
-pub use config::{load_config_in, Config};
+pub use config::{load_config_in, Config, VerifierConfig};
 pub use salt::salt_in;
 
 /// Errors raised by the store layer. All paths fail closed.

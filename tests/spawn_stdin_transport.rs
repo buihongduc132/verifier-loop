@@ -124,7 +124,7 @@ EOF
             round: 1,
             config: &store::Config::load_in(root).unwrap(),
             prompt,
-            adapter: &adapter,
+            adapters: &[adapter.clone()],
         }))
         .expect("spawn round should not hard-error");
 
@@ -188,7 +188,7 @@ EOF
             round: 1,
             config: &store::Config::load_in(root).unwrap(),
             prompt: &prompt,
-            adapter: &adapter,
+            adapters: &[adapter.clone()],
         })
         .await
     });
@@ -261,7 +261,7 @@ exit 0
             round: 1,
             config: &store::Config::load_in(root).unwrap(),
             prompt: &prompt,
-            adapter: &adapter,
+            adapters: &[adapter.clone()],
         }))
         .expect("EPIPE after ACP output must NOT hard-error the spawn round");
 
@@ -332,7 +332,7 @@ exit 1
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }));
 
     // The gather barrier must complete without panicking (EPIPE is fatal-but-handled).

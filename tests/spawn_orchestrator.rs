@@ -104,7 +104,7 @@ EOF
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone(), adapter.clone()],
     }))
     .expect("spawn round succeeds");
 
@@ -166,7 +166,7 @@ ACP
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone(), adapter.clone()],
     }))
     .expect("spawn succeeds");
 
@@ -214,7 +214,7 @@ EOF
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone(), adapter.clone()],
     }))
     .expect("spawn succeeds");
     let elapsed = start.elapsed();
@@ -261,7 +261,7 @@ sleep 30
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }))
     .expect("spawn round still returns (timeout is not a hard error)");
 
@@ -307,7 +307,7 @@ EOF
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }))
     .expect("spawn succeeds");
 
@@ -418,7 +418,7 @@ EOF
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone(), adapter.clone()],
     }))
     .expect("spawn round succeeds");
 
@@ -469,7 +469,7 @@ EOF
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone(), adapter.clone()],
     }))
     .expect("spawn succeeds");
 
@@ -753,7 +753,7 @@ EOF
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone(), adapter.clone(), adapter.clone()],
     }))
     .expect("spawn succeeds");
 
@@ -805,7 +805,7 @@ exit 1
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }))
     .expect("spawn round still returns (crash is not a hard error)");
 
@@ -875,7 +875,7 @@ exit 1
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }))
     .expect("spawn round returns");
 
