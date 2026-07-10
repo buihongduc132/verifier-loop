@@ -32,6 +32,21 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 | `prompt/`  | §9 | verifier-prompt |
 | `cli/`     | §10 | wiring |
 
+## Hermes profile support
+
+When `backend` is `"hermes"`, the config gains an optional `hermesProfile` field:
+
+```json
+{
+  "backend": "hermes",
+  "hermesProfile": "verifier"
+}
+```
+
+This injects `-p <profile>` into the hermes spawn/resume templates. Rejected for
+non-hermes backends (fail-closed). See `openspec/changes/hermes-profile-adapter/`.
+
+
 ## TDD discipline (hard constraint)
 
 Every feature group follows strict RED-then-GREEN:

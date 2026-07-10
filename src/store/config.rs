@@ -27,12 +27,12 @@ use super::StoreError;
 ///   * `backend = "pi"`              — ACP backend (pi | hermes | acpx | custom)
 ///   * `git_diff_max_chars = 10000`  — cap on the frozen `git diff` snapshot fed to V*
 ///   * `verifier_timeout_sec = 1800` — per-verifier wall-clock timeout (D9)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 ///
 /// `deny_unknown_fields` closes the on-disk schema: any key outside the eight
 /// canonical fields (e.g. a legacy `cwd`, `model`, or stray prompt template) is a
 /// hard parse error rather than silently dropped. `cwd` is sourced at runtime
 /// from `std::env::current_dir()` and is *never* read from `config.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Consensus threshold — minimum APPROVE verdicts required to pass (n of m).
@@ -60,6 +60,12 @@ pub struct Config {
     /// Empty/whitespace-only goalText is ALWAYS an error regardless of this value.
     #[serde(rename = "minGoalChars", default)]
     pub min_goal_chars: u64,
+    /// Optional Hermes profile name (e.g. "coder", "verifier"). Only valid when
+    /// `backend` is `"hermes"`. When set, the hermes adapter template includes
+    /// `-p <profile>` to select the profile. Rejected at [`validate`] time for
+    /// any other backend (pi, acpx, custom).
+    #[serde(rename = "hermesProfile", default)]
+    pub hermes_profile: Option<String>,
 }
 
 impl Default for Config {
@@ -73,6 +79,7 @@ impl Default for Config {
             verifier_timeout_sec: 1800,
             verifier_prompt_file: None,
             min_goal_chars: 0,
+            hermes_profile: None,
         }
     }
 }
@@ -84,6 +91,20 @@ impl Config {
     /// `Config::load_in(root)` or `load_config_in(root)`.
     pub fn load_in(root: &Path) -> Result<Self, StoreError> {
         load_config_in(root)
+    }
+
+    /// Semantic validation after parsing.
+    ///
+    /// Currently checks that `hermesProfile` is only set when `backend == "hermes"`.
+    /// Returns `Ok(())` if valid, or an error explaining the violation.
+    pub fn validate(&self) -> Result<(), StoreError> {
+        if self.hermes_profile.is_some() && self.backend != "hermes" {
+            return Err(StoreError::Validation(format!(
+                "hermesProfile is only valid when backend is \"hermes\", but backend is \"{}\"",
+                self.backend
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -129,6 +150,7 @@ mod tests {
             verifier_timeout_sec: 99,
             verifier_prompt_file: None,
             min_goal_chars: 0,
+            hermes_profile: None,
         };
         let j = serde_json::to_string(&cfg).unwrap();
         // camelCase keys must appear verbatim (this is the on-disk contract).
@@ -173,5 +195,161 @@ mod tests {
         assert_eq!(cfg.m, 2);
         assert_eq!(cfg.backend, "pi");
         assert_eq!(cfg.verifier_timeout_sec, 1800);
+    }
+
+    // ── hermesProfile field tests (RED — field does not exist yet) ──
+
+    /// (1) hermesProfile parses correctly from JSON with camelCase key.
+    /// The on-disk key is `hermesProfile` (camelCase), mapped to `hermes_profile` in Rust.
+    #[test]
+    fn hermes_profile_parses_from_json() {
+        let raw = r#"{
+            "n": 2,
+            "m": 2,
+            "maxTurn": 3,
+            "backend": "hermes",
+            "gitDiffMaxChars": 10000,
+            "verifierTimeoutSec": 1800,
+            "hermesProfile": "coder"
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("hermesProfile must parse");
+        assert_eq!(
+            cfg.hermes_profile,
+            Some("coder".to_string()),
+            "hermes_profile must be Some(\"coder\")"
+        );
+    }
+
+    /// (1b) hermesProfile round-trips through serde with camelCase key.
+    #[test]
+    fn hermes_profile_round_trips_camel_case() {
+        let cfg = Config {
+            n: 2,
+            m: 2,
+            max_turn: 3,
+            backend: "hermes".into(),
+            git_diff_max_chars: 10_000,
+            verifier_timeout_sec: 1800,
+            verifier_prompt_file: None,
+            min_goal_chars: 0,
+            hermes_profile: Some("work".to_string()),
+        };
+        let j = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            j.contains("\"hermesProfile\":\"work\""),
+            "hermesProfile must serialize as camelCase: {j}"
+        );
+        let back: Config = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.hermes_profile, Some("work".to_string()));
+    }
+
+    /// (2) hermesProfile must be rejected when backend is NOT "hermes".
+    /// Only the "hermes" backend supports profile selection; pi/acpx/custom must error.
+    #[test]
+    fn hermes_profile_rejected_for_pi_backend() {
+        let raw = r#"{
+            "n": 2,
+            "m": 2,
+            "maxTurn": 3,
+            "backend": "pi",
+            "gitDiffMaxChars": 10000,
+            "verifierTimeoutSec": 1800,
+            "hermesProfile": "coder"
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("must parse");
+        let result = cfg.validate();
+        assert!(result.is_err(), "hermesProfile must be rejected for backend=pi");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("hermesProfile") || msg.contains("hermes_profile"),
+            "error must mention hermesProfile, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn hermes_profile_rejected_for_acpx_backend() {
+        let raw = r#"{
+            "n": 2,
+            "m": 2,
+            "maxTurn": 3,
+            "backend": "acpx",
+            "gitDiffMaxChars": 10000,
+            "verifierTimeoutSec": 1800,
+            "hermesProfile": "coder"
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("must parse");
+        let result = cfg.validate();
+        assert!(
+            result.is_err(),
+            "hermesProfile must be rejected for backend=acpx"
+        );
+    }
+
+    #[test]
+    fn hermes_profile_rejected_for_custom_backend() {
+        let raw = r#"{
+            "n": 2,
+            "m": 2,
+            "maxTurn": 3,
+            "backend": "custom-adapter",
+            "gitDiffMaxChars": 10000,
+            "verifierTimeoutSec": 1800,
+            "hermesProfile": "coder"
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("must parse");
+        let result = cfg.validate();
+        assert!(
+            result.is_err(),
+            "hermesProfile must be rejected for custom backends"
+        );
+    }
+
+    #[test]
+    fn hermes_profile_accepted_for_hermes_backend() {
+        let raw = r#"{
+            "n": 2,
+            "m": 2,
+            "maxTurn": 3,
+            "backend": "hermes",
+            "gitDiffMaxChars": 10000,
+            "verifierTimeoutSec": 1800,
+            "hermesProfile": "coder"
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("must parse");
+        let result = cfg.validate();
+        assert!(
+            result.is_ok(),
+            "hermesProfile must be accepted for backend=hermes: {:?}",
+            result.err()
+        );
+    }
+
+    /// (3) hermesProfile is optional — backward compatibility.
+    /// A config without hermesProfile must still parse and default to None.
+    #[test]
+    fn hermes_profile_optional_backward_compat() {
+        let raw = r#"{
+            "n": 2,
+            "m": 2,
+            "maxTurn": 3,
+            "backend": "pi",
+            "gitDiffMaxChars": 10000,
+            "verifierTimeoutSec": 1800
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("must parse without hermesProfile");
+        assert_eq!(
+            cfg.hermes_profile, None,
+            "hermes_profile must default to None when absent"
+        );
+    }
+
+    /// (3b) Default Config must have hermes_profile = None.
+    #[test]
+    fn default_config_has_no_hermes_profile() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.hermes_profile, None,
+            "default config must have hermes_profile = None"
+        );
     }
 }

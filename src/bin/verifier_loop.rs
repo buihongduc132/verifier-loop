@@ -269,7 +269,7 @@ fn run_round(
 fn resolve_adapter(
     config: &verifier_loop::store::Config,
 ) -> Result<verifier_loop::acp::Adapter, String> {
-    if let Ok(a) = verifier_loop::acp::adapter_for(&config.backend) {
+    if let Ok(a) = verifier_loop::acp::adapter_for(&config.backend, config.hermes_profile.as_deref()) {
         return Ok(a);
     }
     let spawn_cmd = std::env::var(ENV_BACKEND_CMD)

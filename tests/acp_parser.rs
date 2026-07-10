@@ -200,7 +200,7 @@ fn parser_is_conformant_over_full_fixture_stream() {
 fn pi_adapter_spawn_uses_stdin_transport_no_prompt_token() {
     // verifier-spawn spec (post §8/D6): built-in `pi` spawn is `pi --mode json` — the
     // prompt travels on stdin, NOT in argv (no `-p`, no `{prompt}` token).
-    let t = acp::adapter_for("pi").expect("pi is a built-in adapter");
+    let t = acp::adapter_for("pi", None).expect("pi is a built-in adapter");
     assert_eq!(t.spawn, "pi --mode json", "pi spawn template must be the stdin form, got: {}", t.spawn);
     assert!(!t.spawn.contains("-p"), "spawn must NOT inline the prompt via -p (E2BIG risk)");
     assert!(!t.spawn.contains("{prompt}"), "spawn must NOT carry a {{prompt}} token");
@@ -211,7 +211,7 @@ fn pi_adapter_spawn_uses_stdin_transport_no_prompt_token() {
 fn pi_adapter_resume_uses_session_flag_and_mode_json() {
     // verifier-spawn spec (post §8/D6): resume is `pi --session {sid} --mode json` —
     // `{sid}` is the only placeholder; the prompt still travels on stdin.
-    let t = acp::adapter_for("pi").expect("pi is a built-in adapter");
+    let t = acp::adapter_for("pi", None).expect("pi is a built-in adapter");
     assert_eq!(t.resume, "pi --session {sid} --mode json", "pi resume template, got: {}", t.resume);
     assert!(t.resume.contains("--session") && t.resume.contains("--mode json"));
     assert!(!t.resume.contains("-p"), "resume must NOT inline the prompt via -p");
@@ -221,9 +221,10 @@ fn pi_adapter_resume_uses_session_flag_and_mode_json() {
 #[test]
 fn hermes_and_acpx_are_builtin_adapters() {
     // §4.3: hermes and acpx each provide spawn/resume templates.
-    for backend in ["hermes", "acpx"] {
-        let t = acp::adapter_for(backend).unwrap_or_else(|e| panic!("{backend} must be built-in: {e:?}"));
-        assert!(!t.spawn.is_empty() && !t.resume.is_empty(), "{backend} templates non-empty");
+    for backend in ["pi", "hermes", "acpx"] {
+        let t = acp::adapter_for(backend, None).unwrap_or_else(|e| panic!("{backend} must be built-in: {e:?}"));
+        assert!(!t.spawn.contains("{prompt}"), "{backend} spawn must not inline prompt");
+        assert!(!t.resume.contains("{prompt}"), "{backend} resume must not inline prompt");
     }
 }
 
@@ -231,7 +232,7 @@ fn hermes_and_acpx_are_builtin_adapters() {
 fn unknown_builtin_backend_errors_fail_closed() {
     // A typo'd/unsupported backend must error, never silently fall back to pi
     // (fail-closed: a wrong backend would produce an unparseable stream).
-    assert!(acp::adapter_for("definitely-not-a-backend").is_err());
+    assert!(acp::adapter_for("definitely-not-a-backend", None).is_err());
 }
 
 #[test]

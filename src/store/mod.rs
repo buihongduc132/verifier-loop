@@ -32,6 +32,9 @@ pub enum StoreError {
     /// `config.json` present but not valid JSON / wrong shape.
     #[error("config.json is invalid: {0}")]
     Json(String),
+    /// Config parsed OK but semantic validation failed (e.g. hermesProfile on non-hermes backend).
+    #[error("config validation error: {0}")]
+    Validation(String),
 }
 
 /// Ensures the store root directory exists (creating it and parents as needed).
