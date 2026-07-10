@@ -126,7 +126,7 @@ EOF
             round: 2,
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
-            adapter: &adapter,
+            adapters: &[adapter.clone()],
         }))
         .expect("resume spawn succeeds");
 
@@ -202,7 +202,7 @@ EOF
             round: 2,
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
-            adapter: &adapter,
+            adapters: &[adapter.clone()],
         }))
         .expect("resume spawn succeeds");
 
@@ -272,7 +272,7 @@ EOF
         round: 2,
         config: &cfg,
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }))
     .unwrap();
     // Round 3 (reuse: prior turnsUsed still recorded; SID captured last round).
@@ -283,7 +283,7 @@ EOF
         round: 3,
         config: &cfg,
         prompt: PROMPT,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }))
     .unwrap();
 

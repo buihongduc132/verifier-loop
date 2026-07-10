@@ -157,7 +157,7 @@ EOF
             round: 1,
             config: &store::Config::load_in(root).unwrap(),
             prompt,
-            adapter: &adapter,
+            adapters: &[adapter.clone()],
         }))
         .expect("spawn round should not hard-error");
 
@@ -265,7 +265,7 @@ exit 3
             round: 1,
             config: &store::Config::load_in(root).unwrap(),
             prompt,
-            adapter: &adapter,
+            adapters: &[adapter.clone()],
         }))
         .expect("gather must not panic on a non-zero child exit");
 
@@ -364,7 +364,7 @@ EOF
         round: 1,
         config: &store::Config::load_in(root).unwrap(),
         prompt: &prompt,
-        adapter: &adapter,
+        adapters: &[adapter.clone()],
     }));
 
     // (a) The spawn MUST succeed (no E2BIG / "Argument list too long").

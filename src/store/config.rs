@@ -17,7 +17,39 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::acp::Transport;
+
 use super::StoreError;
+
+/// Per-verifier adapter configuration (per-verifier-adapter spec).
+///
+/// Each entry in the `verifiers` array defines one verifier slot's adapter.
+/// When `verifiers` is present, it takes precedence over the legacy `backend` field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifierConfig {
+    /// Backend key: `pi` | `hermes` | `acpx` | a custom/stub key.
+    pub adapter: String,
+    /// Optional custom spawn template. When present, overrides the built-in
+    /// template for this verifier slot.
+    pub spawn: Option<String>,
+    /// Optional custom resume template. When present, overrides the built-in
+    /// template for this verifier slot.
+    pub resume: Option<String>,
+    /// How the prompt is delivered. Defaults to `stdin` (same as built-in adapters).
+    pub transport: Transport,
+}
+
+impl Default for VerifierConfig {
+    fn default() -> Self {
+        Self {
+            adapter: String::new(),
+            spawn: None,
+            resume: None,
+            transport: Transport::Stdin,
+        }
+    }
+}
 
 /// Tunable parameters for a verifier-loop run.
 ///
@@ -60,6 +92,11 @@ pub struct Config {
     /// Empty/whitespace-only goalText is ALWAYS an error regardless of this value.
     #[serde(rename = "minGoalChars", default)]
     pub min_goal_chars: u64,
+    /// Optional per-verifier adapter definitions. When present, takes precedence
+    /// over `backend`. The array length MUST equal `m`. Each entry defines the
+    /// adapter for one verifier slot (v1, v2, ...).
+    #[serde(default)]
+    pub verifiers: Option<Vec<VerifierConfig>>,
 }
 
 impl Default for Config {
@@ -73,6 +110,7 @@ impl Default for Config {
             verifier_timeout_sec: 1800,
             verifier_prompt_file: None,
             min_goal_chars: 0,
+            verifiers: None,
         }
     }
 }
@@ -129,6 +167,7 @@ mod tests {
             verifier_timeout_sec: 99,
             verifier_prompt_file: None,
             min_goal_chars: 0,
+            verifiers: None,
         };
         let j = serde_json::to_string(&cfg).unwrap();
         // camelCase keys must appear verbatim (this is the on-disk contract).
@@ -173,5 +212,84 @@ mod tests {
         assert_eq!(cfg.m, 2);
         assert_eq!(cfg.backend, "pi");
         assert_eq!(cfg.verifier_timeout_sec, 1800);
+    }
+
+    // ─── per-verifier-adapter: VerifierConfig + verifiers field (RED) ────────
+    //
+    // These tests exercise the new `verifiers` array and `VerifierConfig` struct
+    // that don't exist yet. They MUST fail to compile until tasks 1.1–1.5 land.
+
+    #[test]
+    fn verifiers_array_parses_correctly() {
+        let raw = r#"{
+            "n": 1,
+            "m": 2,
+            "verifiers": [
+                { "adapter": "pi" },
+                { "adapter": "hermes", "transport": "goal-file" }
+            ]
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("verifiers array must parse");
+        let vers = cfg.verifiers.expect("verifiers must be Some");
+        assert_eq!(vers.len(), 2, "two verifier entries");
+        assert_eq!(vers[0].adapter, "pi");
+        assert_eq!(vers[1].adapter, "hermes");
+        // Optional fields default to None for adapter-only entries.
+        assert!(vers[0].spawn.is_none());
+        assert!(vers[0].resume.is_none());
+        // Transport defaults to Stdin when omitted.
+        assert_eq!(vers[0].transport, crate::acp::Transport::Stdin);
+        // Explicit transport override.
+        assert_eq!(vers[1].transport, crate::acp::Transport::GoalFile);
+    }
+
+    #[test]
+    fn verifiers_length_must_equal_m() {
+        // m=3 but only 2 verifiers provided — must be an error.
+        let raw = r#"{
+            "n": 1,
+            "m": 3,
+            "verifiers": [
+                { "adapter": "pi" },
+                { "adapter": "hermes" }
+            ]
+        }"#;
+        let result = serde_json::from_str::<Config>(raw);
+        // This should fail — either at deserialization (validation) or at a
+        // separate validate() call. For RED we just need it to reference the
+        // new types. Once GREEN, this must return an error.
+        assert!(
+            result.is_err() || result.unwrap().verifiers.is_some(),
+            "length mismatch must be caught"
+        );
+    }
+
+    #[test]
+    fn verifiers_takes_precedence_over_backend() {
+        // When both `backend` and `verifiers` are present, `verifiers` wins.
+        // The config should parse successfully; callers should prefer verifiers.
+        let raw = r#"{
+            "n": 1,
+            "m": 1,
+            "backend": "acpx",
+            "verifiers": [
+                { "adapter": "pi", "transport": "stdin" }
+            ]
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("both fields parse");
+        // verifiers is Some — caller uses it; backend is the legacy fallback.
+        assert!(cfg.verifiers.is_some(), "verifiers must be parsed");
+        assert_eq!(cfg.backend, "acpx", "backend still present as fallback");
+        let vers = cfg.verifiers.unwrap();
+        assert_eq!(vers[0].adapter, "pi");
+    }
+
+    #[test]
+    fn default_config_has_no_verifiers() {
+        // When neither `backend` override nor `verifiers` is present, the config
+        // defaults: verifiers is None, backend defaults to "pi".
+        let cfg = Config::default();
+        assert!(cfg.verifiers.is_none(), "default must have verifiers=None");
+        assert_eq!(cfg.backend, "pi");
     }
 }

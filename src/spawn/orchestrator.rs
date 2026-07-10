@@ -89,7 +89,9 @@ pub struct SpawnInput<'a> {
     pub round: u32,
     pub config: &'a store::Config,
     pub prompt: &'a str,
-    pub adapter: &'a acp::Adapter,
+    /// One adapter per verifier slot (length must equal `config.m`).
+    /// Each verifier uses its own adapter from this slice.
+    pub adapters: &'a [acp::Adapter],
 }
 
 /// A completed verifier run (after the gather barrier).
@@ -154,23 +156,21 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
     // of m verifiers. The goal_file_guard is `Some` only for `GoalFile` transport;
     // it is held in the plan / children vec so the tempfile lives until the gather
     // barrier reaps the child (design D3 — unlink after the child has opened the file).
-    let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>)> = Vec::new();
+    let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>, Transport)> = Vec::new();
     for i in 0..input.config.m as usize {
         let vid = verifier_id(i);
         let vdir = rounds_dir.join(&vid);
         fs::create_dir_all(&vdir)?;
         pre_create_verifier_dir(&vdir);
 
-        // GoalFile transport: create the tempfile BEFORE building the command so its
-        // path can be substituted into `{goalFile}`. On spawn failure (later), the
-        // guard drops here via `?` propagation, unlinking the tempfile.
-        let goal_file_guard = match input.adapter.transport {
+        let adapter = &input.adapters[i];
+        let goal_file_guard = match adapter.transport {
             Transport::GoalFile => Some(TempPromptFile::new(input.prompt.as_bytes())?),
             Transport::Stdin => None,
         };
         let goal_file_path = goal_file_guard.as_ref().map(|g| g.path());
 
-        let mut cmd = build_spawn_command(input.adapter, goal_file_path);
+        let mut cmd = build_spawn_command(adapter, goal_file_path);
         let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round)?;
         inject_identity_env(
             &mut cmd,
@@ -181,7 +181,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
             &secret_hex,
         );
         inject_verifier_verdict_bin(&mut cmd);
-        plan.push((vid, cmd, vdir, goal_file_guard));
+        plan.push((vid, cmd, vdir, goal_file_guard, adapter.transport));
     }
 
     // Launch every child BEFORE awaiting any (non-blocking spawn). Each `spawn()` starts
@@ -197,8 +197,8 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
         Option<JoinHandle<io::Result<()>>>,
         Option<TempPromptFile>,
     )> = Vec::new();
-    for (vid, mut cmd, vdir, goal_file_guard) in plan {
-        let stdin_config = match input.adapter.transport {
+    for (vid, mut cmd, vdir, goal_file_guard, transport) in plan {
+        let stdin_config = match transport {
             Transport::Stdin => Stdio::piped(),
             Transport::GoalFile => Stdio::null(),
         };
@@ -234,7 +234,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
     let rounds_dir = round_dir(input.root, input.goal_id, input.round);
     fs::create_dir_all(&rounds_dir)?;
 
-    let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>)> = Vec::new();
+    let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>, Transport)> = Vec::new();
     for i in 0..input.config.m as usize {
         let vid = verifier_id(i);
         let vdir = rounds_dir.join(&vid);
@@ -243,9 +243,10 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         let prev_vdir = round_dir(input.root, input.goal_id, prev_round).join(&vid);
         let prior = read_meta(&prev_vdir)?;
 
+        let adapter = &input.adapters[i];
         // GoalFile transport: create the tempfile BEFORE building the command so its
         // path can be substituted into `{goalFile}` (same as spawn_round).
-        let goal_file_guard = match input.adapter.transport {
+        let goal_file_guard = match adapter.transport {
             Transport::GoalFile => Some(TempPromptFile::new(input.prompt.as_bytes())?),
             Transport::Stdin => None,
         };
@@ -257,7 +258,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
             Some(meta) if meta.turns_used < input.config.max_turn => {
                 // Reuse: resume on the prior SID.
                 let sid = meta.sid.clone().unwrap_or_default();
-                cmd = build_resume_command(input.adapter, &sid, goal_file_path);
+                cmd = build_resume_command(adapter, &sid, goal_file_path);
                 fresh = false;
             }
             _ => {
@@ -267,7 +268,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
                         archive_prior_sid(&prev_vdir, sid)?;
                     }
                 }
-                cmd = build_spawn_command(input.adapter, goal_file_path);
+                cmd = build_spawn_command(adapter, goal_file_path);
                 fresh = true;
             }
         }
@@ -292,7 +293,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
             &secret_hex,
         );
         inject_verifier_verdict_bin(&mut cmd);
-        plan.push((vid, cmd, vdir, goal_file_guard));
+        plan.push((vid, cmd, vdir, goal_file_guard, adapter.transport));
     }
 
     let mut children: Vec<(
@@ -302,8 +303,8 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         Option<JoinHandle<io::Result<()>>>,
         Option<TempPromptFile>,
     )> = Vec::new();
-    for (vid, mut cmd, vdir, goal_file_guard) in plan {
-        let stdin_config = match input.adapter.transport {
+    for (vid, mut cmd, vdir, goal_file_guard, transport) in plan {
+        let stdin_config = match transport {
             Transport::Stdin => Stdio::piped(),
             Transport::GoalFile => Stdio::null(),
         };

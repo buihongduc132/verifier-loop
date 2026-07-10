@@ -29,11 +29,6 @@ use verifier_loop::verdict::{self, VerdictStatus};
 
 /// Store-root override env (mirrors verifier-verdict). Defaults to `~/.verifier-loop`.
 const ENV_HOME: &str = "VERIFIER_LOOP_HOME";
-/// Stub/custom backend command override env (spawn+resume). Used when `config.backend`
-/// is not a built-in adapter.
-const ENV_BACKEND_CMD: &str = "VERIFIER_LOOP_BACKEND_CMD";
-const ENV_SPAWN_CMD: &str = "VERIFIER_LOOP_SPAWN_CMD";
-const ENV_RESUME_CMD: &str = "VERIFIER_LOOP_RESUME_CMD";
 const DEFAULT_HOME_DIR: &str = ".verifier-loop";
 
 fn main() -> ExitCode {
@@ -122,7 +117,7 @@ fn run_round(
     let snapshot = verifier_loop::prompt::capture_snapshot(&cwd, config.git_diff_max_chars)
         .map_err(|e| format!("snapshot capture failed: {e}"))?;
 
-    let adapter = resolve_adapter(&config)?;
+    let adapters = verifier_loop::acp::resolve_adapters(&config)?;
 
     // Render + persist the verifier prompt per verifier slot (correct audit trail). The
     // spawn layer takes a single prompt per round (its API), so the round's spawned
@@ -183,7 +178,7 @@ fn run_round(
         round,
         config: &config,
         prompt: &prompt,
-        adapter: &adapter,
+        adapters: &adapters,
     };
     rt.block_on(async {
         match kind {
@@ -262,26 +257,6 @@ fn run_round(
         }
         Err(format!("round {round} rejected"))
     }
-}
-
-/// Resolve the backend adapter: built-in (pi/hermes/acpx) first, else a stub/custom
-/// command from env. Keeps `acp/` untouched while enabling hermetic e2e.
-fn resolve_adapter(
-    config: &verifier_loop::store::Config,
-) -> Result<verifier_loop::acp::Adapter, String> {
-    if let Ok(a) = verifier_loop::acp::adapter_for(&config.backend) {
-        return Ok(a);
-    }
-    let spawn_cmd = std::env::var(ENV_BACKEND_CMD)
-        .or_else(|_| std::env::var(ENV_SPAWN_CMD))
-        .map_err(|_| {
-            format!(
-                "unknown backend '{}' and no ${ENV_BACKEND_CMD} / ${ENV_SPAWN_CMD} override set",
-                config.backend
-            )
-        })?;
-    let resume_cmd = std::env::var(ENV_RESUME_CMD).unwrap_or_else(|_| spawn_cmd.clone());
-    Ok(verifier_loop::acp::Adapter::custom(spawn_cmd, resume_cmd))
 }
 
 /// `v1`, `v2`, … mirroring the spawn layer's id scheme.
