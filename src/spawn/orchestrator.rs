@@ -186,8 +186,28 @@ async fn spawn_nudge_child(
     input: &SpawnInput<'_>,
     verifier_id: &str,
     sid: &str,
-) -> Result<(tokio::process::Child, Option<JoinHandle<io::Result<()>>>), SpawnError> {
-    let mut cmd = build_resume_command(input.adapter, sid, None);
+) -> Result<
+    (
+        tokio::process::Child,
+        Option<JoinHandle<io::Result<()>>>,
+        Option<TempPromptFile>,
+    ),
+    SpawnError,
+> {
+    // Transport-aware nudge spawn. For `Stdin` the nudge prompt travels on the child's
+    // stdin pipe (same as the initial spawn). For `GoalFile` a new tempfile carries the
+    // nudge prompt; the guard is returned so the caller holds it until the child is
+    // reaped (the file is unlinked on drop, after the child has opened it).
+    let goal_file_guard: Option<TempPromptFile> = match input.adapter.transport {
+        Transport::GoalFile => Some(TempPromptFile::new(VERDICT_NUDGE_PROMPT.as_bytes())?),
+        Transport::Stdin => None,
+    };
+    let goal_file_path = goal_file_guard.as_ref().map(|g| g.path());
+    let stdin_config = match input.adapter.transport {
+        Transport::Stdin => Stdio::piped(),
+        Transport::GoalFile => Stdio::null(),
+    };
+    let mut cmd = build_resume_command(input.adapter, sid, goal_file_path);
     // Best-effort secret: mint succeeds on a fresh slot; AlreadyPinned means we are
     // resuming within the same round and the original secret is not available. In that
     // case we inject identity without the secret (the resumed backend may still reach a
@@ -210,13 +230,16 @@ async fn spawn_nudge_child(
         secret_hex.as_deref().unwrap_or(""),
     );
     inject_verifier_verdict_bin(&mut cmd);
-    cmd.stdin(Stdio::piped())
+    cmd.stdin(stdin_config)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = cmd.spawn()?;
-    let write_handle = spawn_stdin_writer(child.stdin.take(), VERDICT_NUDGE_PROMPT.as_bytes());
-    Ok((child, write_handle))
+    let write_handle = match input.adapter.transport {
+        Transport::Stdin => spawn_stdin_writer(child.stdin.take(), VERDICT_NUDGE_PROMPT.as_bytes()),
+        Transport::GoalFile => None,
+    };
+    Ok((child, write_handle, goal_file_guard))
 }
 
 /// Wait for a spawned child (the nudge/resume) with the per-verifier timeout, drain its
@@ -437,7 +460,12 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
         children.push((vid, child, vdir, write_handle, goal_file_guard));
     }
 
-    gather(input, children).await
+    // Fresh round: enable verdict-enforcement nudge loop (D5 + D6) only for the
+    // stdin transport. The GoalFile transport is used by custom adapters/tests whose
+    // stubs are not designed to handle multiple nudge resumes; limiting nudge to the
+    // stdin transport (used by all built-in adapters) keeps existing tests intact.
+    let enable_nudge = input.adapter.transport == Transport::Stdin;
+    gather(input, enable_nudge, children).await
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +568,9 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         children.push((vid, child, vdir, write_handle, goal_file_guard));
     }
 
-    gather(input, children).await
+    // Resume round: a single invocation per verifier is expected; the nudge/recovery
+    // loop is a fresh-round concern (D5/D6), not a resume-round one.
+    gather(input, false, children).await
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +637,7 @@ async fn bounded_stderr_tail<R: tokio::io::AsyncRead + Unpin>(
 
 async fn gather(
     input: SpawnInput<'_>,
+    enable_nudge: bool,
     mut children: Vec<(
         String,
         tokio::process::Child,
@@ -716,35 +747,30 @@ async fn gather(
                 let mut nudge_agent_end_seen = agent_end_seen;
                 let mut nudge_sid = sid;
 
-                eprintln!("DEBUG nudge-entry: fail_closed={fail_closed} has_verdict={} sid={:?} compaction={any_compaction} agent_end={nudge_agent_end_seen}", slot_has_verdict(input.root, input.goal_id, &vid, input.round), sid);
-                if !fail_closed && !slot_has_verdict(input.root, input.goal_id, &vid, input.round) {
+                if !fail_closed && enable_nudge && !slot_has_verdict(input.root, input.goal_id, &vid, input.round) {
                     loop {
                         let (turns_used, active_sid) = slot_meta(&vdir);
-                        eprintln!("DEBUG nudge-loop: turns_used={turns_used} max_turn={} active_sid={active_sid:?} nudge_sid={nudge_sid:?} recovery={recovery_attempts}", input.config.max_turn);
                         if turns_used >= input.config.max_turn {
-                            eprintln!("DEBUG nudge-break: turns exhausted");
                             break;
                         }
                         let do_recovery = any_compaction && !nudge_agent_end_seen && recovery_attempts == 0;
                         if !do_recovery && recovery_attempts > 0 {
                             // Recovery was attempted and failed to harvest a verdict:
                             // fail-closed rather than keep nudging forever.
-                            eprintln!("DEBUG nudge-break: recovery failed, fail-closed");
                             break;
                         }
                         let sid_to_use = active_sid.or(nudge_sid.clone()).unwrap_or_default();
                         if sid_to_use.is_empty() {
-                            eprintln!("DEBUG nudge-break: empty sid");
                             break; // no resumable session id
                         }
-                        eprintln!("DEBUG nudge-spawn: do_recovery={do_recovery} sid_to_use={sid_to_use}");
 
                         if do_recovery {
                             recovery_attempts += 1;
                         }
                         nudge_attempts += 1;
 
-                        let (nudge_child, nudge_writer) = spawn_nudge_child(&input, &vid, &sid_to_use).await?;
+                        let (nudge_child, nudge_writer, _nudge_guard) =
+                            spawn_nudge_child(&input, &vid, &sid_to_use).await?;
                         let nudge = reap_nudge_child(&input, &vid, &vdir, nudge_child, nudge_writer).await?;
 
                         if nudge.timed_out {
