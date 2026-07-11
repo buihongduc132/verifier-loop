@@ -55,3 +55,4 @@ examples_tmp/
 # ---- Dependencies vendored locally (avoid committing huge dirs) ----
 /vendor/
 /node_modules/
+.smoke/
