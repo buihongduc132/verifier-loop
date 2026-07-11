@@ -17,6 +17,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -34,6 +35,22 @@ pub const VERDICT_FILE: &str = "verdict.json";
 /// Written once at spawn time into the per-verifier slot dir and never overwritten;
 /// its immutability binds a verifier's later signatures to a single pubkey.
 pub const PUBKEY_FILE: &str = "verifier-pubkey.json";
+
+/// On-disk per-verifier signing secret filename (verifier-secret spec delta).
+///
+/// The hex-encoded Ed25519 signing key is persisted (mode 0600) alongside the pinned
+/// pubkey in the per-verifier slot dir so that the verdict-enforcement nudge loop
+/// (D5) and the compaction-recovery resume (D6) — which spawn NEW verifier processes
+/// — can re-inject the SAME secret that signed the pinned pubkey. Without this file
+/// the resume path would inject an empty secret and every harvested verdict would fail
+/// consensus signature verification (`unauthenticated: verifier secret missing`).
+///
+/// First-write-wins: the orchestrator's initial spawn writes this file once; later
+/// resumes within the same round or across rounds READ it (never overwrite). On a
+/// single host this is equivalent exposure to the existing forgeability concession
+/// (THREAT-MODEL.md §b: a process with read access to the slot dir can forge). It is
+/// a deterrent + detection layer, not a prevention guarantee.
+pub const SECRET_FILE: &str = "verifier-secret.hex";
 
 /// The status of a verdict slot.
 ///
@@ -166,8 +183,15 @@ pub fn read_verdict(
 ///
 /// First-write-wins (immutable pin): if a pubkey is already pinned for this slot the
 /// call fails closed with `AlreadyPinned` and the stored file is left untouched.
-/// Returns the secret `SigningKey` so the caller (verifier process) can sign verdicts;
-/// it is NEVER persisted to disk by this function.
+/// Returns the secret `SigningKey` so the caller (verifier process) can sign verdicts.
+///
+/// The secret hex is ALSO persisted to `<slot>/verifier-secret.hex` (mode 0600,
+/// first-write-wins) so that the verdict-enforcement nudge loop (D5) and the
+/// compaction-recovery resume (D6) — which spawn NEW verifier processes — can
+/// re-inject the SAME secret that signed the pinned pubkey via [`read_verifier_secret`].
+/// On a single host this is equivalent exposure to the existing forgeability
+/// concession (THREAT-MODEL.md §b): a process with read access to the slot dir can
+/// forge. Out-of-process V* on a separate host remains the only prevention guarantee.
 pub fn mint_and_pin_pubkey(
     root: &Path,
     goal_id: &str,
@@ -197,7 +221,68 @@ pub fn mint_and_pin_pubkey(
     fs::write(&tmp, json)?;
     fs::rename(&tmp, &target)?;
 
+    // Persist the signing secret hex (mode 0600, first-write-wins) so nudge/recovery
+    // resume children can re-inject the SAME secret that signed the pinned pubkey.
+    // Best-effort: a pre-existing secret file is left untouched (mirrors the pubkey
+    // pin's immutability); a write failure is surfaced (not swallowed) because a
+    // missing secret means the resume path will harvest only unsigned verdicts.
+    let secret_target = slot.join(SECRET_FILE);
+    if !secret_target.exists() {
+        let secret_hex = crypto::signing_key_to_hex(&kp.signing);
+        write_secret_mode_0600(&secret_target, &secret_hex)?;
+    }
+
     Ok(kp.signing)
+}
+
+/// Read the persisted per-verifier signing secret hex (mode 0600 file written by
+/// [`mint_and_pin_pubkey`]). Used by the spawn layer's verdict-enforcement nudge loop
+/// (D5) and compaction-recovery resume (D6) to re-inject the SAME secret that signed
+/// the pinned pubkey into a NEW verifier process.
+///
+/// Returns `Ok(None)` when no secret file exists (legacy unsigned regime, or a slot
+/// minted before this file was written). The caller injects an empty secret in that
+/// case, and any harvested verdict will fail consensus signature verification
+/// (fail-closed: never silently trusted).
+pub fn read_verifier_secret(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+) -> Result<Option<String>, VerdictError> {
+    let target = pubkey_path(root, goal_id, verifier_id, round).join(SECRET_FILE);
+    if !target.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&target)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Atomically write `secret_hex` to `target` with filesystem mode 0600 (owner
+/// read+write only). The secret must never be world/group-readable on a multi-user
+/// host (it is the per-verifier forge key). Uses `OpenOptions` with an explicit
+/// `.mode(0o600)` so the file is created with restrictive perms from the outset,
+/// then a `set_permissions` call as defense-in-depth in case the umask widened them.
+fn write_secret_mode_0600(target: &Path, secret_hex: &str) -> Result<(), VerdictError> {
+ use std::os::unix::fs::PermissionsExt;
+    // Create with mode 0600 from the outset (owner read+write only).
+    {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true).truncate(true).mode(0o600);
+        let mut f = opts.open(target)?;
+        use std::io::Write;
+        f.write_all(secret_hex.as_bytes())?;
+        f.flush()?;
+    }
+    // Defense-in-depth: enforce 0600 even if the process umask widened the create mode.
+    let mut perms = fs::metadata(target)?.permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(target, perms)?;
+    Ok(())
 }
 
 /// Read the pinned verifying key for a verifier slot.

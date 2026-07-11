@@ -191,7 +191,6 @@ fn slot_meta(vdir: &Path) -> (u32, Option<String>) {
 /// inject identity env, and write the nudge prompt to the child's stdin. Returns the
 /// spawned child + its stdin-writer handle. Used by both the verdict-enforcement nudge
 /// loop (D5) and the compaction-recovery resume (D6).
-#[allow(unused_variables)]
 async fn spawn_nudge_child(
     input: &SpawnInput<'_>,
     verifier_id: &str,
@@ -218,19 +217,20 @@ async fn spawn_nudge_child(
         Transport::GoalFile => Stdio::null(),
     };
     let mut cmd = build_resume_command(input.adapter, sid, goal_file_path);
-    // Best-effort secret: mint succeeds on a fresh slot; AlreadyPinned means we are
-    // resuming within the same round and the original secret is not available. In that
-    // case we inject identity without the secret (the resumed backend may still reach a
-    // verdict; signing is a separate concern).
-    let secret_hex = match verdict::mint_and_pin_pubkey(
+    // Read the persisted per-verifier signing secret (written at initial spawn time
+    // by mint_and_pin_pubkey) so the resume child can sign a verdict that verifies
+    // against the slot's pinned pubkey. The initial spawn injected the secret into the
+    // child's ENV; a nudge/recovery resume is a NEW process and cannot inherit that
+    // env, so it MUST read the persisted copy. Re-minting fails (pubkey already
+    // pinned + a fresh key wouldn't match the pinned pubkey), so we read instead.
+    // Ok(None) on a legacy unsigned slot → inject empty string (fail-closed: any
+    // harvested verdict will fail consensus signature verification).
+    let secret_hex = verdict::read_verifier_secret(
         input.root,
         input.goal_id,
         verifier_id,
         input.round,
-    ) {
-        Ok(sk) => Some(crypto::signing_key_to_hex(&sk)),
-        Err(_) => None,
-    };
+    )?;
     inject_identity_env(
         &mut cmd,
         input.goal_id,
