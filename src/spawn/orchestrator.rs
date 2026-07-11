@@ -278,6 +278,8 @@ async fn reap_nudge_child(
     vdir: &Path,
     mut child: tokio::process::Child,
     write_handle: Option<JoinHandle<io::Result<()>>>,
+    nudge_attempts: u32,
+    recovery_attempts: u32,
 ) -> Result<NudgeOutcome, SpawnError> {
     let timeout = Duration::from_secs(input.config.verifier_timeout_sec.max(1));
     let stdout_pipe = child.stdout.take();
@@ -352,12 +354,16 @@ async fn reap_nudge_child(
                 compaction_observed: false,
                 recovery_attempts: 0,
             });
+            // Persist the ACTIVE loop counts so an intermediate meta write is never
+            // stale (a crash mid-loop must leave an accurate audit trail). The caller
+            // increments nudge/recovery BEFORE this call; turns_used advances by one
+            // per nudge resume.
             let updated = VerifierMeta {
                 sid: sid.clone().or(existing.sid),
                 turns_used: existing.turns_used.saturating_add(1).min(input.config.max_turn),
-                nudge_attempts: existing.nudge_attempts,
+                nudge_attempts,
                 compaction_observed: existing.compaction_observed || compaction_observed,
-                recovery_attempts: existing.recovery_attempts,
+                recovery_attempts,
             };
             write_meta(vdir, &updated)?;
             NudgeOutcome {
@@ -789,7 +795,16 @@ async fn gather(
                                 },
                             )
                             .await?;
-                        let nudge = reap_nudge_child(&input, &vid, &vdir, nudge_child, nudge_writer).await?;
+                        let nudge = reap_nudge_child(
+                            &input,
+                            &vid,
+                            &vdir,
+                            nudge_child,
+                            nudge_writer,
+                            nudge_attempts,
+                            recovery_attempts,
+                        )
+                        .await?;
 
                         if nudge.timed_out {
                             break;
