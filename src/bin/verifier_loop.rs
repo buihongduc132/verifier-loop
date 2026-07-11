@@ -25,6 +25,7 @@ use chrono::Utc;
 use clap::Parser;
 
 use verifier_loop::cli::{VerifierLoopCli, VerifierLoopCmd};
+use verifier_loop::round_recover::{self, RecoverOutcome, RoundRecoverError};
 use verifier_loop::verdict::{self, VerdictStatus};
 
 /// Store-root override env (mirrors verifier-verdict). Defaults to `~/.verifier-loop`.
@@ -63,6 +64,12 @@ fn run(cli: &VerifierLoopCli) -> Result<(), String> {
             ref goal_id,
             ref fix,
         } => run_resume(&root, &config, goal_id, fix.as_deref(), prepend.as_deref())?,
+        VerifierLoopCmd::Recover { ref goal_id } => {
+            run_recover(&root, &config, goal_id)?
+        }
+        VerifierLoopCmd::Status { ref goal_id } => {
+            run_status(&root, &config, goal_id)?
+        }
     }
     Ok(())
 }
@@ -80,6 +87,9 @@ fn run_new(
 
     let goal_id = verifier_loop::goal::new(root, goal_text, context)
         .map_err(|e| format!("NEW failed: {e}"))?;
+    // LD5: hold the exclusive goal lock for the whole round (spawn+gather+evaluate).
+    // Acquired AFTER goal::new creates the goal dir (the lock file lives under it).
+    let _lock = acquire_goal_lock(root, &goal_id)?;
     let round = 1u32;
     println!("goalId: {goal_id}");
     run_round(root, config, &goal_id, round, None, RoundKind::New, prepend)
@@ -93,9 +103,113 @@ fn run_resume(
     fix: Option<&str>,
     prepend: Option<&str>,
 ) -> Result<(), String> {
+    // LD5: hold the exclusive goal lock for the whole round.
+    let _lock = acquire_goal_lock(root, goal_id)?;
+    // LD3 symmetric warning: if the current round has null verdicts and no completion,
+    // suggest RECOVER first (the user may have meant to harvest in-flight verdicts).
+    // RESUME still proceeds — it is the explicit escape hatch.
+    warn_if_round_is_recoverable(root, config, goal_id);
     let round = verifier_loop::goal::resume(root, goal_id, fix)
         .map_err(|e| format!("RESUME failed: {e}"))?;
     run_round(root, config, goal_id, round, fix, RoundKind::Resume, prepend)
+}
+
+/// `RECOVER <goalId>`: cross-process round recovery (SHAPE-1, LD8). Wait-only: polls
+/// the current round's verdicts and re-evaluates consensus without spawning/killing/
+/// re-rendering/re-capturing. On pass writes `completion.json` + prints the hash; on
+/// dead-null exits non-zero with RESUME N+1 guidance; on already-complete warns + exits 0.
+fn run_recover(
+    root: &Path,
+    config: &verifier_loop::store::Config,
+    goal_id: &str,
+) -> Result<(), String> {
+    // LD3: if the round already reached consensus, there is nothing to recover — warn and
+    // succeed without polling (the user likely meant RESUME N+1).
+    let st = round_recover::status(root, goal_id, config).map_err(|e| format!("STATUS: {e}"))?;
+    if matches!(st.needs, round_recover::GoalNeeds::Done) {
+        eprintln!(
+            "round {} already reached consensus; use `jewilo RESUME {goal_id}` to start a new round",
+            st.round
+        );
+        return Ok(());
+    }
+
+    let timeout = std::time::Duration::from_secs(config.verifier_timeout_sec.max(1));
+    let outcome = round_recover::recover(root, goal_id, config, timeout)
+        .map_err(|e| format!("RECOVER: {e}"))?;
+    match outcome {
+        RecoverOutcome::ConsensusPassed(hash) => {
+            println!("{hash}");
+            Ok(())
+        }
+        RecoverOutcome::RoundDecidedNoConsensus => {
+            eprintln!(
+                "round {} is decided but did not reach {}/{} consensus; \
+                 run `jewilo RESUME {goal_id}` for a fresh round",
+                st.round, config.n, config.m
+            );
+            Err(format!("round {} rejected", st.round))
+        }
+        RecoverOutcome::StillNullAfter {
+            null_slots,
+            guidance,
+        } => {
+            eprintln!(
+                "round {} still has null verdict slots ({}); {guidance}",
+                st.round,
+                null_slots.join(", ")
+            );
+            Err(format!(
+                "round {} not recoverable (null slots after timeout)",
+                st.round
+            ))
+        }
+    }
+}
+
+/// `STATUS <goalId>`: read-only machine-readable goal state (LD7). Prints one JSON object
+/// to stdout. Takes NO goal lock (a status probe must never block on a long round).
+fn run_status(
+    root: &Path,
+    config: &verifier_loop::store::Config,
+    goal_id: &str,
+) -> Result<(), String> {
+    let st = round_recover::status(root, goal_id, config).map_err(|e| format!("STATUS: {e}"))?;
+    // Pretty-printed JSON to stdout; the on-disk contract is camelCase.
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&st).map_err(|e| format!("STATUS serialize: {e}"))?
+    );
+    Ok(())
+}
+
+/// Acquire the exclusive goal lock (LD5). Maps `GoalBusy` to a clear, user-facing message
+/// and exits the operation non-zero.
+fn acquire_goal_lock(
+    root: &Path,
+    goal_id: &str,
+) -> Result<round_recover::GoalLock, String> {
+    round_recover::GoalLock::acquire_exclusive(root, goal_id).map_err(|e| match e {
+        RoundRecoverError::GoalBusy => {
+            format!("goal {goal_id} busy; another NEW/RESUME/RECOVER is in progress")
+        }
+        other => format!("goal lock: {other}"),
+    })
+}
+
+/// LD3 symmetric warning: emit a stderr hint suggesting RECOVER when the current round
+/// has null verdicts and no completion (a live orphan may still be about to write one).
+/// Non-fatal — RESUME is the user's explicit escape hatch and still proceeds.
+fn warn_if_round_is_recoverable(root: &Path, config: &verifier_loop::store::Config, goal_id: &str) {
+    if let Ok(st) = round_recover::status(root, goal_id, config) {
+        if matches!(st.needs, round_recover::GoalNeeds::Recover) {
+            eprintln!(
+                "warning: round {} has null verdict slots; consider `jewilo RECOVER {goal_id}` \
+                 first to harvest in-flight verdicts before starting a new round",
+                st.round
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

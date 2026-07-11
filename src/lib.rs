@@ -31,6 +31,7 @@ pub mod crypto;
 pub mod goal;
 pub mod prompt;
 pub mod receipt;
+pub mod round_recover;
 pub mod spawn;
 pub mod store;
 pub mod verdict;
