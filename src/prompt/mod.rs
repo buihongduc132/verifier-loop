@@ -109,14 +109,43 @@ pub const DEFAULT_RESUME_TEMPLATE: &str = concat!(
     include_str!("default_resume_template.txt"),
 );
 
-/// The baked-in default round-1 prompt template.
+/// The baked-in default round-1 prompt template WITH the embedded verifier policy.
 pub fn default_template() -> &'static str {
     DEFAULT_TEMPLATE
 }
 
-/// The baked-in default resume prompt template.
+/// The baked-in default resume prompt template WITH the embedded verifier policy.
 pub fn default_resume_template() -> &'static str {
     DEFAULT_RESUME_TEMPLATE
+}
+
+/// The baked-in default round-1 template WITHOUT the embedded `VERIFIER_POLICY` block
+/// (design D2 — override semantics). Used when a custom `verifierPromptFile` is
+/// configured: the custom file REPLACES the built-in policy, so the built-in block is
+/// omitted to avoid the 2x duplication (62KB wasted) that D2 eliminates.
+///
+/// Identity preamble + body file only. The bin prepends the custom file via
+/// [`prepend_custom`], producing exactly one policy source (the custom file).
+pub const DEFAULT_TEMPLATE_NO_POLICY: &str = concat!(
+    "You are verifier {{verifierId}} for goal {{goalId}}.\n\n",
+    include_str!("default_template.txt"),
+);
+
+/// The baked-in default resume template WITHOUT the embedded `VERIFIER_POLICY` block
+/// (design D2 — override semantics). See [`DEFAULT_TEMPLATE_NO_POLICY`].
+pub const DEFAULT_RESUME_TEMPLATE_NO_POLICY: &str = concat!(
+    "You are verifier {{verifierId}} for goal {{goalId}} (resumed).\n\n",
+    include_str!("default_resume_template.txt"),
+);
+
+/// The baked-in default round-1 template WITHOUT the embedded verifier policy (D2).
+pub fn default_template_no_policy() -> &'static str {
+    DEFAULT_TEMPLATE_NO_POLICY
+}
+
+/// The baked-in default resume template WITHOUT the embedded verifier policy (D2).
+pub fn default_resume_template_no_policy() -> &'static str {
+    DEFAULT_RESUME_TEMPLATE_NO_POLICY
 }
 
 /// Renders the round-1 (NEW) prompt. `template = None` -> baked-in default.
@@ -353,47 +382,77 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<String, PromptError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Captures `<path>:<mtime_secs>` for **changed files only** (`git status --porcelain`,
+/// Captures `<path>:<mtime_secs>` for **changed files only** (`git status --porcelain -z`,
 /// not `git ls-files`). Best-effort per file: a missing or unreadable file is skipped,
 /// never fatal to the whole snapshot. The block is byte-capped to `max_chars` with an
 /// indicator when exceeded (prompt-bloat fix D1).
 ///
-/// `git status --porcelain` lines look like `xy <path>` where `xy` is the 2-char status.
-/// Untracked files appear as `?? <path>`. We emit one `<path>:<mtime>` line per changed
-/// (tracked-modified/staged/untracked) file.
+/// `git status --porcelain -z` (NUL-delimited, no C-quoting) records look like:
+///   - single path: `XY <path>\0`
+///   - rename:      `XY <new/dest>\0<old/source>\0`  (destination FIRST, then source;
+///     this is the OPPOSITE order of the human-readable `->` form)
+///
+/// We parse the NUL-delimited stream carefully so pathnames containing spaces or the
+/// literal substring ` -> ` are never mis-split.
 pub fn capture_file_edit_times(cwd: &Path, max_chars: u64) -> Result<String, PromptError> {
-    let status = git_capture(cwd, &["status", "--porcelain"])?;
+    // Use `-z` (NUL-delimited) so pathnames containing spaces or the literal ` -> `
+    // are never C-quoted or mis-split by the `rsplit(" -> ")` heuristic. Each record
+    // is `XY <path>\0` for single-path statuses, or `XY <new/dest>\0<old/source>\0`
+    // for renames (note: under `-z` the NEW/destination path comes FIRST, then the
+    // OLD/source — the opposite of the human-readable `old -> new` form).
+    let status = git_capture(cwd, &["status", "--porcelain", "-z"])?;
     let mut lines: Vec<String> = Vec::new();
-    for line in status.lines() {
-        if line.len() < 3 {
+    let mut records = status.split('\u{0000}').peekable();
+    while let Some(record) = records.next() {
+        if record.len() < 3 {
+            // An empty trailing record (from the final NUL) is fine; skip it.
             continue;
         }
-        // `git status --porcelain` format: `XY <path>` (3-byte prefix: 2 status chars + space).
-        // For renames the path may contain ` -> ` but we take the full remainder.
-        let rel = line[3..].trim();
-        if rel.is_empty() {
+        // Porcelain record: 2-char XY status, 1 space, then the path.
+        let status_chars = &record[..2];
+        let path_part = &record[3..];
+        // Renames (R/C status in either column) emit TWO NUL-delimited entries under
+        // `-z`: the format is `XY <new/dest>\0<old/source>\0` (destination path FIRST,
+        // then source). So the CURRENT record's path is the NEW/destination path (the
+        // post-rename file that exists on disk and that we want to stat); the NEXT
+        // record is the OLD/source path and must be consumed and discarded so it is
+        // not treated as a standalone changed file.
+        let path = if is_rename_status(status_chars) {
+            // Consume + discard the trailing old-path record.
+            let _old = records.next();
+            path_part
+        } else {
+            path_part
+        };
+        if path.is_empty() {
             continue;
         }
-        // A rename (`R`) uses `old -> new`; take the new path (after ` -> `).
-        let rel = rel.rsplit(" -> ").next().unwrap_or(rel);
-        let abs = cwd.join(rel);
+        let abs = cwd.join(path);
         match fs::metadata(&abs).and_then(|m| m.modified()) {
             Ok(modified) => {
                 let secs = modified
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                lines.push(format!("{rel}:{secs}"));
+                lines.push(format!("{path}:{secs}"));
             }
             Err(_) => {
                 // Skip unreadable/missing file; do not fail the snapshot.
-                lines.push(format!("{rel}:?"));
+                lines.push(format!("{path}:?"));
             }
         }
     }
     let joined = lines.join("\n");
     let (capped, _) = truncate_diff(&joined, max_chars);
     Ok(capped)
+}
+
+/// Returns true if a porcelain `XY` status (two status characters) denotes a rename
+/// (R in either the staged-X or working-tree-Y column). A rename record under `-z` is
+/// followed by a second NUL-delimited path: `XY <new/dest>\0<old/source>\0` — the
+/// NEW/destination path comes FIRST, the OLD/source path comes SECOND.
+fn is_rename_status(xy: &str) -> bool {
+    xy.starts_with('R') || xy.starts_with('C') || xy.get(1..2) == Some("R") || xy.get(1..2) == Some("C")
 }
 
 /// Truncates the `--context` input to `max_chars` characters, appending
@@ -633,6 +692,68 @@ mod tests {
         assert_eq!(
             count_resume, 1,
             "DEFAULT_RESUME_TEMPLATE must contain the policy heading exactly once (got {count_resume})"
+        );
+    }
+
+    #[test]
+    fn capture_file_edit_times_handles_spaces_and_renames() {
+        // Build a temp git repo with a space in the filename and a rename entry, then
+        // assert `capture_file_edit_times` parses the NUL-delimited porcelain records
+        // correctly: it must NOT mis-split on the ` -> ` literal or on spaces.
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let _ = git_capture(cwd, &["init", "-q"]).unwrap();
+        let _ = git_capture(cwd, &["config", "user.email", "t@t.t"]).unwrap();
+        let _ = git_capture(cwd, &["config", "user.name", "t"]).unwrap();
+
+        // Create files with spaces and a ` -> ` literal in the name, then commit.
+        fs::write(cwd.join("my path.txt"), "a").unwrap();
+        fs::write(cwd.join("original.txt"), "b").unwrap();
+        fs::write(cwd.join("tracked.txt"), "c").unwrap();
+        let _ = git_capture(cwd, &["add", "."]).unwrap();
+        let _ = git_capture(cwd, &["commit", "-m", "seed"]).unwrap();
+
+        // Modify the space-named file.
+        fs::write(cwd.join("my path.txt"), "changed").unwrap();
+        // Force a REAL rename via `git mv` (staged) so porcelain emits an `R` record
+        // whose destination also contains a space.
+        let _ = git_capture(cwd, &["mv", "original.txt", "renamed dest.txt"]).unwrap();
+        // An untracked file with a space + the ` -> ` literal in its name.
+        fs::write(cwd.join("arrow -> new.txt"), "untracked").unwrap();
+
+        let lines = capture_file_edit_times(cwd, 8_000).unwrap();
+        let paths: std::collections::HashSet<&str> = lines
+            .lines()
+            .map(|l| l.rsplit_once(':').map(|(p, _)| p).unwrap_or(l))
+            .collect();
+        // We expect exactly 3 changed entries: the modified space-name, the rename
+        // (new path), and the untracked arrow-named file. No other tracked/unchanged
+        // file, and crucially NOT the rename's OLD path.
+        assert!(
+            paths.contains("my path.txt"),
+            "space in filename must be captured; got: {lines}"
+        );
+        assert!(
+            paths.contains("renamed dest.txt"),
+            "rename destination must be captured; got: {lines}"
+        );
+        assert!(
+            paths.contains("arrow -> new.txt"),
+            "untracked file containing ' -> ' must be captured; got: {lines}"
+        );
+        assert_eq!(
+            paths.len(),
+            3,
+            "exactly 3 changed entries expected; got: {lines}"
+        );
+        // The rename's OLD path and the unchanged tracked file must NOT appear.
+        assert!(
+            !lines.contains("original.txt"),
+            "rename source (old path) must be omitted; got: {lines}"
+        );
+        assert!(
+            !lines.contains("tracked.txt"),
+            "unchanged tracked file must be omitted; got: {lines}"
         );
     }
 }

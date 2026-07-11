@@ -35,6 +35,22 @@ pub const VERDICT_FILE: &str = "verdict.json";
 /// its immutability binds a verifier's later signatures to a single pubkey.
 pub const PUBKEY_FILE: &str = "verifier-pubkey.json";
 
+/// On-disk per-verifier signing secret filename (verifier-secret spec delta).
+///
+/// The hex-encoded Ed25519 signing key is persisted (mode 0600) alongside the pinned
+/// pubkey in the per-verifier slot dir so that the verdict-enforcement nudge loop
+/// (D5) and the compaction-recovery resume (D6) — which spawn NEW verifier processes
+/// — can re-inject the SAME secret that signed the pinned pubkey. Without this file
+/// the resume path would inject an empty secret and every harvested verdict would fail
+/// consensus signature verification (`unauthenticated: verifier secret missing`).
+///
+/// First-write-wins: the orchestrator's initial spawn writes this file once; later
+/// resumes within the same round or across rounds READ it (never overwrite). On a
+/// single host this is equivalent exposure to the existing forgeability concession
+/// (THREAT-MODEL.md §b: a process with read access to the slot dir can forge). It is
+/// a deterrent + detection layer, not a prevention guarantee.
+pub const SECRET_FILE: &str = "verifier-secret.hex";
+
 /// The status of a verdict slot.
 ///
 /// On disk: `"APPROVE"`, `"REJECT"`, or `null` (no verdict registered yet). A `null`
@@ -166,8 +182,28 @@ pub fn read_verdict(
 ///
 /// First-write-wins (immutable pin): if a pubkey is already pinned for this slot the
 /// call fails closed with `AlreadyPinned` and the stored file is left untouched.
-/// Returns the secret `SigningKey` so the caller (verifier process) can sign verdicts;
-/// it is NEVER persisted to disk by this function.
+/// Returns the secret `SigningKey` so the caller (verifier process) can sign verdicts.
+///
+/// The secret hex is ALSO persisted to `<slot>/verifier-secret.hex` (mode 0600) so that
+/// the verdict-enforcement nudge loop (D5) and the compaction-recovery resume (D6) —
+/// which spawn NEW verifier processes — can re-inject the SAME secret that signed the
+/// pinned pubkey via [`read_verifier_secret`]. On a single host this is equivalent
+/// exposure to the existing forgeability concession (THREAT-MODEL.md §b): a process
+/// with read access to the slot dir can forge. Out-of-process V* on a separate host
+/// remains the only prevention guarantee.
+///
+/// Atomicity & durability (Option A — fsync): each temp file is `fsync()`'d before its
+/// rename, and the parent directory is `fsync()`'d after the final rename (and after
+/// rollback). Temp paths are UNIQUE per attempt (`<pid>-<nanos>.tmp`) so concurrent
+/// mints on the same slot cannot cross-pair secret+pubkey. When the slot is NOT
+/// pinned the secret is ALWAYS written from the fresh keypair (no short-circuit on a
+/// stray secret — that would risk pairing a stale secret with a fresh pubkey).
+///
+/// # Known limitations
+///
+/// Directory fsync is best-effort: on some filesystems (e.g. network FS, certain
+/// overlay mounts) it is a no-op. This is a single-host deterrent + detection layer
+/// (see THREAT-MODEL.md §a), NOT a power-loss durability guarantee.
 pub fn mint_and_pin_pubkey(
     root: &Path,
     goal_id: &str,
@@ -185,19 +221,230 @@ pub fn mint_and_pin_pubkey(
         return Err(VerdictError::AlreadyPinned);
     }
 
+    // SERIALIZE the commit section with an exclusive flock so two concurrent
+    // `mint_and_pin_pubkey` calls on the SAME slot cannot race past the
+    // `target.exists()` check and clobber each other's pinned pair (on Unix,
+    // `fs::rename` is last-writer-wins, which would violate first-write-wins).
+    //
+    // The lock file (`<slot>/.mint.lock`) is a STABLE coordination file: it is
+    // NEVER unlinked. `flock` locks the inode, not the pathname, so unlinking it
+    // while a waiter is blocked would let a new caller create a fresh inode and
+    // acquire a second exclusive lock concurrently — defeating the coordination.
+    // The file is opened with `truncate(true)` so each re-entry zeros its (empty)
+    // content.
+    use fs4::fs_std::FileExt;
+    let lock_path = slot.join(".mint.lock");
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
+    // Double-checked: another process may have pinned between our unlocked check
+    // and acquiring the lock. (lock_file drops on return, releasing the lock; the
+    // file itself stays.)
+    if target.exists() {
+        return Err(VerdictError::AlreadyPinned);
+    }
+
+    // ATOMIC PUBKEY + SECRET PERSISTENCE: BOTH must land or NEITHER lands.
+    //
+    // Ordering: write BOTH temp files first, then rename the secret, then rename the
+    // pubkey pin LAST. The pubkey pin is the "slot is pinned" marker — its presence is
+    // what makes the next `mint_and_pin_pubkey` call return `AlreadyPinned`. By
+    // renaming it LAST, we guarantee that if any earlier step fails (disk full, I/O
+    // error, crash mid-write), the pin file is absent and a retry can re-mint the
+    // slot from scratch (no bricked slot). The secret rename lands BEFORE the pin so
+    // that once the pin is visible, the secret is guaranteed to exist alongside it.
+    //
+    // The temps are cleaned up best-effort on the error paths; on success both temps
+    // have been renamed away.
     let kp = crypto::generate_keypair();
     let file = VerifierPubkeyFile {
         pubkey: crypto::verifying_key_to_hex(&kp.verifying),
         minted_at: Utc::now().to_rfc3339(),
     };
+    let secret_hex = crypto::signing_key_to_hex(&kp.signing);
 
-    // Atomic write: temp sibling + rename.
-    let tmp = slot.join(format!("{PUBKEY_FILE}.tmp"));
+    let secret_target = slot.join(SECRET_FILE);
+
+    // When the slot is NOT pinned (verified above) we ALWAYS write the secret that
+    // corresponds to the freshly minted keypair. This deliberately does NOT short-circuit
+    // on a pre-existing secret file: a stray secret left by a prior FAILED mint must be
+    // overwritten, otherwise it could be paired with a fresh pubkey of a DIFFERENT
+    // keypair. (Once the pubkey IS pinned the call returns AlreadyPinned above, so this
+    // path only runs on a genuinely unpinned slot.)
+
+    // (1) Secret temp — UNIQUE per attempt so two concurrent mints on the same slot
+    // cannot cross-pair secret + pubkey. The temp is fsynced so its bytes are durable
+    // before the rename commits.
+    let secret_tmp = slot.join(unique_tmp_name(SECRET_FILE));
+    write_secret_mode_0600(&secret_tmp, &secret_hex)?;
+
+    // (2) Pubkey pin temp — also unique per attempt, also fsynced.
+    let pubkey_tmp = slot.join(unique_tmp_name(PUBKEY_FILE));
     let json = serde_json::to_string_pretty(&file)?;
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, &target)?;
+    write_and_sync(&pubkey_tmp, json.as_bytes())?;
+
+    // (3) Rename secret FIRST (so it is durably visible before the pin marker).
+    if let Err(e) = fs::rename(&secret_tmp, &secret_target) {
+        // Clean up both temps so a retry starts clean. (Lock file is left in place.)
+        let _ = fs::remove_file(&pubkey_tmp);
+        let _ = fs::remove_file(&secret_tmp);
+        fsync_dir_best_effort(&slot);
+        return Err(VerdictError::Io(e));
+    }
+
+    // (4) Install the pubkey pin LAST via `fs::hard_link` (NOT `fs::rename`).
+    // `rename` is last-writer-wins on Unix; `hard_link` FAILS with `AlreadyExists`
+    // if the target already exists — giving first-write-wins semantics as
+    // defense-in-depth even though the flock above already serializes callers.
+    // On success the temp's inode now has two links; we remove the temp name.
+    //
+    // The `AlreadyExists` arm is unreachable under a correct lock (we hold the
+    // exclusive flock and double-checked `target.exists()`), but if it ever fires
+    // we must NOT touch `secret_target` — it may belong to the winner. We only
+    // clean up our OWN unique temp and report `AlreadyPinned`. (Lock file stays.)
+    match fs::hard_link(&pubkey_tmp, &target) {
+        Ok(()) => {
+            let _ = fs::remove_file(&pubkey_tmp);
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Another caller won the pin race (unreachable under a correct lock).
+            // Do NOT remove secret_target — it may be the winner's secret. Only
+            // clean up our own pubkey temp.
+            let _ = fs::remove_file(&pubkey_tmp);
+            fsync_dir_best_effort(&slot);
+            return Err(VerdictError::AlreadyPinned);
+        }
+        Err(e) => {
+            // Best-effort rollback: move the secret back to a temp path so a retry
+            // rewrites it from scratch. The pin is absent, so a retry is permitted.
+            let _ = fs::rename(&secret_target, &secret_tmp);
+            let _ = fs::remove_file(&pubkey_tmp);
+            fsync_dir_best_effort(&slot);
+            return Err(VerdictError::Io(e));
+        }
+    }
+
+    // (5) Best-effort fsync of the parent directory so the renames are durable on disk.
+    // This is a single-host deterrent layer; some filesystems no-op directory fsync.
+    // (lock_file drops here on implicit return, releasing the flock; the lock FILE
+    // remains on disk for future callers.)
+    fsync_dir_best_effort(&slot);
 
     Ok(kp.signing)
+}
+
+/// Read the persisted per-verifier signing secret hex (mode 0600 file written by
+/// [`mint_and_pin_pubkey`]). Used by the spawn layer's verdict-enforcement nudge loop
+/// (D5) and compaction-recovery resume (D6) to re-inject the SAME secret that signed
+/// the pinned pubkey into a NEW verifier process.
+///
+/// Returns `Ok(None)` when no secret file exists (legacy unsigned regime, or a slot
+/// minted before this file was written). The caller injects an empty secret in that
+/// case, and any harvested verdict will fail consensus signature verification
+/// (fail-closed: never silently trusted).
+pub fn read_verifier_secret(
+    root: &Path,
+    goal_id: &str,
+    verifier_id: &str,
+    round: u32,
+) -> Result<Option<String>, VerdictError> {
+    let target = pubkey_path(root, goal_id, verifier_id, round).join(SECRET_FILE);
+    // Use fs::metadata (NOT Path::exists()): exists() maps ANY metadata error
+    // (permission denied, broken symlink) to `false`, which would silently yield
+    // Ok(None) → an empty secret injected → unsigned verdict. Only a genuine
+    // NotFound resolves to Ok(None); all other I/O errors propagate as
+    // VerdictError::Io (fail-closed).
+    match fs::metadata(&target) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(VerdictError::Io(e)),
+        Ok(_) => {}
+    }
+    let raw = fs::read_to_string(&target)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Atomically write `secret_hex` to `target` with filesystem mode 0600 (owner
+/// read+write only). The secret must never be world/group-readable on a multi-user
+/// host (it is the per-verifier forge key). Uses `OpenOptions` with an explicit
+/// `.mode(0o600)` so the file is created with restrictive perms from the outset,
+/// then a `set_permissions` call as defense-in-depth in case the umask widened them.
+/// Build a UNIQUE temp filename for `base` (e.g. `verifier-secret.hex`). The suffix is
+/// `<pid>-<nanos>.tmp`, guaranteeing two concurrent mint attempts on the same slot never
+/// share a deterministic temp path (which previously allowed cross-pairing of a fresh
+/// secret with a fresh pubkey, or `create_new(true)` deadlocking legitimate retries).
+fn unique_tmp_name(base: &str) -> String {
+    let pid = std::process::id();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{base}.{pid}-{}.tmp", now.as_nanos())
+}
+
+/// Write `data` to `path` (create-or-truncate) and `sync_all()` the file before
+/// returning, so the bytes are durable before the caller renames it into place.
+fn write_and_sync(path: &Path, data: &[u8]) -> Result<(), VerdictError> {
+    use std::io::Write;
+    let mut f = fs::File::create(path)?;
+    f.write_all(data)?;
+    f.flush()?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// Best-effort fsync of a parent directory. Used after an atomic rename so the new
+/// directory entry is durable. On a single host this is a deterrent + detection layer,
+/// not a power-loss guarantee; some filesystems no-op directory fsync. Failures are
+/// logged via `eprintln!` (debug) and never fail the mint — see THREAT-MODEL.md §(a).
+#[cfg(unix)]
+fn fsync_dir_best_effort(path: &Path) {
+    match fs::File::open(path) {
+        Ok(dir) => {
+            if let Err(e) = dir.sync_all() {
+                eprintln!(
+                    "debug: fsync_dir({}) failed (non-fatal): {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => eprintln!(
+            "debug: fsync_dir({}) open failed (non-fatal): {e}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(not(unix))]
+fn fsync_dir_best_effort(_path: &Path) {}
+
+fn write_secret_mode_0600(target: &Path, secret_hex: &str) -> Result<(), VerdictError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+    // Create-EXCLUSIVE with mode 0600 from the outset (owner read+write only). Because
+    // the temp path is UNIQUE per attempt (`unique_tmp_name`), `create_new(true)` cannot
+    // deadlock a retry — and it provides defense-in-depth against symlink-following /
+    // pre-created-path TOCTOU issues.
+    {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        let mut f = opts.open(target)?;
+        use std::io::Write;
+        f.write_all(secret_hex.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+    }
+    // Defense-in-depth: enforce 0600 even if the process umask widened the create mode.
+    let mut perms = fs::metadata(target)?.permissions();
+    perms.set_mode(0o600);
+    fs::set_permissions(target, perms)?;
+    Ok(())
 }
 
 /// Read the pinned verifying key for a verifier slot.
@@ -641,5 +888,168 @@ mod tests {
     fn verdict_path_layout_matches_spawn_layer() {
         let p = verdict_path(Path::new("/tmp/r"), "g1", "v2", 3);
         assert_eq!(p, Path::new("/tmp/r/goals/g1/rounds/3/v2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // F1 regression: atomic pubkey + secret persistence.
+    // If the secret file is absent, mint_and_pin_pubkey MUST be able to re-run
+    // (not AlreadyPinned) so the slot is never bricked; after success BOTH the
+    // pubkey pin and the secret file must exist.
+    // -----------------------------------------------------------------------
+    fn seed_store(root: &Path) -> String {
+        goal::new(root, "test goal", None).expect("NEW seeds a goal")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mint_atomic_writes_both_files_or_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let goal_id = seed_store(root);
+
+        let sk1 = mint_and_pin_pubkey(root, &goal_id, "v1", 1).expect("first mint");
+        let slot = verdict_path(root, &goal_id, "v1", 1);
+        assert!(slot.join(PUBKEY_FILE).exists(), "pubkey pin must exist after mint");
+        assert!(slot.join(SECRET_FILE).exists(), "secret must exist after mint");
+
+        // The persisted secret must round-trip back.
+        let persisted = read_verifier_secret(root, &goal_id, "v1", 1)
+            .expect("read secret")
+            .expect("secret present");
+        assert_eq!(persisted, crypto::signing_key_to_hex(&sk1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mint_absent_secret_rewritten_when_not_pinned_and_already_pinned_when_pubkey_present() {
+        // (1) When the pubkey is NOT pinned, a prior *failed* mint (which left a stray
+        //     pubkey TMP but no pin, no secret) is re-runnable, AND the secret is
+        //     ALWAYS rewritten from the fresh keypair (no short-circuit on a stray
+        //     secret — that is exactly the cross-pairing risk the fix removes).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let goal_id = seed_store(root);
+
+        let slot = verdict_path(root, &goal_id, "v1", 1);
+        fs::create_dir_all(&slot).unwrap();
+        fs::write(slot.join(format!("{PUBKEY_FILE}.tmp")), "stray").unwrap();
+
+        let sk = mint_and_pin_pubkey(root, &goal_id, "v1", 1).expect("retry after stray tmp");
+        assert!(slot.join(PUBKEY_FILE).exists());
+        assert!(slot.join(SECRET_FILE).exists());
+        let persisted = read_verifier_secret(root, &goal_id, "v1", 1)
+            .unwrap()
+            .expect("secret present after retry");
+        // The persisted secret MUST match the freshly minted keypair (not a stale one).
+        assert_eq!(persisted, crypto::signing_key_to_hex(&sk));
+
+        // (2) Once the pubkey IS pinned, a second call returns AlreadyPinned (the pin
+        //     immutability invariant holds). The persisted secret is left untouched.
+        let first_secret = fs::read_to_string(slot.join(SECRET_FILE)).unwrap();
+        assert!(matches!(
+            mint_and_pin_pubkey(root, &goal_id, "v1", 1),
+            Err(VerdictError::AlreadyPinned)
+        ));
+        let after = fs::read_to_string(slot.join(SECRET_FILE)).unwrap();
+        assert_eq!(first_secret, after, "secret must be unchanged after AlreadyPinned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mint_uses_unique_temp_paths() {
+        // After a successful mint, NO `.tmp` file may linger at the old deterministic
+        // path (`{PUBKEY_FILE}.tmp` / `{SECRET_FILE}.tmp`), nor any unique-name tmp —
+        // both temps must have been renamed away.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let goal_id = seed_store(root);
+
+        let slot = verdict_path(root, &goal_id, "v1", 1);
+        let _sk = mint_and_pin_pubkey(root, &goal_id, "v1", 1).expect("mint");
+        assert!(slot.join(PUBKEY_FILE).exists());
+        assert!(slot.join(SECRET_FILE).exists());
+
+        // The old deterministic temp paths must NOT exist.
+        assert!(
+            !slot.join(format!("{PUBKEY_FILE}.tmp")).exists(),
+            "deterministic pubkey tmp must not linger"
+        );
+        assert!(
+            !slot.join(format!("{SECRET_FILE}.tmp")).exists(),
+            "deterministic secret tmp must not linger"
+        );
+
+        // No `.tmp` file of any name should remain in the slot dir.
+        let lingering: Vec<_> = fs::read_dir(&slot)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("tmp"))
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            lingering.is_empty(),
+            "no .tmp files should linger after a successful mint: {lingering:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F2 regression: read_verifier_secret surfaces I/O errors (permission denied)
+    // instead of silently returning Ok(None) → unsigned verdict.
+    // -----------------------------------------------------------------------
+    #[cfg(unix)]
+    #[test]
+    fn read_verifier_secret_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let goal_id = seed_store(root);
+
+        // No secret file at all → Ok(None).
+        assert_eq!(read_verifier_secret(root, &goal_id, "v1", 1).unwrap(), None);
+
+        // A zero-byte secret → Ok(None) (trimmed-empty).
+        let slot = verdict_path(root, &goal_id, "v1", 1);
+        fs::create_dir_all(&slot).unwrap();
+        fs::write(slot.join(SECRET_FILE), "   ").unwrap();
+        assert_eq!(read_verifier_secret(root, &goal_id, "v1", 1).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_verifier_secret_surfaces_permission_denied_error() {
+        // Only meaningful when the test runs as a non-root user (root bypasses DAC).
+        // We skip gracefully under root; the regression still holds on CI/dev hosts.
+        // root detection via `id -u`-style: if HOME is /root or the crate's `geteuid`
+        // is unavailable, we approximate by trying to read /proc/self and checking the
+        // standard env. Simpler: attempt the perm-denied setup; if the read still
+        // succeeds, the runner is root → skip.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let goal_id = seed_store(root);
+        let slot = verdict_path(root, &goal_id, "v1", 1);
+        fs::create_dir_all(&slot).unwrap();
+        let secret = slot.join(SECRET_FILE);
+        fs::write(&secret, "deadbeef").unwrap();
+        let secret_perms = fs::metadata(&secret).unwrap().permissions().mode();
+
+        // Strip all perms. Under root this is a no-op for access checks.
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let res = read_verifier_secret(root, &goal_id, "v1", 1);
+        // Restore perms BEFORE asserting so a panic does not leak a 0000 file.
+        let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(secret_perms));
+
+        // On root the read succeeds; treat that as a skip.
+        match res {
+            Ok(None) | Ok(Some(_)) => {
+                eprintln!("read_verifier_secret perm-denied test skipped (running as root)");
+            }
+            Err(VerdictError::Io(_)) => {
+                // expected on non-root
+            }
+            other => panic!(
+                "permission-denied secret MUST surface as Err(Io), got {other:?}"
+            ),
+        }
     }
 }

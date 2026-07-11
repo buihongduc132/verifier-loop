@@ -33,8 +33,14 @@ Anyone with read+write access to that tree is Mallory.
 At spawn time `jewilo` mints a **fresh Ed25519 keypair per V\*** slot, writes only the
 **public** half to `<slot>/verifier-pubkey.json` (`{pubkey, mintedAt}`), and injects the
 **signing** half into the V\* process environment as
-`VERIFIER_LOOP_VERIFIER_SECRET` (hex). The signing key is **never** persisted to disk by
-`jewilo` (spec: `verifier-identity`).
+`VERIFIER_LOOP_VERIFIER_SECRET` (hex). The signing key is ALSO persisted to
+`<slot>/verifier-secret.hex` (mode 0600, first-write-wins) so the verdict-enforcement
+nudge loop (D5) and the compaction-recovery resume (D6) — which spawn NEW verifier
+processes — can re-inject the SAME secret that signed the pinned pubkey to harvest a
+signed verdict on resume. On a single host this is equivalent exposure to the existing
+forgeability concession in §(b): a process with read access to the slot dir can forge.
+Out-of-process V\* on a separate host remains the only prevention guarantee
+(spec: `verifier-identity`).
 
 Every signed `verdict.json` now carries `signature` (128-hex Ed25519 over the canonical
 record bytes `{status, notes, registeredAt, goalId, verifierId, round}`) and `pubkeyId`
@@ -46,10 +52,7 @@ placeholder (`{status: null}`) carries no signature and is never counted.
 only "set the env var and write the file" — anyone with filesystem write access could
 trivially impersonate any V\*. After this change, Mallory must additionally **possess the
 slot's pinned signing secret** to produce a verdict that survives consensus signature
-verification. That secret lives only in V\*'s process env, not on disk. So casual same-box
-forgery (write a `verdict.json` by hand, or `jewije approve` with the env vars faked) is
-now **fail-closed**: the verdict fails signature verification, is treated as untrusted,
-and the rejection summary names the offending slot.
+verification. (See the persistence mechanism described at the top of §(a) above.)
 
 This raises the bar from "any write access" to "must possess the per-verifier spawn-time
 secret." It is a **deterrent + detection layer**, not a prevention guarantee.
