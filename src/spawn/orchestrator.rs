@@ -60,6 +60,11 @@ pub const STDERR_CAP_BYTES: usize = 8 * 1024;
 /// (§6): records the superseded SID for audit.
 pub const ARCHIVE_FILE: &str = "archive.json";
 
+/// Minimal verdict-nudge prompt used for both within-round verdict enforcement (D5) and
+/// compaction recovery (D6). Kept tiny (<2KB) so it never re-triggers compaction, and
+/// contains NO goal/diff/policy text (those are already in the resumed session context).
+pub const VERDICT_NUDGE_PROMPT: &str = "You have completed your investigation. Register your verdict NOW via the verifier-verdict CLI:\n\nverifier-verdict approve --notes \"evidence summary: ...\"\nverifier-verdict reject --notes \"what is wrong, with file:line references\"\n\nNo further investigation is needed. Register your verdict.\n";
+
 /// Identity env var names injected into every verifier process (D2).
 pub const ENV_GOAL_ID: &str = "VERIFIER_LOOP_GOAL_ID";
 pub const ENV_VERIFIER_ID: &str = "VERIFIER_LOOP_VERIFIER_ID";
@@ -117,6 +122,15 @@ pub struct VerifierMeta {
     /// Turn budget consumed so far. `0` at pre-create; `1` after a fresh spawn,
     /// `prior + 1` after a reused resume (v1 heuristic — OT2 per-turn refresh deferred).
     pub turns_used: u32,
+    /// Number of within-round verdict-enforcement nudge resumes issued (D5).
+    #[serde(default)]
+    pub nudge_attempts: u32,
+    /// True iff the verifier session stream contained a `type:compaction` event (D6).
+    #[serde(default)]
+    pub compaction_observed: bool,
+    /// Number of compaction-recovery resumes issued (D6). Capped at 1 per slot per round.
+    #[serde(default)]
+    pub recovery_attempts: u32,
 }
 
 /// Errors raised by the spawn layer. Every path fails closed (D9): a timeout is **not**
@@ -134,6 +148,216 @@ pub enum SpawnError {
     Acp(#[from] acp::AcpError),
     #[error("verdict layer error: {0}")]
     Verdict(#[from] crate::verdict::VerdictError),
+}
+
+/// Write `meta.json` atomically (temp sibling + rename).
+fn write_meta(vdir: &Path, meta: &VerifierMeta) -> Result<(), SpawnError> {
+    let tmp = vdir.join(format!("{META_FILE}.tmp"));
+    fs::write(&tmp, serde_json::to_string_pretty(meta)?)?;
+    fs::rename(&tmp, vdir.join(META_FILE))?;
+    Ok(())
+}
+
+/// Read the current verdict status for a verifier slot. Returns `true` iff the slot has
+/// a non-null verdict (APPROVE or REJECT). Used by the nudge/recovery loop to decide
+/// whether to stop.
+fn slot_has_verdict(root: &Path, goal_id: &str, verifier_id: &str, round: u32) -> bool {
+    match verdict::read_verdict(root, goal_id, verifier_id, round) {
+        Ok(rec) => rec.status != verdict::VerdictStatus::Null,
+        Err(_) => false,
+    }
+}
+
+/// Read a `VerifierMeta` and report its `turns_used` + `sid`, defaulting to 0 / None if
+/// the meta file is missing or malformed. Used by the nudge loop to track budget.
+fn slot_meta(vdir: &Path) -> (u32, Option<String>) {
+    match read_meta(vdir) {
+        Ok(Some(m)) => (m.turns_used, m.sid),
+        _ => (0, None),
+    }
+}
+
+/// Spawn a nudge/resume child: build the adapter's resume command with the given SID,
+/// inject identity env, and write the nudge prompt to the child's stdin. Returns the
+/// spawned child + its stdin-writer handle. Used by both the verdict-enforcement nudge
+/// loop (D5) and the compaction-recovery resume (D6).
+#[allow(unused_variables)]
+async fn spawn_nudge_child(
+    input: &SpawnInput<'_>,
+    verifier_id: &str,
+    sid: &str,
+) -> Result<(tokio::process::Child, Option<JoinHandle<io::Result<()>>>), SpawnError> {
+    let mut cmd = build_resume_command(input.adapter, sid, None);
+    // Best-effort secret: mint succeeds on a fresh slot; AlreadyPinned means we are
+    // resuming within the same round and the original secret is not available. In that
+    // case we inject identity without the secret (the resumed backend may still reach a
+    // verdict; signing is a separate concern).
+    let secret_hex = match verdict::mint_and_pin_pubkey(
+        input.root,
+        input.goal_id,
+        verifier_id,
+        input.round,
+    ) {
+        Ok(sk) => Some(crypto::signing_key_to_hex(&sk)),
+        Err(_) => None,
+    };
+    inject_identity_env(
+        &mut cmd,
+        input.goal_id,
+        verifier_id,
+        input.round,
+        input.root,
+        secret_hex.as_deref().unwrap_or(""),
+    );
+    inject_verifier_verdict_bin(&mut cmd);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let write_handle = spawn_stdin_writer(child.stdin.take(), VERDICT_NUDGE_PROMPT.as_bytes());
+    Ok((child, write_handle))
+}
+
+/// Wait for a spawned child (the nudge/resume) with the per-verifier timeout, drain its
+/// stdout/stderr, parse SID + final output + compaction, persist artifacts, and update
+/// meta. Returns a struct describing the nudge run's outcome. Mirrors the inner block of
+/// the main `gather` `child.wait()` arm but does NOT handle GoalFile tempfiles.
+struct NudgeOutcome {
+    sid: Option<String>,
+    final_output: Option<String>,
+    stderr: Option<String>,
+    timed_out: bool,
+    compaction_observed: bool,
+    agent_end_seen: bool,
+}
+
+async fn reap_nudge_child(
+    input: &SpawnInput<'_>,
+    _verifier_id: &str,
+    vdir: &Path,
+    mut child: tokio::process::Child,
+    write_handle: Option<JoinHandle<io::Result<()>>>,
+) -> Result<NudgeOutcome, SpawnError> {
+    let timeout = Duration::from_secs(input.config.verifier_timeout_sec.max(1));
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let drain = tokio::spawn(async move {
+        let buf = match stdout_pipe {
+            Some(mut pipe) => {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let _ = pipe.read_to_end(&mut buf).await;
+                buf
+            }
+            None => Vec::new(),
+        };
+        let stderr_buf = match stderr_pipe {
+            Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
+            None => Vec::new(),
+        };
+        (buf, stderr_buf)
+    });
+
+    let outcome = tokio::select! {
+        biased;
+        _ = tokio::time::sleep(timeout) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            if let Some(h) = write_handle { let _ = h.await; }
+            let (_, stderr_buf) = drain.await.unwrap_or_default();
+            let stderr_text = {
+                let t = String::from_utf8_lossy(&stderr_buf);
+                if t.is_empty() { None } else { Some(t.into_owned()) }
+            };
+            if let Some(text) = &stderr_text {
+                let _ = fs::write(vdir.join(STDERR_FILE), text);
+            }
+            NudgeOutcome {
+                sid: None,
+                final_output: None,
+                stderr: stderr_text,
+                timed_out: true,
+                compaction_observed: false,
+                agent_end_seen: false,
+            }
+        }
+        status = child.wait() => {
+            let (stdout_buf, stderr_buf) = drain.await.unwrap_or_default();
+            let stdout = String::from_utf8_lossy(&stdout_buf);
+            let stderr_text = {
+                let t = String::from_utf8_lossy(&stderr_buf);
+                if t.is_empty() { None } else { Some(t.into_owned()) }
+            };
+            if let Some(text) = &stderr_text {
+                let _ = fs::write(vdir.join(STDERR_FILE), text);
+            }
+            let sid = acp::extract_sid(&stdout);
+            let final_output = acp::extract_final_output(&stdout);
+            let compaction_observed = acp::extract_compaction_observed(&stdout);
+            // agent_end_seen iff final_output was captured (agent_end is the source).
+            let agent_end_seen = final_output.is_some();
+            if let Some(h) = write_handle {
+                let _ = h.await;
+            }
+            if let Some(text) = &final_output {
+                let _ = fs::write(vdir.join(FINAL_OUTPUT_FILE), text);
+            }
+            let _ = status;
+            // Update meta: increment turns and record compaction.
+            let existing = read_meta(vdir)?.unwrap_or(VerifierMeta {
+                sid: None,
+                turns_used: 0,
+                nudge_attempts: 0,
+                compaction_observed: false,
+                recovery_attempts: 0,
+            });
+            let updated = VerifierMeta {
+                sid: sid.clone().or(existing.sid),
+                turns_used: existing.turns_used.saturating_add(1).min(input.config.max_turn),
+                nudge_attempts: existing.nudge_attempts,
+                compaction_observed: existing.compaction_observed || compaction_observed,
+                recovery_attempts: existing.recovery_attempts,
+            };
+            write_meta(vdir, &updated)?;
+            NudgeOutcome {
+                sid,
+                final_output,
+                stderr: stderr_text,
+                timed_out: false,
+                compaction_observed,
+                agent_end_seen,
+            }
+        }
+    };
+    Ok(outcome)
+}
+
+/// Persist `meta.json` and write any text to `final-output.txt`. Idempotent.
+fn flush_meta(
+    vdir: &Path,
+    sid: Option<&str>,
+    compaction_observed: bool,
+    nudge_attempts: u32,
+    recovery_attempts: u32,
+    _input: &SpawnInput<'_>,
+) -> Result<VerifierMeta, SpawnError> {
+    let existing = read_meta(vdir)?.unwrap_or(VerifierMeta {
+        sid: None,
+        turns_used: 0,
+        nudge_attempts: 0,
+        compaction_observed: false,
+        recovery_attempts: 0,
+    });
+    let updated = VerifierMeta {
+        sid: sid.map(str::to_string).or(existing.sid),
+        turns_used: existing.turns_used,
+        nudge_attempts,
+        compaction_observed: existing.compaction_observed || compaction_observed,
+        recovery_attempts,
+    };
+    write_meta(vdir, &updated)?;
+    Ok(updated)
 }
 
 // ---------------------------------------------------------------------------
@@ -459,17 +683,12 @@ async fn gather(
                 }
                 let sid = acp::extract_sid(&stdout);
                 let final_output = acp::extract_final_output(&stdout);
+                let compaction_observed = acp::extract_compaction_observed(&stdout);
+                let agent_end_seen = final_output.is_some();
 
                 // Await the stdin writer (D4). For `Stdin` transport this surfaces
                 // EPIPE if the child exited without draining the pipe; for `GoalFile`
                 // there is no writer (`write_handle` is `None`).
-                //
-                // EPIPE handling (D4/R2):
-                //   - write OK, or EPIPE after ACP output  → non-fatal (run gathered).
-                //   - write failed AND no ACP output       → fail-closed (null verdict).
-                // The fail-closed case is already realized by `sid.is_none()` below:
-                // we skip writing `final-output.txt` and leave the pre-created null
-                // verdict untouched. No panic — the error is swallowed.
                 let write_ok = match write_handle {
                     Some(h) => h.await.unwrap_or(Err(io::Error::other("stdin writer join failed"))).is_ok(),
                     None => true,
@@ -482,14 +701,89 @@ async fn gather(
                     }
                     update_meta_after_run(&vdir, sid.as_deref(), &input)?;
                 }
-                // Status failures still parse whatever stdout was emitted; the null
-                // verdict is left in place if no SID/output was captured (fail-closed).
                 let _ = status;
+
+                // Verdict-enforcement + compaction-recovery loop (D5 + D6).
+                // After the initial child exits, if the slot still has no verdict and
+                // turns remain, we issue nudge resumes. If compaction was observed and
+                // the session exited without agent_end, we do ONE recovery resume first.
+                let mut run_sid = if fail_closed { None } else { sid.clone() };
+                let mut run_final = if fail_closed { None } else { final_output.clone() };
+                let mut run_stderr = stderr_text;
+                let mut nudge_attempts = 0u32;
+                let mut recovery_attempts = 0u32;
+                let mut any_compaction = compaction_observed;
+                let mut nudge_agent_end_seen = agent_end_seen;
+                let mut nudge_sid = sid;
+
+                eprintln!("DEBUG nudge-entry: fail_closed={fail_closed} has_verdict={} sid={:?} compaction={any_compaction} agent_end={nudge_agent_end_seen}", slot_has_verdict(input.root, input.goal_id, &vid, input.round), sid);
+                if !fail_closed && !slot_has_verdict(input.root, input.goal_id, &vid, input.round) {
+                    loop {
+                        let (turns_used, active_sid) = slot_meta(&vdir);
+                        eprintln!("DEBUG nudge-loop: turns_used={turns_used} max_turn={} active_sid={active_sid:?} nudge_sid={nudge_sid:?} recovery={recovery_attempts}", input.config.max_turn);
+                        if turns_used >= input.config.max_turn {
+                            eprintln!("DEBUG nudge-break: turns exhausted");
+                            break;
+                        }
+                        let do_recovery = any_compaction && !nudge_agent_end_seen && recovery_attempts == 0;
+                        if !do_recovery && recovery_attempts > 0 {
+                            // Recovery was attempted and failed to harvest a verdict:
+                            // fail-closed rather than keep nudging forever.
+                            eprintln!("DEBUG nudge-break: recovery failed, fail-closed");
+                            break;
+                        }
+                        let sid_to_use = active_sid.or(nudge_sid.clone()).unwrap_or_default();
+                        if sid_to_use.is_empty() {
+                            eprintln!("DEBUG nudge-break: empty sid");
+                            break; // no resumable session id
+                        }
+                        eprintln!("DEBUG nudge-spawn: do_recovery={do_recovery} sid_to_use={sid_to_use}");
+
+                        if do_recovery {
+                            recovery_attempts += 1;
+                        }
+                        nudge_attempts += 1;
+
+                        let (nudge_child, nudge_writer) = spawn_nudge_child(&input, &vid, &sid_to_use).await?;
+                        let nudge = reap_nudge_child(&input, &vid, &vdir, nudge_child, nudge_writer).await?;
+
+                        if nudge.timed_out {
+                            break;
+                        }
+                        if let Some(s) = nudge.sid {
+                            nudge_sid = Some(s);
+                            run_sid = nudge_sid.clone();
+                        }
+                        if let Some(out) = nudge.final_output {
+                            run_final = Some(out);
+                        }
+                        if let Some(stderr) = nudge.stderr {
+                            run_stderr = Some(stderr);
+                        }
+                        any_compaction = any_compaction || nudge.compaction_observed;
+                        nudge_agent_end_seen = nudge_agent_end_seen || nudge.agent_end_seen;
+
+                        if slot_has_verdict(input.root, input.goal_id, &vid, input.round) {
+                            break;
+                        }
+                    }
+                }
+
+                // Persist final bookkeeping into meta.json.
+                let _final_meta = flush_meta(
+                    &vdir,
+                    run_sid.as_deref(),
+                    any_compaction,
+                    nudge_attempts,
+                    recovery_attempts,
+                    &input,
+                )?;
+
                 VerifierRun {
                     verifier_id: vid,
-                    sid: if fail_closed { None } else { sid },
-                    final_output: if fail_closed { None } else { final_output },
-                    stderr: stderr_text,
+                    sid: if fail_closed { None } else { run_sid },
+                    final_output: if fail_closed { None } else { run_final },
+                    stderr: run_stderr,
                     timed_out: false,
                 }
             }
@@ -529,6 +823,9 @@ fn pre_create_verifier_dir_with_turns(vdir: &Path, baseline_turns: u32) {
     let meta = VerifierMeta {
         sid: None,
         turns_used: baseline_turns,
+        nudge_attempts: 0,
+        compaction_observed: false,
+        recovery_attempts: 0,
     };
     let _ = fs::write(
         vdir.join(META_FILE),
@@ -543,29 +840,40 @@ fn read_meta(vdir: &Path) -> Result<Option<VerifierMeta>, SpawnError> {
         return Ok(None);
     }
     let raw = fs::read_to_string(&path)?;
-    Ok(Some(serde_json::from_str(&raw)?))
+    // Tolerate older meta.json without the new fields (default them).
+    let mut val: serde_json::Value = serde_json::from_str(&raw)?;
+    if let Some(obj) = val.as_object_mut() {
+        obj.entry("nudgeAttempts").or_insert(serde_json::json!(0));
+        obj.entry("compactionObserved").or_insert(serde_json::json!(false));
+        obj.entry("recoveryAttempts").or_insert(serde_json::json!(0));
+    }
+    Ok(Some(serde_json::from_value(val)?))
 }
 
-/// Update `meta.json` after a run with the captured SID and an incremented turn count.
+/// Update `meta.json` after a run with the captured SID, an incremented turn count, and
+/// the compaction/verdict-enforcement bookkeeping.
 fn update_meta_after_run(
     vdir: &Path,
     sid: Option<&str>,
     input: &SpawnInput<'_>,
-) -> Result<(), SpawnError> {
+) -> Result<VerifierMeta, SpawnError> {
     let existing = read_meta(vdir)?.unwrap_or(VerifierMeta {
         sid: None,
         turns_used: 0,
+        nudge_attempts: 0,
+        compaction_observed: false,
+        recovery_attempts: 0,
     });
     let turns_used = existing.turns_used.saturating_add(1).min(input.config.max_turn);
     let updated = VerifierMeta {
-        sid: sid.map(str::to_string),
+        sid: sid.map(str::to_string).or(existing.sid),
         turns_used,
+        nudge_attempts: existing.nudge_attempts,
+        compaction_observed: existing.compaction_observed,
+        recovery_attempts: existing.recovery_attempts,
     };
-    fs::write(
-        vdir.join(META_FILE),
-        serde_json::to_string_pretty(&updated)?,
-    )?;
-    Ok(())
+    write_meta(vdir, &updated)?;
+    Ok(updated)
 }
 
 /// Archive a superseded SID under its originating round directory (§6).
@@ -825,6 +1133,9 @@ mod tests {
         let m = VerifierMeta {
             sid: Some("s".into()),
             turns_used: 2,
+            nudge_attempts: 1,
+            compaction_observed: true,
+            recovery_attempts: 0,
         };
         let j = serde_json::to_string(&m).unwrap();
         assert!(j.contains("\"turnsUsed\":2"), "{j}");
@@ -838,6 +1149,9 @@ mod tests {
         let m = VerifierMeta {
             sid: None,
             turns_used: 0,
+            nudge_attempts: 0,
+            compaction_observed: false,
+            recovery_attempts: 0,
         };
         let j = serde_json::to_string(&m).unwrap();
         assert!(!j.contains("sid"), "null sid should be skipped: {j}");

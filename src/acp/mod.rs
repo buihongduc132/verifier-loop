@@ -14,4 +14,4 @@ mod adapters;
 mod parser;
 
 pub use adapters::{adapter_for, render_resume, render_spawn, Adapter, Transport};
-pub use parser::{extract_final_output, extract_sid, parse_event, AcpError, AcpEvent, Message};
+pub use parser::{extract_compaction_observed, extract_final_output, extract_sid, parse_event, AcpError, AcpEvent, Message};
