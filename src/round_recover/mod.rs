@@ -90,8 +90,17 @@ impl GoalLock {
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        file.try_lock_exclusive()
-            .map_err(|_| RoundRecoverError::GoalBusy)?;
+        // Only a WouldBlock (lock already held by a cooperating writer) is `GoalBusy`.
+        // Any other error (permission denied, lock-FS not supported on NFS, etc.) is a
+        // real I/O failure and MUST surface as such — mapping it to `GoalBusy` would tell
+        // the operator "another op is in progress" when the real cause is systemic.
+        file.try_lock_exclusive().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                RoundRecoverError::GoalBusy
+            } else {
+                RoundRecoverError::Io(e)
+            }
+        })?;
         Ok(GoalLock { _file: file })
     }
 }
@@ -313,7 +322,8 @@ pub fn recover_with_poll(
             return Ok(RecoverOutcome::RoundDecidedNoConsensus);
         }
 
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return Ok(RecoverOutcome::StillNullAfter {
                 null_slots,
                 guidance: format!(
@@ -323,7 +333,10 @@ pub fn recover_with_poll(
             });
         }
 
-        std::thread::sleep(poll_interval);
+        // Clamp the sleep to the remaining time before the deadline so we never overshoot
+        // the configured timeout by up to one poll_interval.
+        let remaining = deadline.saturating_duration_since(now);
+        std::thread::sleep(poll_interval.min(remaining));
     }
 }
 

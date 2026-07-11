@@ -124,14 +124,29 @@ fn run_recover(
     goal_id: &str,
 ) -> Result<(), String> {
     // LD3: if the round already reached consensus, there is nothing to recover — warn and
-    // succeed without polling (the user likely meant RESUME N+1).
+    // succeed without polling (the user likely meant RESUME N+1). If the round is already
+    // decided-but-failed (needs=Resume), fail fast with the same guidance instead of
+    // acquiring the lock + doing redundant disk reads only to return
+    // RoundDecidedNoConsensus. Only needs=Recover (null slots or interrupted-pass) is
+    // worth polling.
     let st = round_recover::status(root, goal_id, config).map_err(|e| format!("STATUS: {e}"))?;
-    if matches!(st.needs, round_recover::GoalNeeds::Done) {
-        eprintln!(
-            "round {} already reached consensus; use `jewilo RESUME {goal_id}` to start a new round",
-            st.round
-        );
-        return Ok(());
+    match st.needs {
+        round_recover::GoalNeeds::Done => {
+            eprintln!(
+                "round {} already reached consensus; use `jewilo RESUME {goal_id}` to start a new round",
+                st.round
+            );
+            return Ok(());
+        }
+        round_recover::GoalNeeds::Resume => {
+            eprintln!(
+                "round {} is decided but did not reach {}/{} consensus; \
+                 run `jewilo RESUME {goal_id}` for a fresh round",
+                st.round, config.n, config.m
+            );
+            return Err(format!("round {} rejected", st.round));
+        }
+        round_recover::GoalNeeds::Recover => {}
     }
 
     let timeout = std::time::Duration::from_secs(config.verifier_timeout_sec.max(1));
