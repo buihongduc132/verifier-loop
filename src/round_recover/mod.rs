@@ -134,14 +134,18 @@ pub enum GoalNeeds {
 }
 
 /// One verifier slot's contribution to the status report (LD7).
+///
+/// Every slot object ALWAYS carries a `verdict` field — a null/missing slot emits
+/// `"verdict": null` (the goal-status spec scenario "STATUS shape" requires each slot to
+/// have both an `id` and a `verdict` field, null included).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotStatus {
     /// Verifier id (`v1`, `v2`, …).
     pub id: String,
-    /// The slot's verdict status, or `None` when the slot is null/missing (fail-closed).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verdict: Option<VerdictStatus>,
+    /// The slot's verdict status. `VerdictStatus::Null` serializes to JSON `null`, so a
+    /// null slot emits `"verdict": null` rather than omitting the key (fail-closed).
+    pub verdict: VerdictStatus,
 }
 
 /// The machine-readable status object emitted by `STATUS <goalId>` (LD7).
@@ -180,9 +184,9 @@ pub fn status(root: &Path, goal_id: &str, config: &store::Config) -> Result<Goal
             });
             if rec.status == VerdictStatus::Null {
                 any_null = true;
-                slots.push(SlotStatus { id: vid, verdict: None });
+                slots.push(SlotStatus { id: vid, verdict: VerdictStatus::Null });
             } else {
-                slots.push(SlotStatus { id: vid, verdict: Some(rec.status) });
+                slots.push(SlotStatus { id: vid, verdict: rec.status });
             }
         }
     }

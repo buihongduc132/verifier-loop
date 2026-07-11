@@ -93,10 +93,20 @@ impl Drop for GoalLock { /* unlock + close */ }
 - Holds a `File` handle; `Drop` calls `unlock` (best-effort) then closes. This guarantees
   the lock is released even on early-return / panic, so a crashed `RECOVER` does not
   poison the goal.
-- `NEW`, `RESUME`, and `RECOVER` each acquire this guard at entry and hold it for the
-  whole operation. `STATUS` is read-only and does **not** take the lock (a status probe
+- `NEW`, `RESUME`, and `RECOVER` each acquire this guard and hold it for the whole
+  operation. `STATUS` is read-only and does **not** take the lock (a status probe
   must never block on a long-running round) — it reads the on-disk state atomically per
   file (each verdict.json/meta.json read is independent).
+
+  **Accepted deviation — NEW lock order.** `RESUME` and `RECOVER` acquire the lock *first*
+  (before any state mutation). `NEW` cannot: the `.lock` file lives under
+  `goals/<goalId>/`, which does not exist until `goal::new` creates it (writing goal.json,
+  signature.json, state.json). So `run_new` calls `goal::new` first, *then* acquires the
+  lock, and holds it across the spawn/gather/evaluate phase. This is safe because the
+  `goalId` is a freshly-minted random UUID v4 — two concurrent `NEW`s get distinct goal
+  dirs and cannot collide on the same `.lock`. The lock's job (LD5) is to serialize
+  concurrent `RESUME`/`RECOVER`/a-second-`NEW`-on-the-*same*-goal against the long-running
+  spawn phase, which it does. (The `goal::new` writes are themselves atomic per-file.)
 
 ### 4.2 `recover` (LD3/LD8/LD10/LD11)
 
@@ -152,7 +162,10 @@ Reads (no lock) and emits:
 - `completion.json` exists → `"done"`.
 - ≥1 null slot and no completion → `"recover"` (a live orphan may still emit).
 - every slot non-null, no completion → `"resume"` (round decided, failed).
-- (state `new` only before the first spawn of the round.)
+- `state == new` (no slots exist yet) → `"recover"` by default. This is a vacuous edge:
+  a brand-new goal with no spawned round has nothing to harvest, so `RECOVER` on it would
+  simply poll to `StillNullAfter`. The value is chosen so a generic caller following
+  `needs` never silently does nothing — it either recovers or advances to `RESUME`.
 
 `hasLiveOrphan`: SHAPE-1 deliberately does **not** track PIDs (LD9), so liveness is
 inferred only indirectly (a slot with `meta.json` present but a null verdict *may* have a

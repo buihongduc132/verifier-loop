@@ -23,6 +23,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
+use serde_json::Value;
 use verifier_loop::{consensus, goal, round_recover, store, verdict};
 
 // ---------------------------------------------------------------------------
@@ -202,6 +203,31 @@ fn status_state_new_before_slots_exist() {
     let (dir, goal_id) = fresh_goal();
     let st = round_recover::status(dir.path(), &goal_id, &cfg()).unwrap();
     assert_eq!(st.state, round_recover::GoalState::New);
+}
+
+#[test]
+fn status_null_slot_emits_verdict_null_key() {
+    // goal-status spec "STATUS shape": every slot has an id AND a verdict field, null
+    // included. A null slot MUST serialize as {"id":"v2","verdict":null} — never omit the
+    // verdict key.
+    let (dir, goal_id) = fresh_goal();
+    let round = 1u32;
+    signed_approve(dir.path(), &goal_id, round, "v1");
+    seed_null_slot(dir.path(), &goal_id, round, "v2");
+
+    let st = round_recover::status(dir.path(), &goal_id, &cfg()).unwrap();
+    let j: Value = serde_json::to_value(&st).unwrap();
+    let slots = j["slots"].as_array().unwrap();
+    let v2 = slots
+        .iter()
+        .find(|s| s["id"] == "v2")
+        .expect("v2 slot present");
+    // The verdict key MUST exist and be JSON null for a null slot.
+    assert!(
+        v2.get("verdict").is_some(),
+        "null slot MUST carry a verdict key (got {v2})"
+    );
+    assert!(v2["verdict"].is_null(), "null slot verdict must be null (got {v2})");
 }
 
 // ===========================================================================
