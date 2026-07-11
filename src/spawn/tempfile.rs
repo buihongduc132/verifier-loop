@@ -72,9 +72,9 @@ impl Drop for TempPromptFile {
 
 /// Build a unique tempfile path under the OS temp dir.
 ///
-/// Uniqueness combines: OS temp dir + `verifier-loop-` prefix + pid + monotonic nanos
-/// + a process-local atomic counter. The counter is the decisive guard against same-pid
-/// same-nanos collisions (two parallel verifiers spawning back-to-back).
+/// Uniqueness combines: OS temp dir, `verifier-loop-` prefix, pid, monotonic nanos,
+/// and a process-local atomic counter. The counter is the decisive guard against
+/// same-pid same-nanos collisions (two parallel verifiers spawning back-to-back).
 fn unique_path() -> PathBuf {
     let dir = std::env::temp_dir();
     let pid = std::process::id();

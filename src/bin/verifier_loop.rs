@@ -133,7 +133,7 @@ fn run_round(
         .as_deref()
         .map(|c| verifier_loop::prompt::cap_context(c, config.context_max_chars).0);
 
-    let adapter = resolve_adapter(&config)?;
+    let adapter = resolve_adapter(config)?;
 
     // Render + persist the verifier prompt per verifier slot (correct audit trail). The
     // spawn layer takes a single prompt per round (its API), so the round's spawned
@@ -201,7 +201,7 @@ fn run_round(
         root,
         goal_id,
         round,
-        config: &config,
+        config,
         prompt: &prompt,
         adapter: &adapter,
     };

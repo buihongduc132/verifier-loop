@@ -60,6 +60,16 @@ pub const STDERR_CAP_BYTES: usize = 8 * 1024;
 /// (§6): records the superseded SID for audit.
 pub const ARCHIVE_FILE: &str = "archive.json";
 
+/// A spawned verifier child + its metadata, used by [`gather`]. Factored into a type
+/// alias to keep clippy's `type_complexity` lint happy and the gather signature readable.
+type SpawnedChild = (
+    String,
+    tokio::process::Child,
+    PathBuf,
+    Option<JoinHandle<io::Result<()>>>,
+    Option<TempPromptFile>,
+);
+
 /// Minimal verdict-nudge prompt used for both within-round verdict enforcement (D5) and
 /// compaction recovery (D6). Kept tiny (<2KB) so it never re-triggers compaction, and
 /// contains NO goal/diff/policy text (those are already in the resumed session context).
@@ -437,13 +447,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
     // For `Stdin` transport (design D1/D7): child stdin is piped and the rendered prompt
     // is written by a background task (D4). For `GoalFile`: stdin stays null (§7 will
     // substitute a tempfile path into the argv instead).
-    let mut children: Vec<(
-        String,
-        tokio::process::Child,
-        PathBuf,
-        Option<JoinHandle<io::Result<()>>>,
-        Option<TempPromptFile>,
-    )> = Vec::new();
+    let mut children: Vec<SpawnedChild> = Vec::new();
     for (vid, mut cmd, vdir, goal_file_guard) in plan {
         let stdin_config = match input.adapter.transport {
             Transport::Stdin => Stdio::piped(),
@@ -547,13 +551,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         plan.push((vid, cmd, vdir, goal_file_guard));
     }
 
-    let mut children: Vec<(
-        String,
-        tokio::process::Child,
-        PathBuf,
-        Option<JoinHandle<io::Result<()>>>,
-        Option<TempPromptFile>,
-    )> = Vec::new();
+    let mut children: Vec<SpawnedChild> = Vec::new();
     for (vid, mut cmd, vdir, goal_file_guard) in plan {
         let stdin_config = match input.adapter.transport {
             Transport::Stdin => Stdio::piped(),
@@ -638,13 +636,7 @@ async fn bounded_stderr_tail<R: tokio::io::AsyncRead + Unpin>(
 async fn gather(
     input: SpawnInput<'_>,
     enable_nudge: bool,
-    mut children: Vec<(
-        String,
-        tokio::process::Child,
-        PathBuf,
-        Option<JoinHandle<io::Result<()>>>,
-        Option<TempPromptFile>,
-    )>,
+    mut children: Vec<SpawnedChild>,
 ) -> Result<Vec<VerifierRun>, SpawnError> {
     let timeout = Duration::from_secs(input.config.verifier_timeout_sec.max(1));
     let mut runs = Vec::with_capacity(children.len());
