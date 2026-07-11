@@ -658,25 +658,29 @@ async fn gather(
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
         let drain = tokio::spawn(async move {
-            // stdout: full-buffer (the ACP parser must see the whole stream to find
-            // session/agent_end events). Pre-existing behaviour; a chatty backend
-            // emits bounded ACP JSON so this is acceptable.
-            let buf = match stdout_pipe {
-                Some(mut pipe) => {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    let _ = pipe.read_to_end(&mut buf).await;
-                    buf
+            // Read stdout and stderr CONCURRENTLY (not sequentially). A sequential
+            // read (stdout first, then stderr) can lose stderr data under timing
+            // variations: if stdout blocks waiting for EOF, stderr may fill the
+            // kernel pipe buffer before the drain begins reading it. Reading both
+            // concurrently ensures neither pipe overflows.
+            let stdout_fut = async {
+                match stdout_pipe {
+                    Some(mut pipe) => {
+                        use tokio::io::AsyncReadExt;
+                        let mut buf = Vec::new();
+                        let _ = pipe.read_to_end(&mut buf).await;
+                        buf
+                    }
+                    None => Vec::new(),
                 }
-                None => Vec::new(),
             };
-            // stderr: BOUNDED tail. Only the diagnostic tail matters (errors live at
-            // the end of a run), so keep at most STDERR_CAP_BYTES instead of buffering
-            // an unbounded chatty backend into RAM. A run exceeding the cap is marked.
-            let stderr_buf = match stderr_pipe {
-                Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
-                None => Vec::new(),
+            let stderr_fut = async {
+                match stderr_pipe {
+                    Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
+                    None => Vec::new(),
+                }
             };
+            let (buf, stderr_buf) = tokio::join!(stdout_fut, stderr_fut);
             (buf, stderr_buf)
         });
 
