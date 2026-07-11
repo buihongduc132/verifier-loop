@@ -221,6 +221,29 @@ pub fn mint_and_pin_pubkey(
         return Err(VerdictError::AlreadyPinned);
     }
 
+    // SERIALIZE the commit section with an exclusive flock so two concurrent
+    // `mint_and_pin_pubkey` calls on the SAME slot cannot race past the
+    // `target.exists()` check and clobber each other's pinned pair (on Unix,
+    // `fs::rename` is last-writer-wins, which would violate first-write-wins).
+    // The lock is acquired on a dedicated `<slot>/.mint.lock` file and held until
+    // the function returns (the guard drops on scope exit).
+    use fs4::fs_std::FileExt;
+    let lock_path = slot.join(".mint.lock");
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
+    // Double-checked: another process may have pinned between our unlocked check
+    // and acquiring the lock.
+    if target.exists() {
+        drop(lock_file);
+        let _ = fs::remove_file(&lock_path);
+        return Err(VerdictError::AlreadyPinned);
+    }
+
     // ATOMIC PUBKEY + SECRET PERSISTENCE: BOTH must land or NEITHER lands.
     //
     // Ordering: write BOTH temp files first, then rename the secret, then rename the
@@ -266,24 +289,47 @@ pub fn mint_and_pin_pubkey(
         let _ = fs::remove_file(&pubkey_tmp);
         let _ = fs::remove_file(&secret_tmp);
         fsync_dir_best_effort(&slot);
+        drop(lock_file);
+        let _ = fs::remove_file(&lock_path);
         return Err(VerdictError::Io(e));
     }
 
-    // (4) Rename the pubkey pin LAST — this is the "slot is pinned" commit marker.
-    if let Err(e) = fs::rename(&pubkey_tmp, &target) {
-        // Best-effort rollback: move the secret back to a temp path so a retry rewrites
-        // it from scratch. If that fails we surface the original pin-rename error; the
-        // caller sees an I/O error and the slot is in an indeterminate-but-recoverable
-        // state (the pin is absent, so a retry is permitted).
-        let _ = fs::rename(&secret_target, &secret_tmp);
-        let _ = fs::remove_file(&pubkey_tmp);
-        fsync_dir_best_effort(&slot);
-        return Err(VerdictError::Io(e));
+    // (4) Install the pubkey pin LAST via `fs::hard_link` (NOT `fs::rename`).
+    // `rename` is last-writer-wins on Unix; `hard_link` FAILS with `AlreadyExists`
+    // if the target already exists — giving first-write-wins semantics as
+    // defense-in-depth even though the flock above already serializes callers.
+    // On success the temp's inode now has two links; we remove the temp name.
+    match fs::hard_link(&pubkey_tmp, &target) {
+        Ok(()) => {
+            let _ = fs::remove_file(&pubkey_tmp);
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Another caller won the pin race (should not happen under the flock,
+            // but defensively correct). Roll back our secret so the slot is clean.
+            let _ = fs::remove_file(&pubkey_tmp);
+            let _ = fs::remove_file(&secret_target);
+            fsync_dir_best_effort(&slot);
+            drop(lock_file);
+            let _ = fs::remove_file(&lock_path);
+            return Err(VerdictError::AlreadyPinned);
+        }
+        Err(e) => {
+            // Best-effort rollback: move the secret back to a temp path so a retry
+            // rewrites it from scratch. The pin is absent, so a retry is permitted.
+            let _ = fs::rename(&secret_target, &secret_tmp);
+            let _ = fs::remove_file(&pubkey_tmp);
+            fsync_dir_best_effort(&slot);
+            drop(lock_file);
+            let _ = fs::remove_file(&lock_path);
+            return Err(VerdictError::Io(e));
+        }
     }
 
     // (5) Best-effort fsync of the parent directory so the renames are durable on disk.
     // This is a single-host deterrent layer; some filesystems no-op directory fsync.
     fsync_dir_best_effort(&slot);
+    drop(lock_file);
+    let _ = fs::remove_file(&lock_path);
 
     Ok(kp.signing)
 }
@@ -378,12 +424,13 @@ fn fsync_dir_best_effort(_path: &Path) {}
 fn write_secret_mode_0600(target: &Path, secret_hex: &str) -> Result<(), VerdictError> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
-    // Create-or-truncate with mode 0600 from the outset (owner read+write only). Uses
-    // `create(true)` (NOT `create_new(true)`) so a legitimate retry on a unique temp
-    // path overwrites rather than deadlocking.
+    // Create-EXCLUSIVE with mode 0600 from the outset (owner read+write only). Because
+    // the temp path is UNIQUE per attempt (`unique_tmp_name`), `create_new(true)` cannot
+    // deadlock a retry — and it provides defense-in-depth against symlink-following /
+    // pre-created-path TOCTOU issues.
     {
         let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true).mode(0o600);
+        opts.write(true).create_new(true).mode(0o600);
         let mut f = opts.open(target)?;
         use std::io::Write;
         f.write_all(secret_hex.as_bytes())?;
