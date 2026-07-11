@@ -284,20 +284,30 @@ async fn reap_nudge_child(
     let timeout = Duration::from_secs(input.config.verifier_timeout_sec.max(1));
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
+    // Drain stdout AND stderr CONCURRENTLY (not sequentially). A sequential read
+    // (stdout first, then stderr) can lose stderr data under timing variations:
+    // a chatty stderr fills the kernel pipe buffer (~64KB) while stdout is still
+    // live, and the child blocks on its next stderr write until timeout. Mirrors
+    // the main `gather` drain, which already uses tokio::join! for the same reason.
     let drain = tokio::spawn(async move {
-        let buf = match stdout_pipe {
-            Some(mut pipe) => {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                let _ = pipe.read_to_end(&mut buf).await;
-                buf
+        let stdout_fut = async {
+            match stdout_pipe {
+                Some(mut pipe) => {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    let _ = pipe.read_to_end(&mut buf).await;
+                    buf
+                }
+                None => Vec::new(),
             }
-            None => Vec::new(),
         };
-        let stderr_buf = match stderr_pipe {
-            Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
-            None => Vec::new(),
+        let stderr_fut = async {
+            match stderr_pipe {
+                Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
+                None => Vec::new(),
+            }
         };
+        let (buf, stderr_buf) = tokio::join!(stdout_fut, stderr_fut);
         (buf, stderr_buf)
     });
 

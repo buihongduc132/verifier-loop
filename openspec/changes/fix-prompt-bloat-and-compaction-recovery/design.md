@@ -13,7 +13,7 @@ Current state: `src/prompt/mod.rs` caps only `gitDiff` (`truncate_diff`, line 22
 ## Goals / Non-Goals
 
 **Goals:**
-- Rendered verifier prompt stays under a configurable byte budget so compaction never fires before verdict on a normally-sized repo.
+- Rendered verifier prompt stays under a configurable byte budget, which **reduces the likelihood of compaction** firing before a verdict on a normally-sized repo. This is a soft goal: a sufficiently large `gitDiff` or `--context` can still push the prompt over the OS/backend input limit, and a hard ceiling (refusing to spawn when over budget) is a **future enhancement** — not implemented here.
 - A verifier that completed its investigation ALWAYS reaches a verdict — even if compaction fired mid-analysis. Compaction is a recoverable event, not a verdict-killer.
 - `gather()` never silently extracts null from a session that exited without calling `verifier-verdict`; it re-prompts within `maxTurn` first.
 - No regression to the fail-closed invariants (NULL verdict never → APPROVE; missing store → no hash).
@@ -28,7 +28,9 @@ Current state: `src/prompt/mod.rs` caps only `gitDiff` (`truncate_diff`, line 22
 ## Decisions
 
 ### D1 — `fileEditTimes` scoped to changed files only
-**Choice:** Replace `git ls-files` enumeration with `git status --porcelain` (changed/untracked files) for the fileEditTimes block. Add a hard byte cap (`FILE_EDIT_TIMES_CAP_BYTES`, default 8KB) as a secondary guard.
+**Choice:** Replace `git ls-files` enumeration with `git status --porcelain -z` (changed/untracked files) for the fileEditTimes block. Add a hard byte cap (`FILE_EDIT_TIMES_CAP_BYTES`, default 8KB) as a secondary guard.
+
+**Implementation note (porcelain parsing):** the code uses `git status --porcelain -z` (NUL-delimited) rather than the default newline-delimited porcelain, because the latter C-quotes pathnames containing spaces/Unicode (`"my path"`) and represents renames as `old -> new`, both of which are ambiguous to parse. With `-z` the records are NUL-terminated and unquoted; a rename is emitted as `XY <new_path>\0<old_path>\0` (new path first, old path second — the second record is consumed and discarded so the rename source does not appear as a spurious changed file). This means arbitrary ASCII pathnames — including ones containing a literal ` -> ` substring — are handled correctly.
 
 **Why over alternatives:**
 - *Drop entirely*: loses forensic value (proving edit times for tamper detection). Keep the signal but scope it.
@@ -65,6 +67,8 @@ Current state: `src/prompt/mod.rs` caps only `gitDiff` (`truncate_diff`, line 22
 
 ### D6 — Compaction as a first-class recoverable event
 **Choice:** The ACP parser SHALL detect `{"type":"compaction",...}` events in the stream. When compaction is observed and the session ends without `agent_end`/verdict, the orchestrator SHALL auto-resume the same sid with a compaction-aware recovery nudge prompt (`COMPACTION_RECOVERY_NUDGE_PROMPT`, distinct from the generic `VERDICT_NUDGE_PROMPT` used for D5 enforcement) to harvest the verdict. The recovery nudge tells the verifier that compaction occurred, its prior investigation is preserved in the resumed session, and it must register its verdict immediately. This is "must always be able to compact itself."
+
+**Turn accounting (does recovery consume a turn?):** yes. Recovery runs INSIDE the same nudge loop as D5 and is gated by the `turnsUsed < maxTurn` check at the top of each iteration. The recovery resume increments `turnsUsed` by one (via `reap_nudge_child`'s meta update), exactly like a plain verdict-enforcement nudge. Consequently, if a slot has already exhausted its turn budget, no recovery is attempted and the slot fails closed to null. The hard cap "at most one recovery resume per slot per round" is enforced separately by the `recovery_attempts == 0` predicate.
 
 **Why:** compaction is the confirmed kill mechanism for Groups B+C. The investigation is done; only the verdict emission was lost. Resuming post-compaction with a tiny nudge is the minimal recovery.
 

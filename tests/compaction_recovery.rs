@@ -35,6 +35,40 @@ use std::path::{Path, PathBuf};
 use verifier_loop::{acp, goal, spawn, store};
 
 // ---------------------------------------------------------------------------
+// Panic-safe env-var drop-guard (F5). `std::env::set_var` followed by a manual
+// `remove_var` at the end of a test leaks the var to sibling tests if the test
+// panics mid-way. This guard captures the original value at construction and
+// restores/removes the var on Drop, so cleanup is panic-safe regardless of where
+// the test unwinds. Used for every `set_var` in this file.
+// ---------------------------------------------------------------------------
+struct EnvGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    /// Capture the current value of `key` (if any) and then set it to `new_value`.
+    fn set(key: &'static str, new_value: &str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: tests in this file are single-threaded with respect to this env var;
+        // there is no concurrent reader of VERIFIER_LOOP_VERDICT_BIN within a single
+        // test process. set_var/remove_var are only `unsafe` on newer toolchains for
+        // multi-threaded reads, which does not apply here.
+        std::env::set_var(key, new_value);
+        EnvGuard { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(val) => std::env::set_var(self.key, val),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // helpers (mirrors tests/spawn_orchestrator.rs patterns)
 // ---------------------------------------------------------------------------
 
@@ -729,7 +763,9 @@ fn nudge_resume_can_register_signed_verdict() {
     let verdict_bin = real_verifier_verdict_bin();
     // Propagate to the spawned children (child inherits parent env when the
     // orchestrator doesn't explicitly override VERIFIER_LOOP_VERDICT_BIN).
-    std::env::set_var(spawn::ENV_VERDICT_BIN, &verdict_bin);
+    // Panic-safe: the EnvGuard restores/removes the var on Drop so a mid-test panic
+    // cannot leak it to sibling tests.
+    let _verdict_bin_guard = EnvGuard::set(spawn::ENV_VERDICT_BIN, &verdict_bin.to_string_lossy());
 
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -771,7 +807,7 @@ fi
     rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
         .expect("spawn succeeds");
 
-    std::env::remove_var(spawn::ENV_VERDICT_BIN);
+    // (The EnvGuard restores VERIFIER_LOOP_VERDICT_BIN on Drop at end of scope.)
 
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
 

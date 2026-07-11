@@ -70,3 +70,24 @@
 
 - [ ] 10.1 Close gh issues #1, #4 with ref to `fix-spawn-argv-overflow` (already fixed — Group A verification).
 - [ ] 10.2 On merge: close #10, #12, #13, #21, #22, #31 (Group C), #11, #14, #17, #20, #23, #24, #25, #26, #27, #32 (Group B), noting Group D (#8, #9, #16, #30) as not-bug feature gaps tracked separately.
+
+## 11. Added post-plan: per-verifier signing secret persistence (fix-secret)
+
+The original task plan (§1–§10) did not include the per-verifier signing-secret work that
+landed alongside D5/D6. It is documented here for completeness and audit.
+
+- **RED:** `tests/compaction_recovery.rs::nudge_resume_can_register_signed_verdict` —
+  asserts a nudge-harvested verdict is a SIGNED APPROVE (non-empty `signature` +
+  `pubkeyId`) bound to the slot's pinned pubkey, and that `verifier-secret.hex` exists
+  with mode 0600.
+- **GREEN:** `src/verdict/mod.rs` gains `SECRET_FILE = "verifier-secret.hex"`,
+  `mint_and_pin_pubkey` persists the signing key hex (mode 0600, first-write-wins,
+  atomic temp+rename alongside the pubkey pin), and `read_verifier_secret` reads it
+  back. `src/spawn/orchestrator.rs::spawn_nudge_child` reads the persisted secret and
+  re-injects it into the resume child env so nudge/recovery children can sign.
+- **Coverage:** the secret-persistence + read paths are covered by unit tests in
+  `src/verdict/mod.rs` (`mint_atomic_writes_both_files_or_neither`,
+  `read_verifier_secret_returns_none_when_absent`,
+  `read_verifier_secret_surfaces_permission_denied_error`) plus the integration test
+  above. Atomic-persistence hardening (F1) and `fs::metadata`-vs-`exists()` (F2) were
+  added in the cubic-dev PR review pass.
