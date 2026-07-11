@@ -166,9 +166,24 @@ fn run_round(
             git_diff_max_chars: snapshot.git_diff_max_chars,
             truncated: snapshot.truncated,
         };
-        let rendered = match kind {
-            RoundKind::New => verifier_loop::prompt::render(None, &vars),
-            RoundKind::Resume => verifier_loop::prompt::render_resume(None, &vars),
+        // Design D2 (override semantics): when a custom verifierPromptFile is set
+        // (`prepend.is_some()`), render the body WITHOUT the built-in VERIFIER_POLICY
+        // block, then prepend the custom file. The two policy sources are mutually
+        // exclusive — the custom file REPLACES the built-in policy, not supplements it
+        // (eliminating the 2x / ~62KB duplication D2 targets). When no custom file is
+        // set, the built-in policy template is used as today.
+        let has_custom = prepend.is_some();
+        let rendered = match (kind, has_custom) {
+            (RoundKind::New, false) => verifier_loop::prompt::render(None, &vars),
+            (RoundKind::New, true) => verifier_loop::prompt::render(
+                Some(verifier_loop::prompt::default_template_no_policy()),
+                &vars,
+            ),
+            (RoundKind::Resume, false) => verifier_loop::prompt::render_resume(None, &vars),
+            (RoundKind::Resume, true) => verifier_loop::prompt::render_resume(
+                Some(verifier_loop::prompt::default_resume_template_no_policy()),
+                &vars,
+            ),
         }
         .map_err(|e| format!("prompt render failed: {e}"))?;
         let rendered = verifier_loop::prompt::prepend_custom(rendered, prepend);

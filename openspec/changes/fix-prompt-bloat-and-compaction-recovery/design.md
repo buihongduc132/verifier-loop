@@ -57,12 +57,14 @@ Current state: `src/prompt/mod.rs` caps only `gitDiff` (`truncate_diff`, line 22
 ### D5 — Verdict enforcement in gather (within-round re-prompt)
 **Choice:** After `gather()` reaps a child, if no verdict.json exists OR `status == null` AND `turnsUsed < maxTurn`, the orchestrator SHALL re-prompt the same session (sid reuse) with a minimal verdict-nudge prompt: "You have completed your investigation. Register your verdict NOW via: verifier-verdict approve --notes '...' OR verifier-verdict reject --notes '...'". Up to `maxTurn - turnsUsed` nudges per slot per round.
 
+**Scope (universal):** this enforcement applies to BOTH fresh (`spawn_round`) and resume (`spawn_resume`) rounds — the verifier-spawn spec "Verdict is enforced after child exit" carries no round-type carve-out. A resume-round child that exits with no verdict is re-prompted on the same sid, exactly like a fresh round. The transport guard (Stdin only) matches across both paths: GoalFile custom adapters are not designed for multiple nudge resumes and are scoped out consistently.
+
 **Why over fresh re-spawn:** sid reuse preserves the investigation context; fresh spawn throws away completed analysis and re-incurs the bloat/compaction risk. The nudge is cheap (small prompt) and targets the exact failure (model forgot the final step).
 
 **Alternative considered:** hard-fail the round on first null. Rejected — that's the current broken behavior.
 
 ### D6 — Compaction as a first-class recoverable event
-**Choice:** The ACP parser SHALL detect `{"type":"compaction",...}` events in the stream. When compaction is observed and the session ends without `agent_end`/verdict, the orchestrator SHALL auto-resume the same sid with the verdict-nudge prompt (from D5) to harvest the verdict. This is "must always be able to compact itself."
+**Choice:** The ACP parser SHALL detect `{"type":"compaction",...}` events in the stream. When compaction is observed and the session ends without `agent_end`/verdict, the orchestrator SHALL auto-resume the same sid with a compaction-aware recovery nudge prompt (`COMPACTION_RECOVERY_NUDGE_PROMPT`, distinct from the generic `VERDICT_NUDGE_PROMPT` used for D5 enforcement) to harvest the verdict. The recovery nudge tells the verifier that compaction occurred, its prior investigation is preserved in the resumed session, and it must register its verdict immediately. This is "must always be able to compact itself."
 
 **Why:** compaction is the confirmed kill mechanism for Groups B+C. The investigation is done; only the verdict emission was lost. Resuming post-compaction with a tiny nudge is the minimal recovery.
 

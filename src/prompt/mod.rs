@@ -109,14 +109,43 @@ pub const DEFAULT_RESUME_TEMPLATE: &str = concat!(
     include_str!("default_resume_template.txt"),
 );
 
-/// The baked-in default round-1 prompt template.
+/// The baked-in default round-1 prompt template WITH the embedded verifier policy.
 pub fn default_template() -> &'static str {
     DEFAULT_TEMPLATE
 }
 
-/// The baked-in default resume prompt template.
+/// The baked-in default resume prompt template WITH the embedded verifier policy.
 pub fn default_resume_template() -> &'static str {
     DEFAULT_RESUME_TEMPLATE
+}
+
+/// The baked-in default round-1 template WITHOUT the embedded `VERIFIER_POLICY` block
+/// (design D2 — override semantics). Used when a custom `verifierPromptFile` is
+/// configured: the custom file REPLACES the built-in policy, so the built-in block is
+/// omitted to avoid the 2x duplication (62KB wasted) that D2 eliminates.
+///
+/// Identity preamble + body file only. The bin prepends the custom file via
+/// [`prepend_custom`], producing exactly one policy source (the custom file).
+pub const DEFAULT_TEMPLATE_NO_POLICY: &str = concat!(
+    "You are verifier {{verifierId}} for goal {{goalId}}.\n\n",
+    include_str!("default_template.txt"),
+);
+
+/// The baked-in default resume template WITHOUT the embedded `VERIFIER_POLICY` block
+/// (design D2 — override semantics). See [`DEFAULT_TEMPLATE_NO_POLICY`].
+pub const DEFAULT_RESUME_TEMPLATE_NO_POLICY: &str = concat!(
+    "You are verifier {{verifierId}} for goal {{goalId}} (resumed).\n\n",
+    include_str!("default_resume_template.txt"),
+);
+
+/// The baked-in default round-1 template WITHOUT the embedded verifier policy (D2).
+pub fn default_template_no_policy() -> &'static str {
+    DEFAULT_TEMPLATE_NO_POLICY
+}
+
+/// The baked-in default resume template WITHOUT the embedded verifier policy (D2).
+pub fn default_resume_template_no_policy() -> &'static str {
+    DEFAULT_RESUME_TEMPLATE_NO_POLICY
 }
 
 /// Renders the round-1 (NEW) prompt. `template = None` -> baked-in default.

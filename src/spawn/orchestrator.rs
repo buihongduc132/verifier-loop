@@ -70,10 +70,16 @@ type SpawnedChild = (
     Option<TempPromptFile>,
 );
 
-/// Minimal verdict-nudge prompt used for both within-round verdict enforcement (D5) and
-/// compaction recovery (D6). Kept tiny (<2KB) so it never re-triggers compaction, and
-/// contains NO goal/diff/policy text (those are already in the resumed session context).
+/// Minimal verdict-nudge prompt used for within-round verdict enforcement (D5). Contains
+/// NO goal/diff/policy text; the resumed session already holds that context. Kept tiny
+/// (<2KB) so it never re-triggers compaction.
 pub const VERDICT_NUDGE_PROMPT: &str = "You have completed your investigation. Register your verdict NOW via the verifier-verdict CLI:\n\nverifier-verdict approve --notes \"evidence summary: ...\"\nverifier-verdict reject --notes \"what is wrong, with file:line references\"\n\nNo further investigation is needed. Register your verdict.\n";
+
+/// Compaction-aware recovery nudge prompt used for compaction recovery (D6). Contains
+/// NO goal/diff/policy text (preserved in the compacted session). Tells the verifier that
+/// compaction occurred, its prior investigation is preserved, and it must register the
+/// verdict immediately. Kept tiny (<2KB).
+pub const COMPACTION_RECOVERY_NUDGE_PROMPT: &str = "The session compacted after your investigation. Your prior reasoning and artifacts are preserved in this resumed session.\n\nRegister your verdict NOW via the verifier-verdict CLI:\n\nverifier-verdict approve --notes \"evidence summary: ...\"\nverifier-verdict reject --notes \"what is wrong, with file:line references\"\n\nNo further investigation is needed. Register your verdict.\n";
 
 /// Identity env var names injected into every verifier process (D2).
 pub const ENV_GOAL_ID: &str = "VERIFIER_LOOP_GOAL_ID";
@@ -195,6 +201,7 @@ async fn spawn_nudge_child(
     input: &SpawnInput<'_>,
     verifier_id: &str,
     sid: &str,
+    nudge_prompt: &str,
 ) -> Result<
     (
         tokio::process::Child,
@@ -208,7 +215,7 @@ async fn spawn_nudge_child(
     // nudge prompt; the guard is returned so the caller holds it until the child is
     // reaped (the file is unlinked on drop, after the child has opened it).
     let goal_file_guard: Option<TempPromptFile> = match input.adapter.transport {
-        Transport::GoalFile => Some(TempPromptFile::new(VERDICT_NUDGE_PROMPT.as_bytes())?),
+        Transport::GoalFile => Some(TempPromptFile::new(nudge_prompt.as_bytes())?),
         Transport::Stdin => None,
     };
     let goal_file_path = goal_file_guard.as_ref().map(|g| g.path());
@@ -246,7 +253,7 @@ async fn spawn_nudge_child(
         .kill_on_drop(true);
     let mut child = cmd.spawn()?;
     let write_handle = match input.adapter.transport {
-        Transport::Stdin => spawn_stdin_writer(child.stdin.take(), VERDICT_NUDGE_PROMPT.as_bytes()),
+        Transport::Stdin => spawn_stdin_writer(child.stdin.take(), nudge_prompt.as_bytes()),
         Transport::GoalFile => None,
     };
     Ok((child, write_handle, goal_file_guard))
@@ -566,9 +573,14 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         children.push((vid, child, vdir, write_handle, goal_file_guard));
     }
 
-    // Resume round: a single invocation per verifier is expected; the nudge/recovery
-    // loop is a fresh-round concern (D5/D6), not a resume-round one.
-    gather(input, false, children).await
+    // Resume round: verdict-enforcement nudge (D5) + compaction recovery (D6) apply
+    // universally — the verifier-spawn spec "Verdict is enforced after child exit" carries
+    // no round-type carve-out. A resume-round child that exits with no verdict MUST be
+    // re-prompted on the same sid, exactly like a fresh round. The transport guard
+    // (Stdin only) matches spawn_round: GoalFile custom adapters are not designed for
+    // multiple nudge resumes and are scoped out consistently on both paths.
+    let enable_nudge = input.adapter.transport == Transport::Stdin;
+    gather(input, enable_nudge, children).await
 }
 
 // ---------------------------------------------------------------------------
@@ -766,7 +778,17 @@ async fn gather(
                         nudge_attempts += 1;
 
                         let (nudge_child, nudge_writer, _nudge_guard) =
-                            spawn_nudge_child(&input, &vid, &sid_to_use).await?;
+                            spawn_nudge_child(
+                                &input,
+                                &vid,
+                                &sid_to_use,
+                                if do_recovery {
+                                    COMPACTION_RECOVERY_NUDGE_PROMPT
+                                } else {
+                                    VERDICT_NUDGE_PROMPT
+                                },
+                            )
+                            .await?;
                         let nudge = reap_nudge_child(&input, &vid, &vdir, nudge_child, nudge_writer).await?;
 
                         if nudge.timed_out {

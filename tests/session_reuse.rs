@@ -50,6 +50,17 @@ fn script_adapter_with_resume(script_path: &str) -> acp::Adapter {
     )
 }
 
+/// Shell snippet that writes a minimal APPROVE verdict into the orchestrator-injected
+/// slot path. Used by the session-reuse stubs so the verdict-enforcement nudge loop
+/// (D5, now also active on resume rounds) sees a verdict present and does NOT re-invoke
+/// the stub — keeping these tests focused on sid/turnsUsed/archive mechanics, not the
+/// nudge loop (which has its own dedicated tests in compaction_recovery.rs).
+const VERDICT_WRITE_SNIPPET: &str = r#"
+SLOT="$VERIFIER_LOOP_HOME/goals/$VERIFIER_LOOP_GOAL_ID/rounds/$VERIFIER_LOOP_ROUND/$VERIFIER_LOOP_VERIFIER_ID"
+mkdir -p "$SLOT"
+printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$SLOT/verdict.json"
+"#;
+
 /// Seed a prior round's per-verifier meta + null verdict, simulating a finished round 1.
 fn seed_prior_round(
     root: &Path,
@@ -113,8 +124,10 @@ cat <<'EOF'
 {{"type":"session","id":"s1-resumed"}}
 {{"type":"agent_end","messages":[],"willRetry":false}}
 EOF
+{verdict}
 "#,
-            cap = capture_dir.to_string_lossy()
+            cap = capture_dir.to_string_lossy(),
+            verdict = VERDICT_WRITE_SNIPPET
         ),
     );
     let adapter = script_adapter_with_resume(&script);
@@ -189,8 +202,10 @@ cat <<'EOF'
 {{"type":"session","id":"s1-fresh"}}
 {{"type":"agent_end","messages":[],"willRetry":false}}
 EOF
+{verdict}
 "#,
-            cap = capture_dir.to_string_lossy()
+            cap = capture_dir.to_string_lossy(),
+            verdict = VERDICT_WRITE_SNIPPET
         ),
     );
     let adapter = script_adapter_with_resume(&script);
@@ -258,8 +273,10 @@ cat <<'EOF'
 {{"type":"session","id":"sid-$VERIFIER_LOOP_ROUND"}}
 {{"type":"agent_end","messages":[],"willRetry":false}}
 EOF
+{verdict}
 "#,
-            cap = capture_dir.to_string_lossy()
+            cap = capture_dir.to_string_lossy(),
+            verdict = VERDICT_WRITE_SNIPPET
         ),
     );
     let adapter = script_adapter_with_resume(&script);
