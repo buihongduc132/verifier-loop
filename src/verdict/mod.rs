@@ -225,8 +225,13 @@ pub fn mint_and_pin_pubkey(
     // `mint_and_pin_pubkey` calls on the SAME slot cannot race past the
     // `target.exists()` check and clobber each other's pinned pair (on Unix,
     // `fs::rename` is last-writer-wins, which would violate first-write-wins).
-    // The lock is acquired on a dedicated `<slot>/.mint.lock` file and held until
-    // the function returns (the guard drops on scope exit).
+    //
+    // The lock file (`<slot>/.mint.lock`) is a STABLE coordination file: it is
+    // NEVER unlinked. `flock` locks the inode, not the pathname, so unlinking it
+    // while a waiter is blocked would let a new caller create a fresh inode and
+    // acquire a second exclusive lock concurrently — defeating the coordination.
+    // The file is opened with `truncate(true)` so each re-entry zeros its (empty)
+    // content.
     use fs4::fs_std::FileExt;
     let lock_path = slot.join(".mint.lock");
     let lock_file = fs::OpenOptions::new()
@@ -237,10 +242,9 @@ pub fn mint_and_pin_pubkey(
         .open(&lock_path)?;
     lock_file.lock_exclusive()?;
     // Double-checked: another process may have pinned between our unlocked check
-    // and acquiring the lock.
+    // and acquiring the lock. (lock_file drops on return, releasing the lock; the
+    // file itself stays.)
     if target.exists() {
-        drop(lock_file);
-        let _ = fs::remove_file(&lock_path);
         return Err(VerdictError::AlreadyPinned);
     }
 
@@ -285,12 +289,10 @@ pub fn mint_and_pin_pubkey(
 
     // (3) Rename secret FIRST (so it is durably visible before the pin marker).
     if let Err(e) = fs::rename(&secret_tmp, &secret_target) {
-        // Clean up both temps so a retry starts clean.
+        // Clean up both temps so a retry starts clean. (Lock file is left in place.)
         let _ = fs::remove_file(&pubkey_tmp);
         let _ = fs::remove_file(&secret_tmp);
         fsync_dir_best_effort(&slot);
-        drop(lock_file);
-        let _ = fs::remove_file(&lock_path);
         return Err(VerdictError::Io(e));
     }
 
@@ -299,18 +301,21 @@ pub fn mint_and_pin_pubkey(
     // if the target already exists — giving first-write-wins semantics as
     // defense-in-depth even though the flock above already serializes callers.
     // On success the temp's inode now has two links; we remove the temp name.
+    //
+    // The `AlreadyExists` arm is unreachable under a correct lock (we hold the
+    // exclusive flock and double-checked `target.exists()`), but if it ever fires
+    // we must NOT touch `secret_target` — it may belong to the winner. We only
+    // clean up our OWN unique temp and report `AlreadyPinned`. (Lock file stays.)
     match fs::hard_link(&pubkey_tmp, &target) {
         Ok(()) => {
             let _ = fs::remove_file(&pubkey_tmp);
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            // Another caller won the pin race (should not happen under the flock,
-            // but defensively correct). Roll back our secret so the slot is clean.
+            // Another caller won the pin race (unreachable under a correct lock).
+            // Do NOT remove secret_target — it may be the winner's secret. Only
+            // clean up our own pubkey temp.
             let _ = fs::remove_file(&pubkey_tmp);
-            let _ = fs::remove_file(&secret_target);
             fsync_dir_best_effort(&slot);
-            drop(lock_file);
-            let _ = fs::remove_file(&lock_path);
             return Err(VerdictError::AlreadyPinned);
         }
         Err(e) => {
@@ -319,17 +324,15 @@ pub fn mint_and_pin_pubkey(
             let _ = fs::rename(&secret_target, &secret_tmp);
             let _ = fs::remove_file(&pubkey_tmp);
             fsync_dir_best_effort(&slot);
-            drop(lock_file);
-            let _ = fs::remove_file(&lock_path);
             return Err(VerdictError::Io(e));
         }
     }
 
     // (5) Best-effort fsync of the parent directory so the renames are durable on disk.
     // This is a single-host deterrent layer; some filesystems no-op directory fsync.
+    // (lock_file drops here on implicit return, releasing the flock; the lock FILE
+    // remains on disk for future callers.)
     fsync_dir_best_effort(&slot);
-    drop(lock_file);
-    let _ = fs::remove_file(&lock_path);
 
     Ok(kp.signing)
 }
