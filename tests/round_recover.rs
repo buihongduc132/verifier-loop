@@ -198,6 +198,27 @@ fn status_needs_resume_state_consensus_fail_when_all_non_null_below_n() {
 }
 
 #[test]
+fn status_needs_recover_when_all_approve_but_no_completion_interrupted() {
+    // E2E-surfaced case: jewilo was killed mid-round AFTER both orphans wrote APPROVE but
+    // BEFORE the gather barrier wrote completion.json. Every slot is non-null and the
+    // raw APPROVE count reaches n — RECOVER can finish the round, so needs MUST be
+    // "recover" (NOT "resume"). Without this, STATUS would misdirect the caller to start
+    // a fresh round and discard the already-landed verdicts.
+    let (dir, goal_id) = fresh_goal();
+    let round = 1u32;
+    signed_approve(dir.path(), &goal_id, round, "v1");
+    signed_approve(dir.path(), &goal_id, round, "v2");
+    // Deliberately do NOT write completion.json (simulate the interrupted gather barrier).
+
+    let st = round_recover::status(dir.path(), &goal_id, &cfg()).unwrap();
+    assert_eq!(
+        st.needs,
+        round_recover::GoalNeeds::Recover,
+        "all-APPROVE-but-no-completion must be recoverable, not resume"
+    );
+}
+
+#[test]
 fn status_state_new_before_slots_exist() {
     // A fresh goal whose round-1 slots were never pre-created => state="new".
     let (dir, goal_id) = fresh_goal();

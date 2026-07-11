@@ -172,6 +172,7 @@ pub fn status(root: &Path, goal_id: &str, config: &store::Config) -> Result<Goal
 
     let mut slots: Vec<SlotStatus> = Vec::new();
     let mut any_null = false;
+    let mut raw_approve_count: u32 = 0;
     if slots_populated {
         for i in 0..config.m as usize {
             let vid = verifier_id(i);
@@ -186,6 +187,9 @@ pub fn status(root: &Path, goal_id: &str, config: &store::Config) -> Result<Goal
                 any_null = true;
                 slots.push(SlotStatus { id: vid, verdict: VerdictStatus::Null });
             } else {
+                if rec.status == VerdictStatus::Approve {
+                    raw_approve_count = raw_approve_count.saturating_add(1);
+                }
                 slots.push(SlotStatus { id: vid, verdict: rec.status });
             }
         }
@@ -195,11 +199,23 @@ pub fn status(root: &Path, goal_id: &str, config: &store::Config) -> Result<Goal
         .join(consensus::COMPLETION_FILE)
         .exists();
 
+    // `needs` derivation (LD7). The raw APPROVE count is a heuristic — STATUS is a
+    // read-only probe and does NOT run the signature gate (that is RECOVER's job via
+    // consensus::evaluate). So a state reported as potentially-passable here is still
+    // authoritatively decided by RECOVER. The key correctness fix: when every slot is
+    // non-null AND the raw APPROVE count already reaches `n`, the round WOULD pass —
+    // RECOVER can finish it (write completion.json) — so `needs` is `recover`, NOT
+    // `resume`. Only a genuinely-decided-failed round (below n) needs `resume`.
     let (state, needs) = if completion_exists {
         (GoalState::ConsensusPass, GoalNeeds::Done)
     } else if !slots_populated {
         (GoalState::New, GoalNeeds::Recover)
     } else if any_null {
+        (GoalState::InProgress, GoalNeeds::Recover)
+    } else if raw_approve_count >= config.n {
+        // All slots decided, APPROVE count reaches n, but no completion yet (the round
+        // was interrupted before the gather barrier wrote completion.json). RECOVER can
+        // finish it — so this is recoverable, not a failed round.
         (GoalState::InProgress, GoalNeeds::Recover)
     } else {
         (GoalState::ConsensusFail, GoalNeeds::Resume)

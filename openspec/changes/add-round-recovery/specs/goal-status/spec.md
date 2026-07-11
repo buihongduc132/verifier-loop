@@ -11,8 +11,10 @@ The CLI SHALL provide a `STATUS <goalId>` top-level command that emits a JSON ob
 ### Requirement: STATUS needs-field tells an outer agent what to do next
 The `needs` field SHALL be one of `"done"`, `"recover"`, or `"resume"`, derived as follows:
 - `"done"` — a `completion.json` exists for the current round.
-- `"recover"` — no completion AND at least one slot is null (a live orphan may still emit a verdict).
-- `"resume"` — no completion AND every slot is non-null (the round is decided but failed; a fresh round is required).
+- `"recover"` — no completion AND either (a) at least one slot is null (a live orphan may still emit a verdict), OR (b) every slot is non-null and the APPROVE count already reaches `n` (the round was interrupted after the verdicts landed but before `completion.json` was written — RECOVER can finish it).
+- `"resume"` — no completion AND every slot is non-null AND the APPROVE count is below `n` (the round is decided but failed; a fresh round is required).
+
+Note: STATUS is a read-only probe and does NOT run the signature gate (that is RECOVER's job via `consensus::evaluate`). The APPROVE count here is a heuristic; RECOVER authoritatively decides whether the round passes.
 
 #### Scenario: needs=done after consensus
 - **WHEN** round 1 has `completion.json`
