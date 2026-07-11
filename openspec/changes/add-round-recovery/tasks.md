@@ -15,7 +15,8 @@ from `flow/findings/round-recovery/2026-07-12-locked-decisions.yaml`.
       `jewilo RESUME` subprocess while the first holds the lock exits non-zero with
       "goal busy" on stderr.
 - [x] 1.3 GREEN: add `src/round_recover/mod.rs` with `GoalLock` RAII guard over
-      `fs4::fs_std::FileExt::lock_exclusive` on `goals/<goalId>/.lock`. Add
+      `fs4::fs_std::FileExt::try_lock_exclusive` (fail-fast, non-blocking) on
+      `goals/<goalId>/.lock`. Only `WouldBlock` maps to `GoalBusy`; other errors surface as `Io`. Add
       `RoundRecoverError::GoalBusy`. Register `pub mod round_recover;` in `src/lib.rs`.
 - [x] 1.4 Coverage gate on touched files.
 

@@ -121,6 +121,24 @@ fn goal_lock_second_concurrent_acquire_in_same_process_fails_busy() {
 }
 
 #[test]
+fn goal_lock_unknown_goal_returns_goal_not_found_without_phantom_dir() {
+    // acquire_exclusive must NOT create_dir_all for an unknown goalId (that would mint a
+    // phantom goal dir holding only .lock). It returns GoalNotFound instead.
+    let dir = tempfile::tempdir().unwrap();
+    let bogus = "00000000-0000-0000-0000-000000000000";
+    let err = round_recover::GoalLock::acquire_exclusive(dir.path(), bogus);
+    assert!(
+        matches!(err, Err(round_recover::RoundRecoverError::GoalNotFound)),
+        "unknown goal must fail with GoalNotFound, got: {err:?}"
+    );
+    // And no phantom goal dir was created.
+    assert!(
+        !goal::goal_dir(dir.path(), bogus).exists(),
+        "acquire_exclusive must not create a phantom goal dir"
+    );
+}
+
+#[test]
 fn goal_lock_drop_releases_so_later_acquire_succeeds() {
     // The lock must not poison the goal: once the guard drops, a fresh acquire works.
     let (dir, goal_id) = fresh_goal();
@@ -273,7 +291,7 @@ fn recover_harvests_verdict_that_becomes_non_null_mid_poll() {
     // Simulate the orphan writing its signed APPROVE shortly after recover starts.
     let root = dir.path().to_path_buf();
     let gid = goal_id.clone();
-    std::thread::spawn(move || {
+    let writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));
         let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, &sk_v2);
     });
@@ -285,6 +303,8 @@ fn recover_harvests_verdict_that_becomes_non_null_mid_poll() {
         Duration::from_secs(5),
     )
     .unwrap();
+    // Join the background writer so the test does not leak the thread into other tests.
+    let _ = writer.join();
 
     match outcome {
         round_recover::RecoverOutcome::ConsensusPassed(_) => {
@@ -358,12 +378,14 @@ fn recover_does_not_spawn_or_re_render() {
 
     let root = dir.path().to_path_buf();
     let gid = goal_id.clone();
-    std::thread::spawn(move || {
+    let writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));
         let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, &sk_v2);
     });
 
     let _ = round_recover::recover(dir.path(), &goal_id, &cfg(), Duration::from_secs(5)).unwrap();
+    // Join the background writer so the test does not leak the thread into other tests.
+    let _ = writer.join();
 
     // recover must not have written any prompt file for the round.
     let round_dir = goal::goal_dir(dir.path(), &goal_id)

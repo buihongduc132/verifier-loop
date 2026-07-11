@@ -82,7 +82,12 @@ impl GoalLock {
     /// for the guard's lifetime; `Drop` unlocks + closes.
     pub fn acquire_exclusive(root: &Path, goal_id: &str) -> Result<GoalLock, RoundRecoverError> {
         let gdir = goal::goal_dir(root, goal_id);
-        std::fs::create_dir_all(&gdir)?;
+        // Fail closed if the goal does not exist — `create_dir_all` here would otherwise
+        // mint a phantom goal dir (holding only `.lock`) for a bad/unknown goalId. RESUME
+        // and RECOVER must only ever lock goals that NEW already created.
+        if !gdir.exists() {
+            return Err(RoundRecoverError::GoalNotFound);
+        }
         let lock_path = gdir.join(GOAL_LOCK_FILE);
         let file = OpenOptions::new()
             .create(true)
@@ -279,8 +284,8 @@ pub enum RecoverOutcome {
 ///
 /// Acquires the exclusive goal lock (LD5), then polls each slot's `verdict.json` for the
 /// current round up to `timeout`, re-evaluating consensus after each poll. On a pass it
-/// writes `completion.json` exactly as a normal round does (reusing `consensus::evaluate`
-/// + `compute_hash` + `write_completion` unchanged). Never spawns, kills, re-renders, or
+/// writes `completion.json` exactly as a normal round does, reusing `consensus::evaluate`,
+/// `compute_hash`, and `write_completion` unchanged. Never spawns, kills, re-renders, or
 /// re-captures (the signature takes neither a prompt nor a snapshot — LD10/LD11). A null
 /// slot after timeout degrades to `StillNullAfter` with `RESUME N+1` guidance (no key
 /// minted, no verdict fabricated, fail-closed D9).

@@ -170,10 +170,13 @@ fn status_prints_json_with_documented_fields() {
     assert!(json["state"].is_string());
     assert!(json["needs"].is_string());
     assert!(json["slots"].is_array());
-    // goal-status spec: every slot has an id AND a verdict field (this goal's single
-    // slot approved, so verdict must be the APPROVE string).
+    // goal-status spec: every slot has an id AND a verdict field, and this goal's single
+    // slot approved, so verdict must be the canonical APPROVE string (not just present).
     let slot = &json["slots"][0];
-    assert!(slot.get("verdict").is_some(), "slot must carry a verdict key: {slot}");
+    assert_eq!(
+        slot["verdict"], "APPROVE",
+        "approved slot must serialize verdict as APPROVE: {slot}"
+    );
 }
 
 // ===========================================================================
