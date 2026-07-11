@@ -28,5 +28,12 @@ git diff (truncated to {{gitDiffMaxChars}} chars):
 # Your duty
 
 Review the work above against the goal. Hunt for omissions, overreach, and unproven claims.
-When you have decided, register your verdict via the verifier-verdict CLI
-(approve [--notes "..."] / reject --notes "..."). Your verdict is your accountability.
+When you have decided, register your verdict via the verifier-verdict CLI.
+
+```bash
+# Approve (notes are optional):
+verifier-verdict approve --notes "evidence summary: ..."
+
+# Reject (notes are REQUIRED):
+verifier-verdict reject --notes "what is wrong, with file:line references"
+```

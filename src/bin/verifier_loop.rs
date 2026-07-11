@@ -117,12 +117,23 @@ fn run_round(
     let record = verifier_loop::goal::load(root, goal_id).map_err(|e| format!("goal load: {e}"))?;
 
     // Frozen artifact snapshot (§9): captured once per round from cwd. Fails closed if cwd
-    // is not a git work tree (V* must never receive a silently empty snapshot).
+    // is not a git work tree (V* must never receive a silently empty snapshot). The
+    // fileEditTimes block is capped to Config.file_edit_times_max_chars (D1).
     let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-    let snapshot = verifier_loop::prompt::capture_snapshot(&cwd, config.git_diff_max_chars)
-        .map_err(|e| format!("snapshot capture failed: {e}"))?;
+    let snapshot = verifier_loop::prompt::capture_snapshot_with(
+        &cwd,
+        config.git_diff_max_chars,
+        config.file_edit_times_max_chars,
+    )
+    .map_err(|e| format!("snapshot capture failed: {e}"))?;
 
-    let adapter = resolve_adapter(&config)?;
+    // Cap the --context input to Config.context_max_chars (D3).
+    let context_capped: Option<String> = record
+        .context
+        .as_deref()
+        .map(|c| verifier_loop::prompt::cap_context(c, config.context_max_chars).0);
+
+    let adapter = resolve_adapter(config)?;
 
     // Render + persist the verifier prompt per verifier slot (correct audit trail). The
     // spawn layer takes a single prompt per round (its API), so the round's spawned
@@ -145,7 +156,7 @@ fn run_round(
             round,
             prev_round: prev_round_of(round, kind),
             goal_text: &record.goal_text,
-            context: record.context.as_deref(),
+            context: context_capped.as_deref(),
             fix_notes,
             prev_notes: prev_notes.as_deref(),
             cwd: &snapshot.cwd,
@@ -166,6 +177,15 @@ fn run_round(
         rendered_prompts.push(rendered);
     }
 
+    // Prompt-budget warning (D4): if the rendered prompt exceeds Config.prompt_budget_bytes,
+    // emit a per-section breakdown to stderr. Does NOT block spawn.
+    if let Some(warning) = verifier_loop::prompt::budget_warning(
+        rendered_prompts.first().map(|s| s.as_str()).unwrap_or(""),
+        config.prompt_budget_bytes as usize,
+    ) {
+        eprint!("{warning}");
+    }
+
     // KNOWN LIMITATION: spawn_round / spawn_resume accept a single prompt per round, so for
     // m>1 every verifier receives the v1 render (verifier identity still arrives via env).
     // The per-verifier initial-prompt.txt files above are correct. A per-verifier spawn API
@@ -181,7 +201,7 @@ fn run_round(
         root,
         goal_id,
         round,
-        config: &config,
+        config,
         prompt: &prompt,
         adapter: &adapter,
     };

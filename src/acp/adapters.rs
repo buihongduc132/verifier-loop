@@ -40,18 +40,13 @@ use super::parser::AcpError;
 /// The JSON representation is kebab-case: `"stdin"` <-> `Stdin`,
 /// `"goal-file"` <-> `GoalFile`. Unknown values are rejected by serde
 /// (fail-closed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {
+    /// Built-in adapters default to the stdin transport (design D1/D6).
+    #[default]
     Stdin,
     GoalFile,
-}
-
-impl Default for Transport {
-    fn default() -> Self {
-        // Built-in adapters default to the stdin transport (design D1/D6).
-        Self::Stdin
-    }
 }
 
 /// A backend adapter: a pair of spawn/resume command templates plus the prompt

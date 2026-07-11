@@ -249,6 +249,18 @@ pub fn truncate_diff(s: &str, max_chars: u64) -> (String, bool) {
 /// non-zero (other than an empty diff) is a hard error — V* must never receive a silently
 /// empty snapshot, which would let A hide uncommitted regressions.
 pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptError> {
+    capture_snapshot_with(cwd, max_chars, 8_000)
+}
+
+/// Same as [`capture_snapshot`] but with explicit caps for the diff (`max_chars`) and
+/// the fileEditTimes block (`file_edit_times_max_chars`). Prompt-bloat fix D1 threads
+/// the latter from `Config.file_edit_times_max_chars`.
+/// `capture_snapshot_with` body (shared by the single-cap + dual-cap entrypoints).
+pub fn capture_snapshot_with(
+    cwd: &Path,
+    max_chars: u64,
+    file_edit_times_max_chars: u64,
+) -> Result<Snapshot, PromptError> {
     // Fail closed if this is not a git work tree.
     git_check(cwd)?;
 
@@ -276,7 +288,7 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
         Err(e) => return Err(e),
     };
     let (git_diff, truncated) = truncate_diff(&raw_diff, max_chars);
-    let file_edit_times = capture_file_edit_times(cwd)?;
+    let file_edit_times = capture_file_edit_times(cwd, file_edit_times_max_chars)?;
 
     Ok(Snapshot {
         cwd: cwd.to_string_lossy().into_owned(),
@@ -341,15 +353,29 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<String, PromptError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Captures `<path>:<mtime_secs>` for every tracked file. Best-effort per file: a missing
-/// or unreadable file is skipped, never fatal to the whole snapshot.
-fn capture_file_edit_times(cwd: &Path) -> Result<String, PromptError> {
-    let listing = git_capture(cwd, &["ls-files"])?;
-    let mut lines = Vec::new();
-    for rel in listing.lines() {
+/// Captures `<path>:<mtime_secs>` for **changed files only** (`git status --porcelain`,
+/// not `git ls-files`). Best-effort per file: a missing or unreadable file is skipped,
+/// never fatal to the whole snapshot. The block is byte-capped to `max_chars` with an
+/// indicator when exceeded (prompt-bloat fix D1).
+///
+/// `git status --porcelain` lines look like `xy <path>` where `xy` is the 2-char status.
+/// Untracked files appear as `?? <path>`. We emit one `<path>:<mtime>` line per changed
+/// (tracked-modified/staged/untracked) file.
+pub fn capture_file_edit_times(cwd: &Path, max_chars: u64) -> Result<String, PromptError> {
+    let status = git_capture(cwd, &["status", "--porcelain"])?;
+    let mut lines: Vec<String> = Vec::new();
+    for line in status.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        // `git status --porcelain` format: `XY <path>` (3-byte prefix: 2 status chars + space).
+        // For renames the path may contain ` -> ` but we take the full remainder.
+        let rel = line[3..].trim();
         if rel.is_empty() {
             continue;
         }
+        // A rename (`R`) uses `old -> new`; take the new path (after ` -> `).
+        let rel = rel.rsplit(" -> ").next().unwrap_or(rel);
         let abs = cwd.join(rel);
         match fs::metadata(&abs).and_then(|m| m.modified()) {
             Ok(modified) => {
@@ -365,10 +391,74 @@ fn capture_file_edit_times(cwd: &Path) -> Result<String, PromptError> {
             }
         }
     }
-    Ok(lines.join("\n"))
+    let joined = lines.join("\n");
+    let (capped, _) = truncate_diff(&joined, max_chars);
+    Ok(capped)
 }
 
-/// Persists the rendered prompt to `rounds/<round>/<verifierId>/initial-prompt.txt`,
+/// Truncates the `--context` input to `max_chars` characters, appending
+/// [`TRUNCATION_INDICATOR`] when truncated. Prompt-bloat fix D3. Mirrors
+/// [`truncate_diff`] semantics (char-boundary-safe).
+pub fn cap_context(s: &str, max_chars: u64) -> (String, bool) {
+    truncate_diff(s, max_chars)
+}
+
+/// Returns a per-section budget warning when `rendered` exceeds `budget` bytes, else
+/// `None`. The warning does NOT block the spawn — it is informational for the operator.
+/// Prompt-bloat fix D4.
+///
+/// The warning cites the total rendered size and the budget, plus a coarse breakdown by
+/// section heading (the function scans for `# `-prefixed headings and reports their byte
+/// spans). The breakdown is best-effort: if no headings are present it still reports the
+/// total vs budget.
+pub fn budget_warning(rendered: &str, budget: usize) -> Option<String> {
+    let total = rendered.len();
+    if total <= budget {
+        return None;
+    }
+    let mut msg = format!(
+        "warning: rendered verifier prompt is {total} bytes, over the {budget}-byte budget (will still spawn).\n",
+    );
+    msg.push_str("section breakdown:\n");
+    // Best-effort: split on `# ` headings and report each section's size.
+    let mut sections: Vec<(&str, usize)> = Vec::new();
+    let bytes = rendered.as_bytes();
+    let mut start = 0;
+    let mut heading: Option<&str> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' && (i + 1 < bytes.len() && bytes[i + 1] == b' ')
+            && (i == 0 || bytes[i - 1] == b'\n')
+        {
+            // close previous section
+            if let Some(h) = heading {
+                sections.push((h, i - start));
+            }
+            // find end of heading line
+            let line_end = bytes[i..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| i + p)
+                .unwrap_or(bytes.len());
+            start = i;
+            heading = Some(&rendered[i + 2..line_end]);
+            i = line_end;
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(h) = heading {
+        sections.push((h, bytes.len() - start));
+    }
+    if sections.is_empty() {
+        msg.push_str(&format!("  (no headings detected) total = {total} bytes\n"));
+    } else {
+        for (h, sz) in sections {
+            msg.push_str(&format!("  # {h}: ~{sz} bytes\n"));
+        }
+    }
+    Some(msg)
+}
 /// forming part of the per-verifier trust trail.
 pub fn write_initial_prompt(
     goal_root: &Path,

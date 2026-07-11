@@ -197,13 +197,20 @@ fn parallel_spawn_does_not_serialize() {
     let script = write_script(
         dir.path(),
         "slow.sh",
-        r#"#!/bin/sh
+        &format!(
+            r#"#!/bin/sh
 sleep 1
 cat <<'EOF'
-{"type":"session","id":"s"}
-{"type":"agent_end","messages":[],"willRetry":false}
+{{"type":"session","id":"s"}}
+{{"type":"agent_end","messages":[],"willRetry":false}}
 EOF
+# Write a verdict so the new verdict-enforcement nudge loop does not fire;
+# this test is about parallel spawn timing, not about verdict enforcement.
+SLOT="$VERIFIER_LOOP_HOME/goals/$VERIFIER_LOOP_GOAL_ID/rounds/$VERIFIER_LOOP_ROUND/$VERIFIER_LOOP_VERIFIER_ID"
+mkdir -p "$SLOT"
+printf '%s\n' '{{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}}' > "$SLOT/verdict.json"
 "#,
+        ),
     );
     let adapter = script_adapter(&script);
 
@@ -859,12 +866,23 @@ fn chatty_stderr_is_bounded_to_cap() {
         &format!(
             r#"#!/bin/sh
 # Write {oversize} bytes of noise, then the real error at the end.
-dd if=/dev/zero bs=1024 count={oversize_kb} 2>/dev/null | tr '\0' 'x' >&2
+# Use printf in a loop (more reliable under load than `dd | tr` whose pipeline
+# can lose the final echo under pipe-buffering races).
+i=0
+while [ "$i" -lt {iters} ]; do
+  printf '{chunk}' >&2
+  i=$((i + 1))
+done
 echo "FATAL: the actual error is here" >&2
+# Write a verdict so the new verdict-enforcement nudge loop does not re-run this
+# noisy script and overwrite the bounded stderr this test is inspecting.
+SLOT="$VERIFIER_LOOP_HOME/goals/$VERIFIER_LOOP_GOAL_ID/rounds/$VERIFIER_LOOP_ROUND/$VERIFIER_LOOP_VERIFIER_ID"
+mkdir -p "$SLOT"
+printf '%s\n' '{{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}}' > "$SLOT/verdict.json"
 exit 1
 "#,
-            oversize = oversize,
-            oversize_kb = oversize / 1024,
+            iters = oversize / 1024,
+            chunk = "x".repeat(1024),
         ),
     );
     let adapter = script_adapter(&script);

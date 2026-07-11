@@ -112,6 +112,8 @@ cat <<'EOF'
 {"type":"session","id":"stdin-sid"}
 {"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}]}],"willRetry":false}
 EOF
+# 4. Write a verdict so the verdict-enforcement nudge loop (D5) does NOT re-run.
+printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$VDIR/verdict.json"
 "#,
     );
     let adapter = stdin_script_adapter(&script);
@@ -173,6 +175,7 @@ cat <<'EOF'
 {"type":"session","id":"big-sid"}
 {"type":"agent_end","messages":[],"willRetry":false}
 EOF
+printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$VDIR/verdict.json"
 "#,
     );
     let adapter = stdin_script_adapter(&script);
@@ -244,6 +247,8 @@ cat <<'EOF'
 {"type":"session","id":"epipe-after-sid"}
 {"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done-early"}]}],"willRetry":false}
 EOF
+# Write a verdict so the nudge loop (D5) does NOT re-run and overwrite the capture.
+printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$VDIR/verdict.json"
 # Exit 0 without draining the rest of stdin → orchestrator write hits EPIPE.
 exit 0
 "#,
