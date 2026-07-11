@@ -52,14 +52,7 @@ placeholder (`{status: null}`) carries no signature and is never counted.
 only "set the env var and write the file" — anyone with filesystem write access could
 trivially impersonate any V\*. After this change, Mallory must additionally **possess the
 slot's pinned signing secret** to produce a verdict that survives consensus signature
-verification. The secret is persisted to `<slot>/verifier-secret.hex` (mode 0600,
-first-write-wins) at spawn time so the verdict-enforcement nudge loop (D5) and the
-compaction-recovery resume (D6) — which spawn NEW verifier processes — can re-inject the
-SAME secret that signed the pinned pubkey to harvest a signed verdict on resume. This
-persists the secret next to the pinned pubkey in the slot dir; on a single host this is
-equivalent exposure to the existing forgeability concession in §(b) below (any process
-with read access to the slot dir can forge). It is a **deterrent + detection layer**, not
-a prevention guarantee.
+verification. (See the persistence mechanism described at the top of §(a) above.)
 
 This raises the bar from "any write access" to "must possess the per-verifier spawn-time
 secret." It is a **deterrent + detection layer**, not a prevention guarantee.

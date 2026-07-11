@@ -224,7 +224,20 @@ export VERIFIER_LOOP_HOME="$HOME2"
 export VERIFIER_LOOP_BACKEND_CMD="$NUDGE_STUB"
 cd "$REPO2"
 
-"$VL" NEW "smoke test: verdict enforcement" 2>"$SMOKE_DIR/stderr2.txt" || true
+OUT2=$("$VL" NEW "smoke test: verdict enforcement" 2>"$SMOKE_DIR/stderr2.txt")
+VL2_RC=$?
+if [ "$VL2_RC" -ne 0 ]; then
+    echo "    jewilo NEW failed (exit $VL2_RC):"
+    cat "$SMOKE_DIR/stderr2.txt"
+    no "jewilo NEW exit code 0 (verdict enforcement consensus)"
+else
+    ok "jewilo NEW exit code 0 (verdict enforcement consensus)"
+fi
+if echo "$OUT2" | grep -qE '[0-9]{6}-[0-9a-f]{8}'; then
+    ok "jewilo NEW produced a completion hash (verdict enforcement consensus passed)"
+else
+    no "jewilo NEW did not produce a completion hash (verdict enforcement)"
+fi
 GOAL_ID=$(ls "$HOME2/goals" 2>/dev/null | head -1 || echo "")
 if [ -z "$GOAL_ID" ]; then
     no "no goal dir created for verdict enforcement test"
@@ -304,7 +317,20 @@ export VERIFIER_LOOP_HOME="$HOME3"
 export VERIFIER_LOOP_BACKEND_CMD="$COMPACT_STUB"
 cd "$REPO3"
 
-"$VL" NEW "smoke test: compaction recovery" 2>"$SMOKE_DIR/stderr3.txt" || true
+OUT3=$("$VL" NEW "smoke test: compaction recovery" 2>"$SMOKE_DIR/stderr3.txt")
+VL3_RC=$?
+if [ "$VL3_RC" -ne 0 ]; then
+    echo "    jewilo NEW failed (exit $VL3_RC):"
+    cat "$SMOKE_DIR/stderr3.txt"
+    no "jewilo NEW exit code 0 (compaction recovery consensus)"
+else
+    ok "jewilo NEW exit code 0 (compaction recovery consensus)"
+fi
+if echo "$OUT3" | grep -qE '[0-9]{6}-[0-9a-f]{8}'; then
+    ok "jewilo NEW produced a completion hash (compaction recovery consensus passed)"
+else
+    no "jewilo NEW did not produce a completion hash (compaction recovery)"
+fi
 GOAL_ID=$(ls "$HOME3/goals" 2>/dev/null | head -1 || echo "")
 if [ -z "$GOAL_ID" ]; then
     no "no goal dir created for compaction recovery test"

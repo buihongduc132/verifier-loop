@@ -416,6 +416,36 @@ fn flush_meta(
     Ok(updated)
 }
 
+/// Read-modify-write `meta.json`: advance ONLY the loop counters
+/// (`nudge_attempts` / `recovery_attempts` / `compaction_observed`). Leaves `sid` and
+/// `turns_used` untouched. Called BEFORE a nudge/recovery child is spawned so that a
+/// crash / signal / timeout mid-spawn leaves an accurate audit trail in `meta.json`
+/// (the post-run persist in `reap_nudge_child` only fires after the child exits, so
+/// without this pre-spawn checkpoint a mid-spawn crash would leave the counters stale).
+fn checkpoint_meta(
+    vdir: &Path,
+    nudge_attempts: u32,
+    recovery_attempts: u32,
+    compaction_observed: bool,
+) -> Result<(), SpawnError> {
+    let existing = read_meta(vdir)?.unwrap_or(VerifierMeta {
+        sid: None,
+        turns_used: 0,
+        nudge_attempts: 0,
+        compaction_observed: false,
+        recovery_attempts: 0,
+    });
+    let updated = VerifierMeta {
+        sid: existing.sid,
+        turns_used: existing.turns_used,
+        nudge_attempts,
+        compaction_observed: existing.compaction_observed || compaction_observed,
+        recovery_attempts,
+    };
+    write_meta(vdir, &updated)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // §5 — fresh spawn round
 // ---------------------------------------------------------------------------
@@ -792,6 +822,13 @@ async fn gather(
                             recovery_attempts += 1;
                         }
                         nudge_attempts += 1;
+
+                        // Persist the incremented counters to meta.json BEFORE spawning
+                        // the nudge/recovery child. A crash / signal / timeout mid-spawn
+                        // would otherwise leave meta.json stale (the post-run persist in
+                        // `reap_nudge_child` only fires after the child exits). This makes
+                        // the audit-trail claim accurate even on a mid-spawn crash.
+                        checkpoint_meta(&vdir, nudge_attempts, recovery_attempts, any_compaction)?;
 
                         let (nudge_child, nudge_writer, _nudge_guard) =
                             spawn_nudge_child(
@@ -1259,5 +1296,38 @@ mod tests {
             d,
             Path::new("/tmp/x/goals/g1/rounds/2")
         );
+    }
+
+    // F2 (cubic r2): checkpoint_meta persists the loop counters BEFORE the nudge child
+    // is spawned so a crash mid-spawn leaves an accurate audit trail. A unit test on the
+    // helper pins the behaviour: counters advance and sid/turns_used are untouched
+    // (the post-run reap path owns those fields).
+    #[test]
+    fn checkpoint_meta_persists_counters_without_advancing_turns_or_sid() {
+        let dir = tempfile::tempdir().unwrap();
+        let vdir = dir.path();
+        pre_create_verifier_dir(vdir);
+
+        // Seed an existing sid + turns_used so we can prove checkpoint leaves them alone.
+        let seeded = VerifierMeta {
+            sid: Some("pre-existing-sid".into()),
+            turns_used: 3,
+            nudge_attempts: 0,
+            compaction_observed: false,
+            recovery_attempts: 0,
+        };
+        write_meta(vdir, &seeded).unwrap();
+
+        // Simulate the loop having just incremented nudge_attempts + recovery_attempts
+        // and about to spawn a child that gets killed mid-spawn.
+        checkpoint_meta(vdir, 2, 1, true).unwrap();
+
+        let m = read_meta(vdir).unwrap().expect("meta.json present after checkpoint");
+        assert_eq!(m.nudge_attempts, 2, "nudge_attempts persisted pre-spawn");
+        assert_eq!(m.recovery_attempts, 1, "recovery_attempts persisted pre-spawn");
+        assert!(m.compaction_observed, "compaction_observed OR-ed into meta");
+        // sid + turns_used MUST be untouched (reap owns them).
+        assert_eq!(m.sid.as_deref(), Some("pre-existing-sid"));
+        assert_eq!(m.turns_used, 3, "turns_used must NOT advance at checkpoint time");
     }
 }

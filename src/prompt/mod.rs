@@ -389,14 +389,17 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<String, PromptError> {
 ///
 /// `git status --porcelain -z` (NUL-delimited, no C-quoting) records look like:
 ///   - single path: `XY <path>\0`
-///   - rename:      `XY <old>\0<new>\0`  (two consecutive NUL-terminated paths)
+///   - rename:      `XY <new/dest>\0<old/source>\0`  (destination FIRST, then source;
+///     this is the OPPOSITE order of the human-readable `->` form)
 ///
 /// We parse the NUL-delimited stream carefully so pathnames containing spaces or the
 /// literal substring ` -> ` are never mis-split.
 pub fn capture_file_edit_times(cwd: &Path, max_chars: u64) -> Result<String, PromptError> {
     // Use `-z` (NUL-delimited) so pathnames containing spaces or the literal ` -> `
     // are never C-quoted or mis-split by the `rsplit(" -> ")` heuristic. Each record
-    // is `XY <path>\0` for single-path statuses, or `XY <old>\0<new>\0` for renames.
+    // is `XY <path>\0` for single-path statuses, or `XY <new/dest>\0<old/source>\0`
+    // for renames (note: under `-z` the NEW/destination path comes FIRST, then the
+    // OLD/source — the opposite of the human-readable `old -> new` form).
     let status = git_capture(cwd, &["status", "--porcelain", "-z"])?;
     let mut lines: Vec<String> = Vec::new();
     let mut records = status.split('\u{0000}').peekable();
@@ -409,10 +412,11 @@ pub fn capture_file_edit_times(cwd: &Path, max_chars: u64) -> Result<String, Pro
         let status_chars = &record[..2];
         let path_part = &record[3..];
         // Renames (R/C status in either column) emit TWO NUL-delimited entries under
-        // `-z`: the format is `XY <new_path>\0<old_path>\0`. So the CURRENT record's
-        // path is the NEW path (the post-rename file that exists on disk and that we
-        // want to stat); the NEXT record is the OLD path and must be consumed and
-        // discarded so it is not treated as a standalone changed file.
+        // `-z`: the format is `XY <new/dest>\0<old/source>\0` (destination path FIRST,
+        // then source). So the CURRENT record's path is the NEW/destination path (the
+        // post-rename file that exists on disk and that we want to stat); the NEXT
+        // record is the OLD/source path and must be consumed and discarded so it is
+        // not treated as a standalone changed file.
         let path = if is_rename_status(status_chars) {
             // Consume + discard the trailing old-path record.
             let _old = records.next();
@@ -444,8 +448,9 @@ pub fn capture_file_edit_times(cwd: &Path, max_chars: u64) -> Result<String, Pro
 }
 
 /// Returns true if a porcelain `XY` status (two status characters) denotes a rename
-/// (R in either the staged-X or working-tree-Y column). A rename record is followed
-/// by a second NUL-delimited path (the new path) under `-z`.
+/// (R in either the staged-X or working-tree-Y column). A rename record under `-z` is
+/// followed by a second NUL-delimited path: `XY <new/dest>\0<old/source>\0` — the
+/// NEW/destination path comes FIRST, the OLD/source path comes SECOND.
 fn is_rename_status(xy: &str) -> bool {
     xy.starts_with('R') || xy.starts_with('C') || xy.get(1..2) == Some("R") || xy.get(1..2) == Some("C")
 }
