@@ -60,6 +60,32 @@ pub struct Config {
     /// Empty/whitespace-only goalText is ALWAYS an error regardless of this value.
     #[serde(rename = "minGoalChars", default)]
     pub min_goal_chars: u64,
+    /// Byte cap on the `fileEditTimes` block (scoped to changed files). When the
+    /// changed-files block exceeds this cap it is truncated with an indicator.
+    /// Prompt-bloat fix D1 (default 8000).
+    #[serde(rename = "fileEditTimesMaxChars", default = "default_file_edit_times_max_chars")]
+    pub file_edit_times_max_chars: u64,
+    /// Char cap on the `--context` input. Over-cap context is truncated with an
+    /// indicator. Prompt-bloat fix D3 (default 20000).
+    #[serde(rename = "contextMaxChars", default = "default_context_max_chars")]
+    pub context_max_chars: u64,
+    /// Rendered-prompt byte budget. When the total rendered prompt exceeds this, a
+    /// per-section warning is emitted to stderr (does NOT block spawn). Prompt-bloat
+    /// fix D4 (default 50000).
+    #[serde(rename = "promptBudgetBytes", default = "default_prompt_budget_bytes")]
+    pub prompt_budget_bytes: u64,
+}
+
+fn default_file_edit_times_max_chars() -> u64 {
+    8_000
+}
+
+fn default_context_max_chars() -> u64 {
+    20_000
+}
+
+fn default_prompt_budget_bytes() -> u64 {
+    50_000
 }
 
 impl Default for Config {
@@ -73,6 +99,9 @@ impl Default for Config {
             verifier_timeout_sec: 1800,
             verifier_prompt_file: None,
             min_goal_chars: 0,
+            file_edit_times_max_chars: 8_000,
+            context_max_chars: 20_000,
+            prompt_budget_bytes: 50_000,
         }
     }
 }
@@ -129,6 +158,9 @@ mod tests {
             verifier_timeout_sec: 99,
             verifier_prompt_file: None,
             min_goal_chars: 0,
+            file_edit_times_max_chars: 8_000,
+            context_max_chars: 20_000,
+            prompt_budget_bytes: 50_000,
         };
         let j = serde_json::to_string(&cfg).unwrap();
         // camelCase keys must appear verbatim (this is the on-disk contract).

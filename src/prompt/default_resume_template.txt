@@ -37,4 +37,12 @@ git diff (truncated to {{gitDiffMaxChars}} chars):
 
 The author claims to have addressed prior findings. Verify the fixes are real and complete.
 Hunt for new regressions introduced by the fixes. Register your verdict via the
-verifier-verdict CLI (approve [--notes "..."] / reject --notes "...").
+verifier-verdict CLI.
+
+```bash
+# Approve (notes are optional):
+verifier-verdict approve --notes "evidence summary: ..."
+
+# Reject (notes are REQUIRED):
+verifier-verdict reject --notes "what is wrong, with file:line references"
+```
