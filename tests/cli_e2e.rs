@@ -675,14 +675,17 @@ fn new_with_verifier_prompt_file_prepends_custom_text_to_initial_prompt() {
         prompt.contains("{{goalText}}"),
         "custom file must be RAW STATIC text (no {{var}} expansion): {prompt}"
     );
-    // (4) The baked-in default policy text is still present after the separator.
-    let baked = verifier_loop::prompt::default_template();
-    // The baked-in embeds the policy line used by the unit tests; assert a stable substring.
+    // (4) Design D2 (override semantics): when a custom verifierPromptFile is set, the
+    // built-in VERIFIER_POLICY block MUST be ABSENT — the custom file REPLACES it, not
+    // supplements it. Asserting absence here pins the spec's mutual-exclusivity rule.
     assert!(
-        prompt.contains("Verifier Detective Policy"),
-        "baked-in policy text must follow the custom preamble: {prompt}"
+        !prompt.contains("Verifier Detective Policy (canonical, from verifier-loop skill)"),
+        "built-in policy heading MUST be absent when a custom verifierPromptFile is set (D2 override semantics): {prompt}"
     );
-    let _ = baked; // pin the symbol reference (compile-time RED if default_template moves).
+    assert!(
+        !prompt.contains("<_unfold.md>"),
+        "built-in policy marker `<_unfold.md>` MUST be absent when a custom verifierPromptFile is set (D2): {prompt}"
+    );
 }
 
 #[test]
@@ -745,6 +748,16 @@ fn resume_with_verifier_prompt_file_prepends_custom_text_to_initial_prompt() {
     assert!(
         prompt.starts_with(&format!("{custom}---\n")),
         "separator `\n---\n` between custom file and baked-in resume default missing: {prompt}"
+    );
+    // Design D2 (override semantics): the built-in policy MUST be absent on RESUME too
+    // when a custom verifierPromptFile is set.
+    assert!(
+        !prompt.contains("Verifier Detective Policy (canonical, from verifier-loop skill)"),
+        "built-in policy heading MUST be absent on RESUME when a custom verifierPromptFile is set (D2): {prompt}"
+    );
+    assert!(
+        !prompt.contains("<_unfold.md>"),
+        "built-in policy marker `<_unfold.md>` MUST be absent on RESUME when a custom verifierPromptFile is set (D2): {prompt}"
     );
 }
 

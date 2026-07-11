@@ -35,6 +35,40 @@ use std::path::{Path, PathBuf};
 use verifier_loop::{acp, goal, spawn, store};
 
 // ---------------------------------------------------------------------------
+// Panic-safe env-var drop-guard (F5). `std::env::set_var` followed by a manual
+// `remove_var` at the end of a test leaks the var to sibling tests if the test
+// panics mid-way. This guard captures the original value at construction and
+// restores/removes the var on Drop, so cleanup is panic-safe regardless of where
+// the test unwinds. Used for every `set_var` in this file.
+// ---------------------------------------------------------------------------
+struct EnvGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    /// Capture the current value of `key` (if any) and then set it to `new_value`.
+    fn set(key: &'static str, new_value: &str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: tests in this file are single-threaded with respect to this env var;
+        // there is no concurrent reader of VERIFIER_LOOP_VERDICT_BIN within a single
+        // test process. set_var/remove_var are only `unsafe` on newer toolchains for
+        // multi-threaded reads, which does not apply here.
+        std::env::set_var(key, new_value);
+        EnvGuard { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(val) => std::env::set_var(self.key, val),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // helpers (mirrors tests/spawn_orchestrator.rs patterns)
 // ---------------------------------------------------------------------------
 
@@ -697,5 +731,130 @@ EOF
         meta["recoveryAttempts"].as_u64(),
         Some(0),
         "no recovery resume when agent_end follows compaction; got: {meta}"
+    );
+}
+
+// ===========================================================================
+// fix-secret: nudge/recovery resume can harvest a SIGNED verdict via the REAL
+// verifier-verdict binary. This is the regression for the bug where spawn_nudge_child
+// injected an EMPTY secret (mint failed on the already-pinned slot) so every nudge-
+// harvested verdict failed consensus signature verification.
+//
+// The stub calls $VERIFIER_LOOP_VERDICT_BIN (resolved by the test via assert_cmd's
+// cargo_bin) on its 2nd invocation (the nudge resume). The orchestrator persists the
+// signing secret to verifier-secret.hex at initial-spawn mint time, and spawn_nudge_child
+// reads it back to inject into the resume child — so the signed verdict verifies.
+// ===========================================================================
+
+/// Resolve the real verifier-verdict binary built by `cargo test`. The orchestrator's
+/// `sibling_verifier_verdict()` returns None during tests (the test exe lives in
+/// target/debug/deps/, not next to verifier-verdict), but the child INHERITS the
+/// parent env, so setting VERIFIER_LOOP_VERDICT_BIN here makes $VERIFIER_LOOP_VERDICT_BIN
+/// resolve inside the stub.
+fn real_verifier_verdict_bin() -> PathBuf {
+    let prog = assert_cmd::cargo::cargo_bin("verifier-verdict");
+    // Sanity: it must exist on disk.
+    assert!(prog.is_file(), "verifier-verdict binary must exist at {prog:?}");
+    prog
+}
+
+#[test]
+fn nudge_resume_can_register_signed_verdict() {
+    let verdict_bin = real_verifier_verdict_bin();
+    // Propagate to the spawned children (child inherits parent env when the
+    // orchestrator doesn't explicitly override VERIFIER_LOOP_VERDICT_BIN).
+    // Panic-safe: the EnvGuard restores/removes the var on Drop so a mid-test panic
+    // cannot leak it to sibling tests.
+    let _verdict_bin_guard = EnvGuard::set(spawn::ENV_VERDICT_BIN, &verdict_bin.to_string_lossy());
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let capture_dir = root.join("cap");
+    fs::create_dir_all(&capture_dir).unwrap();
+    let config = serde_json::json!({
+        "n": 1, "m": 1, "maxTurn": 3, "backend": "custom",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 30
+    });
+    let goal_id = seed_goal(root, "goal", &config);
+
+    // The stub emits session + agent_end, and registers a verdict via the REAL
+    // verifier-verdict binary ONLY on the 2nd invocation (the nudge resume). The
+    // verdict CLI reads VERIFIER_LOOP_VERIFIER_SECRET (injected by the orchestrator
+    // from verifier-secret.hex) and signs the verdict against the pinned pubkey.
+    let script = write_script(
+        dir.path(),
+        "signed_nudge.sh",
+        &format!(
+            r#"#!/bin/sh
+COUNT_FILE="{cap}/v1.count"
+COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$COUNT_FILE"
+cat <<EOF
+{{"type":"session","id":"sid"}}
+{{"type":"agent_end","messages":[],"willRetry":false}}
+EOF
+if [ "$COUNT" -ge 2 ]; then
+  "$VERIFIER_LOOP_VERDICT_BIN" approve --notes "nudge-harvested signed verdict" 2>"{cap}/v1.verdict-stderr.log" || echo "verdict-rc=$?" > "{cap}/v1.verdict-rc"
+fi
+"#,
+            cap = capture_dir.to_string_lossy(),
+        ),
+    );
+    let adapter = script_adapter(&script);
+    let cfg = store::Config::load_in(root).unwrap();
+
+    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
+        .expect("spawn succeeds");
+
+    // (The EnvGuard restores VERIFIER_LOOP_VERDICT_BIN on Drop at end of scope.)
+
+    let vdir = verifier_dir(root, &goal_id, 1, "v1");
+
+    // (d) The secret hex file must exist with mode 0600.
+    use std::os::unix::fs::PermissionsExt;
+    let secret_file = vdir.join(verifier_loop::verdict::SECRET_FILE);
+    assert!(
+        secret_file.exists(),
+        "verifier-secret.hex must be persisted at initial spawn; got dir: {}",
+        fs::read_dir(&vdir).unwrap().map(|e| e.unwrap().path().to_string_lossy().to_string()).collect::<Vec<_>>().join(", ")
+    );
+    let mode = fs::metadata(&secret_file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "secret file mode must be 0600, got {:o}", mode);
+
+    // (c) meta.json must record at least one nudge attempt.
+    let meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(vdir.join("meta.json")).unwrap()).unwrap();
+    let nudge = meta["nudgeAttempts"].as_u64().unwrap_or(0);
+    assert!(
+        nudge >= 1,
+        "nudge must have been issued to harvest the verdict; nudgeAttempts = {nudge}; meta = {meta}"
+    );
+
+    // Surface any verdict-CLI stderr failure for diagnosis.
+    let verdict_stderr_path = capture_dir.join("v1.verdict-stderr.log");
+    if verdict_stderr_path.exists() {
+        let stderr = fs::read_to_string(&verdict_stderr_path).unwrap_or_default();
+        if stderr.contains("unauthenticated") || stderr.contains("error") {
+            panic!("verifier-verdict CLI failed during nudge resume: {stderr}");
+        }
+    }
+
+    // (a) + (b) The slot's verdict.json must carry a SIGNED APPROVE.
+    let verdict: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
+    assert_eq!(
+        verdict["status"].as_str(),
+        Some("APPROVE"),
+        "nudge must have harvested an APPROVE verdict; got: {verdict}"
+    );
+    let sig = verdict["signature"].as_str();
+    assert!(
+        sig.is_some() && !sig.unwrap().is_empty(),
+        "harvested verdict must carry a non-empty signature (signed against the pinned pubkey); got: {verdict}"
+    );
+    assert!(
+        verdict["pubkeyId"].as_str().is_some(),
+        "signed verdict must carry a pubkeyId; got: {verdict}"
     );
 }

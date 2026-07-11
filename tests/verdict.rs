@@ -255,7 +255,7 @@ fn forgotten_verdict_stays_null_and_round_fails() {
     // A verifier that never calls verifier-verdict leaves status:null.
     let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
     assert_eq!(
-        serde_json::to_value(&rec.status).unwrap(),
+        serde_json::to_value(rec.status).unwrap(),
         Value::Null,
         "null must never be silently promoted; round is evaluated as not passing"
     );
@@ -1342,4 +1342,104 @@ fn register_signed_approve_with_none_notes_omits_notes_key() {
         .expect("pinned pubkey present");
     verdict::verify_record(&rec, Some(&pinned_vk), &goal_id, "v1", 1)
         .expect("signed approve without notes must verify");
+}
+
+// ===========================================================================
+// fix-secret: per-verifier signing secret is persisted to the slot dir (mode 0600)
+// so the verdict-enforcement nudge loop (D5) and compaction-recovery resume (D6) can
+// re-inject the SAME secret that signed the pinned pubkey into a NEW verifier process.
+// THREAT-MODEL.md §b: on a single host this is equivalent exposure to the existing
+// forgeability concession (a process with read access to the slot dir can forge).
+// ===========================================================================
+
+#[test]
+fn verifier_secret_hex_persisted_with_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1)
+        .expect("mint succeeds on a fresh slot");
+
+    // The secret hex file MUST exist alongside the pinned pubkey.
+    let secret_file = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1)
+        .join(verdict::SECRET_FILE);
+    assert!(secret_file.exists(), "secret hex file must exist at {secret_file:?}");
+
+    // Mode must be 0600 (owner read+write only — the secret is the per-verifier forge key).
+    let mode = fs::metadata(&secret_file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "verifier-secret.hex must have mode 0600 (got {:o}); the secret is the forge key",
+        mode
+    );
+
+    // The file contents must be the hex encoding of the returned signing key and must
+    // correspond to the pinned verifying key.
+    let on_disk = fs::read_to_string(&secret_file).unwrap();
+    let on_disk_trimmed = on_disk.trim();
+    assert_eq!(
+        on_disk_trimmed,
+        crypto::signing_key_to_hex(&sk),
+        "persisted secret hex must equal the hex of the returned signing key"
+    );
+
+    // The persisted secret's pubkey MUST match the pinned verifying key.
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+        .unwrap()
+        .expect("pinned pubkey present");
+    assert_eq!(
+        crypto::verifying_key_to_hex(&pinned_vk),
+        crypto::verifying_key_to_hex(&sk.verifying_key()),
+        "persisted secret must correspond to the pinned pubkey"
+    );
+}
+
+#[test]
+fn read_verifier_secret_returns_none_for_legacy_slot() {
+    // A slot minted before the secret file existed (simulated by minting then deleting
+    // the secret) must report Ok(None) — the caller injects an empty secret and any
+    // harvested verdict fails consensus signature verification (fail-closed).
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let secret_file = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1)
+        .join(verdict::SECRET_FILE);
+    fs::remove_file(&secret_file).unwrap();
+
+    let read = verdict::read_verifier_secret(dir.path(), &goal_id, "v1", 1)
+        .expect("read on a missing file is Ok(None), not Err");
+    assert!(read.is_none(), "missing secret file must yield Ok(None)");
+}
+
+#[test]
+fn read_verifier_secret_returns_minted_hex() {
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+
+    let read = verdict::read_verifier_secret(dir.path(), &goal_id, "v1", 1)
+        .expect("read on a present secret file is Ok")
+        .expect("minted secret file must yield Some");
+    assert_eq!(read, crypto::signing_key_to_hex(&sk));
+}
+
+#[test]
+fn mint_and_pin_does_not_overwrite_existing_secret() {
+    // First-write-wins: a pre-existing secret file is left untouched (mirrors the
+    // pubkey pin's immutability). This guards against a re-mint race clobbering the
+    // secret that the pinned pubkey was derived from.
+    let (dir, goal_id) = fresh_goal_for_pubkey();
+
+    // Pre-place a sentinel secret + pubkey so the slot looks already-pinned.
+    let slot = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1);
+    fs::create_dir_all(&slot).unwrap();
+    fs::write(slot.join(verdict::PUBKEY_FILE), r#"{"pubkey":"00","mintedAt":"t"}"#).unwrap();
+    fs::write(slot.join(verdict::SECRET_FILE), "sentinel").unwrap();
+
+    // mint must fail (pubkey already pinned) and must NOT have overwritten the secret.
+    let err = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1);
+    assert!(err.is_err(), "mint on a pinned slot must fail (AlreadyPinned)");
+    assert_eq!(
+        fs::read_to_string(slot.join(verdict::SECRET_FILE)).unwrap(),
+        "sentinel",
+        "existing secret must be preserved when mint fails on an already-pinned slot"
+    );
 }

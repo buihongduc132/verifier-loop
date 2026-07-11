@@ -3,19 +3,22 @@
 # Exercises the three new capabilities from fix-prompt-bloat-and-compaction-recovery:
 #   (1) Prompt bloat: rendered prompt stays under budget on a repo with many tracked files.
 #   (2) Verdict enforcement: a stub that "forgets" to register a verdict on the first
-#       invocation gets nudged and the nudge fires (orchestration check).
-#   (3) Compaction recovery: a stub that compacts+exits gets one recovery resume.
+#       invocation gets nudged and the nudge fires (orchestration check) AND harvests a
+#       SIGNED APPROVE via the real verifier-verdict (secret re-injected from the
+#       persisted verifier-secret.hex, exactly as the orchestrator does on resume).
+#   (3) Compaction recovery: a stub that compacts+exits gets one recovery resume that
+#       harvests a SIGNED APPROVE via the real verifier-verdict.
 #
 # Uses a stub backend (no real pi). The release binaries are at:
 #   target/release/verifier-loop   (jewilo)
 #   target/release/verifier-verdict (jewije)
 #
-# NOTE on signing: the initial spawn injects VERIFIER_LOOP_VERIFIER_SECRET so the real
-# verifier-verdict can sign. Nudge/recovery resumes CANNOT re-inject the secret (it is
-# minted once and never persisted; mint_and_pin_pubkey returns AlreadyPinned on resume).
-# So test 1 (happy path) runs the full consensus via the real verifier-verdict, while
-# tests 2/3 verify the orchestration fired (invocation count + meta.json fields) without
-# requiring the full consensus to pass. This signing gap is tracked separately.
+# NOTE on signing: the initial spawn injects VERIFIER_LOOP_VERIFIER_SECRET (minted once
+# and PERSISTED to verifier-secret.hex at spawn time). Nudge/recovery resumes ARE NEW
+# processes and cannot inherit that env, so they re-inject the SAME secret by reading it
+# back from verifier-secret.hex — mirroring the orchestrator's own spawn_nudge_child
+# path. Every harvested verdict is therefore signed and verifies against the pinned
+# pubkey, so the full NEW→APPROVE→hash consensus runs end-to-end in all three tests.
 #
 # Exit non-zero on ANY failure.
 
@@ -51,25 +54,29 @@ setup_repo() {
     git config user.name "smoke"
     # Create 200 tracked files (simulates a real repo — would bloat fileEditTimes under
     # the old `git ls-files` enumeration).
+    local i
     for i in $(seq 1 200); do
         printf 'content %d\n' "$i" > "file_$(printf '%03d' "$i").txt"
     done
-    git add -A
+    git add file_000.txt file_050.txt file_150.txt 2>/dev/null || true
+    git add . 2>/dev/null || git add -A
     git commit -q -m "seed: 200 tracked files"
-    # Modify 3 files so the changed-files set is small (D1 scoping test).
+    # Modify 3 known files so the changed-files set is small (D1 scoping test).
     printf 'changed\n' > "file_001.txt"
     printf 'changed\n' > "file_050.txt"
     printf 'changed\n' > "file_150.txt"
 }
 
-# A snippet that writes a verdict directly into the slot (bypasses verifier-verdict
-# signing — used by nudge/recovery tests that only check orchestration, not consensus).
-verdict_snippet() {
-    cat <<'SNIP'
-SLOT="$VERIFIER_LOOP_HOME/goals/$VERIFIER_LOOP_GOAL_ID/rounds/$VERIFIER_LOOP_ROUND/$VERIFIER_LOOP_VERIFIER_ID"
-mkdir -p "$SLOT"
-printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$SLOT/verdict.json"
-SNIP
+# Resolve the persisted per-verifier signing secret from the slot dir and re-inject it as
+# VERIFIER_LOOP_VERIFIER_SECRET, exactly as the orchestrator's spawn_nudge_child does on a
+# resume. This lets the real verifier-verdict sign a verdict that verifies against the
+# pinned pubkey. Args: <home_dir> <goal_id> <round> <verifier_id>.
+reinject_secret() {
+    local home="$1" goal="$2" round="$3" vid="$4"
+    local secret_file="$home/goals/$goal/rounds/$round/$vid/verifier-secret.hex"
+    if [ -f "$secret_file" ]; then
+        export VERIFIER_LOOP_VERIFIER_SECRET="$(cat "$secret_file")"
+    fi
 }
 
 # ===========================================================================
@@ -119,18 +126,54 @@ if [ -n "$GOAL_ID" ]; then
         else
             no "rendered prompt $PROMPT_SIZE bytes >= 50000 budget (bloat not fixed)"
         fi
-        # The fileEditTimes block must contain ONLY the 3 changed files, not all 200.
-        FET_LINES=$(awk '/^File edit times:/{f=1;next} /^```/{if(f){f=0}} f{print}' "$PROMPT_FILE" | grep -c ':' || true)
-        if [ "$FET_LINES" -le 3 ]; then
-            ok "fileEditTimes scoped to $FET_LINES changed files (<=3 expected)"
+        # (c) The fileEditTimes block must contain EXACTLY the 3 changed files
+        # (file_001.txt, file_050.txt, file_150.txt) and nothing else. -le 3 would pass
+        # even if scoping dropped to 0/1/2 entries; -eq 3 + path match pins it.
+        # The template renders the block as:
+        #   File edit times:
+        #   ```
+        #   <content>
+        #   ```
+        # so we capture lines between the heading's opening fence and its closing fence.
+        FET_BLOCK=$(awk '
+            /^File edit times:/ {in_section=1; next}
+            in_section && /^```/ {fence++}
+            in_section && /^```/ && fence==1 {capture=1; next}
+            in_section && /^```/ && fence==2 {capture=0; in_section=0; next}
+            capture {print}
+        ' "$PROMPT_FILE")
+        FET_LINES=$(printf '%s\n' "$FET_BLOCK" | grep -c ':' || true)
+        if [ "$FET_LINES" -eq 3 ]; then
+            ok "fileEditTimes scoped to exactly 3 changed files"
         else
-            no "fileEditTimes has $FET_LINES entries (expected <=3; scoping not applied)"
+            no "fileEditTimes has $FET_LINES entries (expected exactly 3; scoping broken)"
         fi
-        # The default template must end with the explicit verdict command (D7).
-        if grep -q '```bash' "$PROMPT_FILE" && grep -q 'verifier-verdict approve' "$PROMPT_FILE" && grep -q 'verifier-verdict reject' "$PROMPT_FILE"; then
-            ok "default template ends with explicit fenced verdict command (D7)"
+        # Verify the 3 specific paths match the modified files.
+        PATHS_OK=1
+        for expect in file_001.txt file_050.txt file_150.txt; do
+            if ! printf '%s\n' "$FET_BLOCK" | grep -q "^$expect:"; then
+                PATHS_OK=0
+                no "fileEditTimes missing expected changed file '$expect'"
+            fi
+        done
+        [ "$PATHS_OK" -eq 1 ] && ok "fileEditTimes paths match the 3 modified files"
+        # (d) D7: extract the LAST fenced ```bash block in the prompt and assert BOTH
+        # `verifier-verdict approve` and `verifier-verdict reject` appear within it (not
+        # just somewhere in the prompt). The last fenced bash block is the verdict
+        # command — appearing earlier in prose is not sufficient.
+        LAST_BASH_BLOCK=$(awk '
+            /^```bash/{capture=1; buf=""; next}
+            /^```/{if(capture){last=buf; capture=0}; next}
+            capture{buf=buf $0 "\n"}
+            END{print last}
+        ' "$PROMPT_FILE")
+        if [ -n "$LAST_BASH_BLOCK" ] \
+            && printf '%s' "$LAST_BASH_BLOCK" | grep -q 'verifier-verdict approve' \
+            && printf '%s' "$LAST_BASH_BLOCK" | grep -q 'verifier-verdict reject'; then
+            ok "last fenced bash block contains both verifier-verdict approve + reject (D7)"
         else
-            no "default template missing explicit fenced verdict command (D7)"
+            no "last fenced bash block missing verifier-verdict approve/reject (D7); block was:
+$LAST_BASH_BLOCK"
         fi
     else
         no "initial-prompt.txt missing at $PROMPT_FILE"
@@ -141,9 +184,11 @@ fi
 unset VERIFIER_LOOP_HOME VERIFIER_LOOP_BACKEND_CMD
 
 # ===========================================================================
-# Test 2: Verdict enforcement — nudge fires after a no-verdict exit (orchestration check).
+# Test 2: Verdict enforcement — nudge fires after a no-verdict exit AND harvests a
+#         SIGNED APPROVE via the real verifier-verdict (secret re-injected from
+#         verifier-secret.hex, exactly as the orchestrator does on resume).
 # ===========================================================================
-echo "--- Test 2: verdict enforcement (nudge after no-verdict exit) ---"
+echo "--- Test 2: verdict enforcement (nudge after no-verdict exit, signed harvest) ---"
 REPO2="$SMOKE_DIR/repo2"
 HOME2="$SMOKE_DIR/home2"
 mkdir -p "$HOME2" "$SMOKE_DIR/cap2"
@@ -152,9 +197,10 @@ cat > "$HOME2/config.json" <<'CFG'
 { "n": 1, "m": 1, "maxTurn": 3, "backend": "stub", "gitDiffMaxChars": 1000, "verifierTimeoutSec": 15 }
 CFG
 
-# Nudge stub: forgets verdict on invocation 1, writes (unsigned) on invocation 2+.
-# We only check orchestration here (invocation count + meta.nudgeAttempts), not consensus,
-# because the nudge resume cannot re-inject the signing secret.
+# Nudge stub: forgets verdict on invocation 1, registers a SIGNED verdict via the REAL
+# verifier-verdict on invocation 2+. The orchestrator re-injects the secret into the
+# resume child env (from verifier-secret.hex), so $VERIFIER_LOOP_VERIFIER_SECRET is set
+# here automatically.
 NUDGE_STUB="$SMOKE_DIR/nudge.sh"
 cat > "$NUDGE_STUB" <<SCRIPT
 #!/bin/sh
@@ -169,7 +215,7 @@ cat <<'ACP'
 ACP
 
 if [ "\$COUNT" -ge 2 ]; then
-$(verdict_snippet)
+  "$VV" approve --notes "nudge-harvested signed verdict" 2>"$SMOKE_DIR/cap2/v1.verdict-stderr.log" || echo "verdict-rc=\$?" > "$SMOKE_DIR/cap2/v1.verdict-rc"
 fi
 SCRIPT
 chmod +x "$NUDGE_STUB"
@@ -196,13 +242,29 @@ else
     else
         no "meta.json nudgeAttempts=$NUDGE_ATTEMPTS (expected >=1)"
     fi
+    # The harvested verdict MUST be a signed APPROVE (full consensus path, not an
+    # unsigned placeholder). Surface verdict-CLI stderr if it failed.
+    if [ -f "$SMOKE_DIR/cap2/v1.verdict-rc" ]; then
+        cat "$SMOKE_DIR/cap2/v1.verdict-stderr.log" 2>/dev/null
+        no "verifier-verdict failed during nudge resume (see stderr above)"
+    else
+        VJ="$HOME2/goals/$GOAL_ID/rounds/1/v1/verdict.json"
+        VSTATUS=$(python3 -c "import json;print(json.load(open('$VJ')).get('status'))" 2>/dev/null || echo "?")
+        VSIG=$(python3 -c "import json;print(json.load(open('$VJ')).get('signature') or '')" 2>/dev/null || echo "")
+        if [ "$VSTATUS" = "APPROVE" ] && [ -n "$VSIG" ]; then
+            ok "nudge harvested a SIGNED APPROVE (signature present)"
+        else
+            no "nudge-harvested verdict not a signed APPROVE (status=$VSTATUS, sig_len=${#VSIG})"
+        fi
+    fi
 fi
-unset VERIFIER_LOOP_HOME VERIFIER_LOOP_BACKEND_CMD
+unset VERIFIER_LOOP_HOME VERIFIER_LOOP_BACKEND_CMD VERIFIER_LOOP_VERIFIER_SECRET
 
 # ===========================================================================
-# Test 3: Compaction recovery — compaction+exit triggers one recovery resume.
+# Test 3: Compaction recovery — compaction+exit triggers one recovery resume that
+#         harvests a SIGNED APPROVE via the real verifier-verdict.
 # ===========================================================================
-echo "--- Test 3: compaction recovery (compact+exit → recovery resume) ---"
+echo "--- Test 3: compaction recovery (compact+exit → recovery resume, signed harvest) ---"
 REPO3="$SMOKE_DIR/repo3"
 HOME3="$SMOKE_DIR/home3"
 mkdir -p "$HOME3" "$SMOKE_DIR/cap3"
@@ -212,7 +274,8 @@ cat > "$HOME3/config.json" <<'CFG'
 CFG
 
 # Compact stub: emits compaction then exits (no agent_end) on invocation 1;
-# recovers on invocation 2 (the recovery resume).
+# registers a SIGNED verdict via the REAL verifier-verdict on invocation 2 (the recovery
+# resume). The orchestrator re-injects the secret from verifier-secret.hex.
 COMPACT_STUB="$SMOKE_DIR/compact.sh"
 cat > "$COMPACT_STUB" <<SCRIPT
 #!/bin/sh
@@ -233,7 +296,7 @@ cat <<'ACP'
 {"type":"session","id":"smoke-compact-sid"}
 {"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"recovered"}]}],"willRetry":false}
 ACP
-$(verdict_snippet)
+"$VV" approve --notes "recovery-harvested signed verdict" 2>"$SMOKE_DIR/cap3/v1.verdict-stderr.log" || echo "verdict-rc=\$?" > "$SMOKE_DIR/cap3/v1.verdict-rc"
 SCRIPT
 chmod +x "$COMPACT_STUB"
 
@@ -265,8 +328,22 @@ else
     else
         no "meta.json recoveryAttempts=$RECOVERY (expected 1)"
     fi
+    # The recovered verdict MUST be a signed APPROVE.
+    if [ -f "$SMOKE_DIR/cap3/v1.verdict-rc" ]; then
+        cat "$SMOKE_DIR/cap3/v1.verdict-stderr.log" 2>/dev/null
+        no "verifier-verdict failed during recovery resume (see stderr above)"
+    else
+        VJ="$HOME3/goals/$GOAL_ID/rounds/1/v1/verdict.json"
+        VSTATUS=$(python3 -c "import json;print(json.load(open('$VJ')).get('status'))" 2>/dev/null || echo "?")
+        VSIG=$(python3 -c "import json;print(json.load(open('$VJ')).get('signature') or '')" 2>/dev/null || echo "")
+        if [ "$VSTATUS" = "APPROVE" ] && [ -n "$VSIG" ]; then
+            ok "recovery harvested a SIGNED APPROVE (signature present)"
+        else
+            no "recovery-harvested verdict not a signed APPROVE (status=$VSTATUS, sig_len=${#VSIG})"
+        fi
+    fi
 fi
-unset VERIFIER_LOOP_HOME VERIFIER_LOOP_BACKEND_CMD
+unset VERIFIER_LOOP_HOME VERIFIER_LOOP_BACKEND_CMD VERIFIER_LOOP_VERIFIER_SECRET
 
 # ===========================================================================
 # Summary

@@ -70,10 +70,16 @@ type SpawnedChild = (
     Option<TempPromptFile>,
 );
 
-/// Minimal verdict-nudge prompt used for both within-round verdict enforcement (D5) and
-/// compaction recovery (D6). Kept tiny (<2KB) so it never re-triggers compaction, and
-/// contains NO goal/diff/policy text (those are already in the resumed session context).
+/// Minimal verdict-nudge prompt used for within-round verdict enforcement (D5). Contains
+/// NO goal/diff/policy text; the resumed session already holds that context. Kept tiny
+/// (<2KB) so it never re-triggers compaction.
 pub const VERDICT_NUDGE_PROMPT: &str = "You have completed your investigation. Register your verdict NOW via the verifier-verdict CLI:\n\nverifier-verdict approve --notes \"evidence summary: ...\"\nverifier-verdict reject --notes \"what is wrong, with file:line references\"\n\nNo further investigation is needed. Register your verdict.\n";
+
+/// Compaction-aware recovery nudge prompt used for compaction recovery (D6). Contains
+/// NO goal/diff/policy text (preserved in the compacted session). Tells the verifier that
+/// compaction occurred, its prior investigation is preserved, and it must register the
+/// verdict immediately. Kept tiny (<2KB).
+pub const COMPACTION_RECOVERY_NUDGE_PROMPT: &str = "The session compacted after your investigation. Your prior reasoning and artifacts are preserved in this resumed session.\n\nRegister your verdict NOW via the verifier-verdict CLI:\n\nverifier-verdict approve --notes \"evidence summary: ...\"\nverifier-verdict reject --notes \"what is wrong, with file:line references\"\n\nNo further investigation is needed. Register your verdict.\n";
 
 /// Identity env var names injected into every verifier process (D2).
 pub const ENV_GOAL_ID: &str = "VERIFIER_LOOP_GOAL_ID";
@@ -191,11 +197,11 @@ fn slot_meta(vdir: &Path) -> (u32, Option<String>) {
 /// inject identity env, and write the nudge prompt to the child's stdin. Returns the
 /// spawned child + its stdin-writer handle. Used by both the verdict-enforcement nudge
 /// loop (D5) and the compaction-recovery resume (D6).
-#[allow(unused_variables)]
 async fn spawn_nudge_child(
     input: &SpawnInput<'_>,
     verifier_id: &str,
     sid: &str,
+    nudge_prompt: &str,
 ) -> Result<
     (
         tokio::process::Child,
@@ -209,7 +215,7 @@ async fn spawn_nudge_child(
     // nudge prompt; the guard is returned so the caller holds it until the child is
     // reaped (the file is unlinked on drop, after the child has opened it).
     let goal_file_guard: Option<TempPromptFile> = match input.adapter.transport {
-        Transport::GoalFile => Some(TempPromptFile::new(VERDICT_NUDGE_PROMPT.as_bytes())?),
+        Transport::GoalFile => Some(TempPromptFile::new(nudge_prompt.as_bytes())?),
         Transport::Stdin => None,
     };
     let goal_file_path = goal_file_guard.as_ref().map(|g| g.path());
@@ -218,19 +224,20 @@ async fn spawn_nudge_child(
         Transport::GoalFile => Stdio::null(),
     };
     let mut cmd = build_resume_command(input.adapter, sid, goal_file_path);
-    // Best-effort secret: mint succeeds on a fresh slot; AlreadyPinned means we are
-    // resuming within the same round and the original secret is not available. In that
-    // case we inject identity without the secret (the resumed backend may still reach a
-    // verdict; signing is a separate concern).
-    let secret_hex = match verdict::mint_and_pin_pubkey(
+    // Read the persisted per-verifier signing secret (written at initial spawn time
+    // by mint_and_pin_pubkey) so the resume child can sign a verdict that verifies
+    // against the slot's pinned pubkey. The initial spawn injected the secret into the
+    // child's ENV; a nudge/recovery resume is a NEW process and cannot inherit that
+    // env, so it MUST read the persisted copy. Re-minting fails (pubkey already
+    // pinned + a fresh key wouldn't match the pinned pubkey), so we read instead.
+    // Ok(None) on a legacy unsigned slot → inject empty string (fail-closed: any
+    // harvested verdict will fail consensus signature verification).
+    let secret_hex = verdict::read_verifier_secret(
         input.root,
         input.goal_id,
         verifier_id,
         input.round,
-    ) {
-        Ok(sk) => Some(crypto::signing_key_to_hex(&sk)),
-        Err(_) => None,
-    };
+    )?;
     inject_identity_env(
         &mut cmd,
         input.goal_id,
@@ -246,7 +253,7 @@ async fn spawn_nudge_child(
         .kill_on_drop(true);
     let mut child = cmd.spawn()?;
     let write_handle = match input.adapter.transport {
-        Transport::Stdin => spawn_stdin_writer(child.stdin.take(), VERDICT_NUDGE_PROMPT.as_bytes()),
+        Transport::Stdin => spawn_stdin_writer(child.stdin.take(), nudge_prompt.as_bytes()),
         Transport::GoalFile => None,
     };
     Ok((child, write_handle, goal_file_guard))
@@ -271,24 +278,36 @@ async fn reap_nudge_child(
     vdir: &Path,
     mut child: tokio::process::Child,
     write_handle: Option<JoinHandle<io::Result<()>>>,
+    nudge_attempts: u32,
+    recovery_attempts: u32,
 ) -> Result<NudgeOutcome, SpawnError> {
     let timeout = Duration::from_secs(input.config.verifier_timeout_sec.max(1));
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
+    // Drain stdout AND stderr CONCURRENTLY (not sequentially). A sequential read
+    // (stdout first, then stderr) can lose stderr data under timing variations:
+    // a chatty stderr fills the kernel pipe buffer (~64KB) while stdout is still
+    // live, and the child blocks on its next stderr write until timeout. Mirrors
+    // the main `gather` drain, which already uses tokio::join! for the same reason.
     let drain = tokio::spawn(async move {
-        let buf = match stdout_pipe {
-            Some(mut pipe) => {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                let _ = pipe.read_to_end(&mut buf).await;
-                buf
+        let stdout_fut = async {
+            match stdout_pipe {
+                Some(mut pipe) => {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    let _ = pipe.read_to_end(&mut buf).await;
+                    buf
+                }
+                None => Vec::new(),
             }
-            None => Vec::new(),
         };
-        let stderr_buf = match stderr_pipe {
-            Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
-            None => Vec::new(),
+        let stderr_fut = async {
+            match stderr_pipe {
+                Some(mut p) => bounded_stderr_tail(&mut p, STDERR_CAP_BYTES).await,
+                None => Vec::new(),
+            }
         };
+        let (buf, stderr_buf) = tokio::join!(stdout_fut, stderr_fut);
         (buf, stderr_buf)
     });
 
@@ -345,12 +364,16 @@ async fn reap_nudge_child(
                 compaction_observed: false,
                 recovery_attempts: 0,
             });
+            // Persist the ACTIVE loop counts so an intermediate meta write is never
+            // stale (a crash mid-loop must leave an accurate audit trail). The caller
+            // increments nudge/recovery BEFORE this call; turns_used advances by one
+            // per nudge resume.
             let updated = VerifierMeta {
                 sid: sid.clone().or(existing.sid),
                 turns_used: existing.turns_used.saturating_add(1).min(input.config.max_turn),
-                nudge_attempts: existing.nudge_attempts,
+                nudge_attempts,
                 compaction_observed: existing.compaction_observed || compaction_observed,
-                recovery_attempts: existing.recovery_attempts,
+                recovery_attempts,
             };
             write_meta(vdir, &updated)?;
             NudgeOutcome {
@@ -566,9 +589,14 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         children.push((vid, child, vdir, write_handle, goal_file_guard));
     }
 
-    // Resume round: a single invocation per verifier is expected; the nudge/recovery
-    // loop is a fresh-round concern (D5/D6), not a resume-round one.
-    gather(input, false, children).await
+    // Resume round: verdict-enforcement nudge (D5) + compaction recovery (D6) apply
+    // universally — the verifier-spawn spec "Verdict is enforced after child exit" carries
+    // no round-type carve-out. A resume-round child that exits with no verdict MUST be
+    // re-prompted on the same sid, exactly like a fresh round. The transport guard
+    // (Stdin only) matches spawn_round: GoalFile custom adapters are not designed for
+    // multiple nudge resumes and are scoped out consistently on both paths.
+    let enable_nudge = input.adapter.transport == Transport::Stdin;
+    gather(input, enable_nudge, children).await
 }
 
 // ---------------------------------------------------------------------------
@@ -766,8 +794,27 @@ async fn gather(
                         nudge_attempts += 1;
 
                         let (nudge_child, nudge_writer, _nudge_guard) =
-                            spawn_nudge_child(&input, &vid, &sid_to_use).await?;
-                        let nudge = reap_nudge_child(&input, &vid, &vdir, nudge_child, nudge_writer).await?;
+                            spawn_nudge_child(
+                                &input,
+                                &vid,
+                                &sid_to_use,
+                                if do_recovery {
+                                    COMPACTION_RECOVERY_NUDGE_PROMPT
+                                } else {
+                                    VERDICT_NUDGE_PROMPT
+                                },
+                            )
+                            .await?;
+                        let nudge = reap_nudge_child(
+                            &input,
+                            &vid,
+                            &vdir,
+                            nudge_child,
+                            nudge_writer,
+                            nudge_attempts,
+                            recovery_attempts,
+                        )
+                        .await?;
 
                         if nudge.timed_out {
                             break;

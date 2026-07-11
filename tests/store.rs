@@ -190,6 +190,20 @@ fn config_camel_case_round_trips_verifier_prompt_file_and_min_goal_chars() {
         j.contains("\"minGoalChars\":42"),
         "minGoalChars must serialize camelCase: {j}",
     );
+    // The 3 prompt-bloat config fields must serialize camelCase (a removed
+    // #[serde(rename)] would silently break the round-trip without these).
+    assert!(
+        j.contains("\"fileEditTimesMaxChars\":8000"),
+        "fileEditTimesMaxChars must serialize camelCase: {j}",
+    );
+    assert!(
+        j.contains("\"contextMaxChars\":20000"),
+        "contextMaxChars must serialize camelCase: {j}",
+    );
+    assert!(
+        j.contains("\"promptBudgetBytes\":50000"),
+        "promptBudgetBytes must serialize camelCase: {j}",
+    );
 
     let back: store::Config = serde_json::from_str(&j).unwrap();
     assert_eq!(back, cfg, "round-trip preserves verifier_prompt_file + min_goal_chars");
