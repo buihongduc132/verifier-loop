@@ -1,0 +1,213 @@
+- id: LD1
+  turn: turn4
+  parts: ["Recovery primitive, final shape"]
+  user_quote: |
+    "2: OK; wrinkle: no problem ;"
+  decision: >
+    Round recovery uses shape 2: kill orphan (via persisted PID file) → resume by SID
+    (early-persisted on stdout line 1) → emit a <2KB verdict-nudge → gather. No round
+    increment, no fix-notes, no prompt re-render. Null slots with no live orphan spawn
+    fresh. consensus::evaluate stays unchanged; verdict file remains the resumption
+    contract.
+  status: locked
+  challenged_by: >
+    turn4b-gotcha-secret-lifecycle G5-1: INVALIDATED against landed tamper-hardening.
+    The per-slot signing secret is minted via mint_and_pin_pubkey (verdict/mod.rs:176),
+    returned to the orchestrator, injected into the child env only, and NEVER persisted
+    (verdict/mod.rs:172 comment). consensus::evaluate (mod.rs:177) requires the verdict's
+    signature to verify against the pinned pubkey. Killing the orphan destroys the only
+    valid signer; a resumed pi --session process carries no VERIFIER_LOOP_VERIFIER_SECRET;
+    a fresh spawn hits AlreadyPinned. So a pinned-but-null slot with no LIVE signer can
+    NEVER produce a countable verdict. Reopen required before drafting add-round-recovery.
+    DO NOT AUTO-SUPERSEDE (user-locked) — STOP + ASK user to relock.
+
+- id: LD2
+  turn: turn4
+  parts: ["wrinkle accepted"]
+  user_quote: |
+    "2: OK; wrinkle: no problem ;"
+  decision: >
+    The truncated-session-file wrinkle (orphan's JSONL may be mid-write at kill time,
+    and pi --session resume needs to tolerate a truncated tail) is ACCEPTED as not a
+    blocking concern. No pre-proposal probe required.
+  status: locked
+  challenged_by: >
+    turn4b-gotcha-secret-lifecycle G3-5/G2-5: acceptance forecloses the one probe that
+    would tell us the risk. Even if shape 2 survives (via OT5), resume-by-SID on a
+    truncated JSONL is the load-bearing path. Reopen recommended — probe pi loader on
+    truncated tail before locking. DO NOT AUTO-SUPERSEDE (user-locked).
+
+# ─── auto-decided by findings-resolve-threads (step 30) ───
+# Resolves OT1, OT4, OT6, OT8, OT10 (independent of OT5).
+# OT2/OT3/OT7/OT9 remain conditional on OT5 (escalated to user).
+
+- id: LD3
+  turn: turn4a-gotcha-recovery-safety
+  parts: ["G9", "G12", "G13"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: >
+    RECOVER is a separate top-level command (`RECOVER <goalId>`), NOT a flag on RESUME.
+    Symmetric precondition warnings on both: RECOVER on a complete round → "use RESUME";
+    RESUME on a round with null verdicts → "use RECOVER first".
+  status: locked
+  auto_decided: true
+  resolves: [OT1]
+  tradeoff: |
+    Separate command avoids silent round-increment when user types RESUME reflexively
+    (turn2 OT1). G13 (turn4a) showed reflex is symmetric — so warnings on BOTH commands
+    catch the inverse. G9 (turn4a) showed the primary caller is an outer agent, so the
+    machine-readable contract (LD11 STATUS) is the real fix; command-vs-flag is human UX.
+
+- id: LD4
+  turn: turn4a-gotcha-recovery-safety
+  parts: ["G14"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: >
+    Vocabulary: `recover` = cross-process round recovery (this change, add-round-recovery);
+    `compaction_recover` = within-round same-process recovery (fix-prompt-bloat change).
+    Apply as Rust module prefixes (round_recover::*, compaction_recover::*) not just docs.
+    DROP the undefined term "process-recovery" (turn4a G19).
+  status: locked
+  auto_decided: true
+  resolves: [OT4]
+  tradeoff: |
+    Two distinct mechanisms need distinct identifiers in both prose and code. G14 (turn4a)
+    noted collision also hits Rust symbols, not just docs. round_/compaction_ prefix is
+    unambiguous; "process-recovery" had no referent (G19) so dropped.
+
+- id: LD5
+  turn: turn4a-gotcha-recovery-safety
+  parts: ["G3"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: >
+    All state-mutating commands (NEW, RESUME, RECOVER) take an exclusive flock on
+    `store_dir/goals/<goalId>/.lock` for their full duration. Concurrent invocation
+    exits non-zero with a clear "goal busy; another NEW/RESUME/RECOVER in progress"
+    message.
+  status: locked
+  auto_decided: true
+  resolves: [OT6]
+  tradeoff: |
+    G3 (turn4a) + G3-6 (turn4b) proved concurrent RECOVER/RESUME = silent session-file
+    corruption + double-mint (AlreadyPinned) + double-kill races. flock is the standard,
+    cheap, file-locking primitive. Independent of OT1/OT5. Cost: serializes per-goal ops
+    (acceptable — verifier rounds are minutes-long, not concurrent workloads).
+
+- id: LD6
+  turn: turn4b-gotcha-secret-lifecycle
+  parts: ["G3-1", "G3-4"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: >
+    The kill-behavior table (turn1) gets two added axes: (a) signal-source —
+    TTY-generated (pgrp broadcast, reaps children) vs kill()-delivered (single-pid,
+    orphans children); (b) supervisor — raw process / cgroup-scoped (systemd, Nomad —
+    reaps all descendants regardless of setsid) / non-forwarding PID-1 container
+    (children survive even TTY Ctrl-C). SIGPIPE-on-pipe-close noted as a third
+    orphan-death vector (G3-3).
+  status: locked
+  auto_decided: true
+  resolves: [OT8]
+  tradeoff: |
+    G3-1 (turn4b): `kill -INT <pid>` ≠ TTY Ctrl-C — outer agents using kill() orphan
+    children, contradicting the original table. G3-4: cgroup supervisors override the
+    raw-signal model entirely. Adding axes costs nothing and removes a false prediction.
+
+- id: LD7
+  turn: turn4a-gotcha-recovery-safety
+  parts: ["G9"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: >
+    Add a `STATUS <goalId>` subcommand emitting machine-readable JSON:
+    `{round, state: "new"|"in_progress"|"consensus_pass"|"consensus_fail",
+      needs: "recover"|"resume"|"done", slots: [{id, verdict, has_live_orphan}]}`.
+    RECOVER/RESUME/NEW also emit structured terminal state on `--json`.
+  status: locked
+  auto_decided: true
+  resolves: [OT10]
+  tradeoff: |
+    G9 (turn4a): the primary caller is an outer agent, not a human — it needs to
+    distinguish "round N needs RECOVER" from "complete-and-failed, needs RESUME N+1"
+    from "already at consensus." A STATUS command decouples the machine contract from
+    the human-UX choice (LD3). Cost: one new subcommand + JSON schema to maintain.
+
+# ─── OT5 resolved by sub-agent delegation (step 30 continuation) ───
+# path-a-resistance and path-b-resistance evaluated shape-1 vs secrets-persist.
+# Least-resistance path is shape-1.
+
+- id: LD8
+  turn: OT5
+  parts: ["G5-1", "G4-1", "G4-2", "shape-1 vs secrets-persist comparison"]
+  user_quote: "Self resolve it yourself by delegate sub agents to find the LEAST resistance approach THEN ensure to clearly note that into the decision"
+  decision: >
+    Round recovery uses SHAPE-1 (wait-only, never kill the signer, no fresh-spawn in
+    RECOVER). RECOVER polls live orphan processes for verdict.json; if a null slot has
+    no live signer (dead orphan, or child never finished), RECOVER falls through to the
+    user-visible guidance: "run RESUME N+1 for fresh slots and fresh keys." NO
+    per-slot signing secret is persisted to disk; the per-verifier secret lives only in
+    the original child process env. LD1 shape-2 (kill orphan → resume-by-SID → nudge) is
+    SUPERSEDED by this decision because it is unimplementable without secret persistence
+    (see LD8 evidence). LD2 (truncated-session wrinkle accepted) is MOOT because
+    resume-by-SID is not used in shape-1.
+  status: locked
+  auto_decided: true
+  supersedes: [LD1]
+  tradeoff: |
+    Sub-agent path-a-resistance scored shape-1: IMPLEMENTATION 2/10, PRODUCT 6/10,
+    THREAT-MODEL 1/10, FAILURE-MODE 2/10. path-b-resistance scored secrets-persist:
+    IMPLEMENTATION 4/10 (gating cost: landed verifier-identity SHALL NOT must change),
+    PRODUCT 7/10 (forced full kill-safety suite ~125-165 LOC), SECURITY 5/10 (widens
+    forging from "write+env-read" to "store-read during open window" + requires 3-section
+    THREAT-MODEL.md rewrite + spec scenario rewrite). secrets-persist's only marginal
+    capability over shape-1 is salvaging a slot whose orphan already died; the cost is
+    ~4-8x the code, a spec change, and a threat-model regression. The least-resistance
+    path that preserves all fail-closed invariants is shape-1. Cost is honest: dead-but
+    null slots must advance to RESUME N+1 (fresh slots, fresh keys), which is the
+    product's existing fail-closed recovery path.
+
+- id: LD9
+  turn: OT5
+  parts: ["OT2 dependent resolution"]
+  user_quote: "auto-decided (conditional on LD8)"
+  decision: >
+    No PID file for recovery. Shape-1 never kills any process, so no orphan detection or
+    PID tracking is required. This resolves OT2 and OT7 (kill-safety) entirely.
+  status: locked
+  auto_decided: true
+  resolves: [OT2, OT7]
+  tradeoff: |
+    PID-reuse (G1, G4-3), wrapper-vs-grandchild (G2, G3-2), and PID-file CVEs (G10)
+    are all avoided by removing the kill step. Trade-off: we cannot detect whether an
+    orphan is alive vs dead; we only observe whether verdict.json appears. That is enough
+    for shape-1.
+
+- id: LD10
+  turn: OT5
+  parts: ["OT3 dependent resolution"]
+  user_quote: "auto-decided (conditional on LD8)"
+  decision: >
+    RECOVER NEVER re-renders the verifier prompt or re-captures the working-tree
+    snapshot. It only waits for already-emitted verdicts. Fresh context is obtained via
+    RESUME N+1, which uses its own existing snapshot capture.
+  status: locked
+  auto_decided: true
+  resolves: [OT3]
+  tradeoff: |
+    Frozen-snapshot-per-round invariant is preserved. The only reason to re-render would
+    be fresh-spawn-in-RECOVER, which is excluded by shape-1. Trade-off: if the working
+    tree changed since round start, a dead-null slot cannot be recovered in-round; the
+    user must RESUME N+1 with the new snapshot.
+
+- id: LD11
+  turn: OT5
+  parts: ["OT9 dependent resolution"]
+  user_quote: "auto-decided (conditional on LD8)"
+  decision: >
+    No snapshot TTL / staleness handling needed inside RECOVER. RECOVER does not
+    fresh-spawn, so it never reads a stale snapshot.
+  status: locked
+  auto_decided: true
+  resolves: [OT9]
+  tradeoff: |
+    Snapshot staleness only matters for fresh-spawn. Shape-1 pushes all fresh-spawn
+    cases to RESUME N+1, which already captures the current snapshot at its own round
+    start.

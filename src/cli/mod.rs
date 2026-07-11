@@ -1,6 +1,7 @@
 //! CLI command definitions (tasks.md §10) for both binaries.
 //!
-//! * `verifier-loop` (`jewilo`):   `NEW "<goal>" [--context]`, `RESUME <goalId> [--fix "…"]`.
+//! * `verifier-loop` (`jewilo`):   `NEW "<goal>" [--context]`, `RESUME <goalId> [--fix "…"]`,
+//!   `RECOVER <goalId>`, `STATUS <goalId>`.
 //! * `verifier-verdict` (`jewije`): `approve`, `reject --notes "…"` (defined inline in its
 //!   own bin; this module holds the `verifier-loop` shared command structs so the bin stays
 //!   a thin dispatch layer over the lib).
@@ -43,5 +44,20 @@ pub enum VerifierLoopCmd {
         /// Optional fix notes appended to the new round's fix-notes.json.
         #[arg(long)]
         fix: Option<String>,
+    },
+    /// Cross-process round recovery (SHAPE-1): wait for already-emitted verdicts from the
+    /// current round and re-evaluate consensus. Does NOT spawn, kill, re-render, or
+    /// re-capture. Use after jewilo was killed/interrupted mid-round (add-round-recovery).
+    #[command(name = "RECOVER")]
+    Recover {
+        /// The goalId (UUID) to recover.
+        goal_id: String,
+    },
+    /// Read-only machine-readable goal state: round, state, needs, and per-slot verdicts
+    /// (add-round-recovery LD7). Does not take the goal lock; never blocks.
+    #[command(name = "STATUS")]
+    Status {
+        /// The goalId (UUID) to inspect.
+        goal_id: String,
     },
 }

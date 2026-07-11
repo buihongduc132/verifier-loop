@@ -1,0 +1,83 @@
+status: closed
+threads:
+  - id: OT1
+    topic: RECOVER as separate command vs flag on RESUME
+    raised_in: turn2
+    status: resolved
+    resolution: auto-decided per [LD3] — separate `RECOVER` command + symmetric warnings
+    resolved_in: findings-resolve-threads
+
+  - id: OT2
+    topic: Orphan detection — persist PID file or not
+    raised_in: turn2
+    status: resolved
+    resolution: >
+      No PID file — shape-1 never kills, so no detection needed. Auto-decided per [LD9].
+    resolved_in: findings-resolve-threads
+
+  - id: OT3
+    topic: Does RECOVER re-render prompt / re-capture snapshot
+    raised_in: turn2
+    status: resolved
+    resolution: >
+      NEVER re-renders — shape-1 does not fresh-spawn. Auto-decided per [LD10].
+    resolved_in: findings-resolve-threads
+
+  - id: OT4
+    topic: Naming collision with compaction-recovery change
+    raised_in: turn2
+    status: resolved
+    resolution: auto-decided per [LD4] — `recover` vs `compaction_recover` + Rust prefixes
+    resolved_in: findings-resolve-threads
+
+  - id: OT5
+    topic: >
+      Signing-secret lifecycle — shape-1 vs secrets-persist
+    raised_in: turn4b-gotcha-secret-lifecycle
+    status: resolved
+    resolution: >
+      SHAPE-1 selected via least-resistance delegation. Auto-decided per [LD8]. RECOVER
+      only waits for live orphans; dead-but-null slots fall through to RESUME N+1. No
+      secret persistence. LD1 (shape-2) SUPERSEDED; LD2 MOOT.
+    resolved_in: findings-resolve-threads
+    evidence: >
+      path-a-resistance (shape-1) and path-b-resistance (secrets-persist) evaluations
+      in 2026-07-12-shape-1-resistance-evaluation.md and
+      2026-07-12-path-b-resistance-secrets-persist.md.
+
+  - id: OT6
+    topic: Concurrent RECOVER/RESUME/double-RECOVER unguarded
+    raised_in: turn4a-gotcha-recovery-safety
+    status: resolved
+    resolution: auto-decided per [LD5] — flock on store_dir/goals/<goalId>/.lock
+    resolved_in: findings-resolve-threads
+
+  - id: OT7
+    topic: Kill primitive unsafe — PID-reuse, process-group, escalation
+    raised_in: turn4a
+    status: resolved
+    resolution: >
+      MOOT under shape-1 — no kill step, no kill-safety needed. Auto-decided per [LD9].
+    resolved_in: findings-resolve-threads
+
+  - id: OT8
+    topic: Kill-behavior table missing two axes
+    raised_in: turn4b
+    status: resolved
+    resolution: auto-decided per [LD6] — add signal-source + supervisor axes
+    resolved_in: findings-resolve-threads
+
+  - id: OT9
+    topic: Snapshot TTL / staleness for fresh-spawn slots in RECOVER
+    raised_in: turn4a
+    status: resolved
+    resolution: >
+      MOOT — RECOVER does not fresh-spawn. Auto-decided per [LD11].
+    resolved_in: findings-resolve-threads
+
+  - id: OT10
+    topic: Outer-agent machine contract absent
+    raised_in: turn4a
+    status: resolved
+    resolution: auto-decided per [LD7] — `STATUS <goalId>` JSON subcommand
+    resolved_in: findings-resolve-threads

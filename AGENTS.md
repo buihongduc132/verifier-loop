@@ -18,6 +18,11 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 - **Language choice (why Rust):** [`flow/findings/2026-07-03-language-choice.md`](flow/findings/2026-07-03-language-choice.md)
 - **Implementation roadmap:** [`openspec/changes/add-verifier-loop-cli/tasks.md`](openspec/changes/add-verifier-loop-cli/tasks.md) §1–§11
 - **ACP sample fixtures:** [`flow/fixtures/`](flow/fixtures/)
+- **Round recovery (SHAPE-1):** [`openspec/changes/add-round-recovery/`](openspec/changes/add-round-recovery/)
+  (specs `round-recovery` + `goal-status` + `goal-lifecycle` delta; locked decisions LD3–LD11 in
+  [`flow/findings/round-recovery/2026-07-12-locked-decisions.yaml`](flow/findings/round-recovery/2026-07-12-locked-decisions.yaml)).
+  `recover` = cross-process round recovery (the `RECOVER` primitive + `STATUS` probe +
+  `GoalLock` mutual exclusion); distinct from `compaction_recover` (within-round same-process).
 
 ## Module map
 
@@ -30,6 +35,7 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 | `verdict/` | §7 | verdict-registration |
 | `consensus/` | §8 | consensus-check + completion-proof |
 | `prompt/`  | §9 | verifier-prompt |
+| `round_recover/` | add-round-recovery | cross-process round recovery (RECOVER + STATUS + GoalLock) |
 | `cli/`     | §10 | wiring |
 
 ## TDD discipline (hard constraint)
