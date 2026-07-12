@@ -276,12 +276,23 @@ fn init_layers(filter: tracing_subscriber::EnvFilter, use_json: bool) {
 /// this at the end of `main()` (after `run()` returns) when the `otel` feature
 /// is enabled. It is a no-op when OTLP is not configured (no provider installed)
 /// or when the `otel` feature is off.
+/// Global stash for the OTLP tracer provider, retained so [`shutdown`] can flush
+/// it explicitly before process exit (opentelemetry-otlp 0.26: the global
+/// `shutdown_tracer_provider` is unreliable when the provider is consumed by
+/// `install_simple`; we hold the instance and call `.shutdown()` directly).
+#[cfg(feature = "otel")]
+static OTLP_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::TracerProvider> =
+    std::sync::OnceLock::new();
+
 pub fn shutdown() {
     #[cfg(feature = "otel")]
     {
-        // Best-effort: flush all pending spans + drop the provider. Errors are
-        // swallowed (fail-open D5) — a flush failure never blocks process exit.
-        opentelemetry::global::shutdown_tracer_provider();
+        // Flush via the retained provider instance (not the global shutdown,
+        // which is unreliable after install_simple consumes the provider).
+        if let Some(provider) = OTLP_PROVIDER.get() {
+            // SDK TracerProvider has an inherent shutdown() that flushes + drops exporters.
+            let _ = provider.shutdown();
+        }
     }
 }
 
@@ -334,6 +345,10 @@ fn build_otlp_tracer() -> Option<opentelemetry_sdk::trace::Tracer> {
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
 
+    // Stash the provider so shutdown() can flush it explicitly before exit
+    // (the global shutdown_tracer_provider is unreliable in 0.26 after the
+    // pipeline consumes the provider; we retain + shutdown the instance).
+    let _ = OTLP_PROVIDER.set(provider.clone());
     use opentelemetry::trace::TracerProvider as _;
     Some(provider.tracer("verifier-loop"))
 }
