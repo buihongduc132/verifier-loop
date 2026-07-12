@@ -205,8 +205,14 @@ mod tests {
         assert_eq!(a.spawn, "pi --mode json");
         assert_eq!(a.resume, "pi --session {sid} --mode json");
         // Hard fail-closed: the spawn argv must carry ZERO prompt-derived bytes.
-        assert!(!a.spawn.contains("{prompt}"), "spawn must not inline prompt (E2BIG risk)");
-        assert!(!a.resume.contains("{prompt}"), "resume must not inline prompt (E2BIG risk)");
+        assert!(
+            !a.spawn.contains("{prompt}"),
+            "spawn must not inline prompt (E2BIG risk)"
+        );
+        assert!(
+            !a.resume.contains("{prompt}"),
+            "resume must not inline prompt (E2BIG risk)"
+        );
     }
 
     /// §8 (D6) — hermes templates mirror pi for spec parity (stdin transport).
@@ -371,17 +377,30 @@ mod tests {
     fn transport_field_serializes_correctly() {
         // stdin <-> Stdin
         let s = serde_json::to_string(&Transport::Stdin).expect("serialize Stdin");
-        assert_eq!(s, "\"stdin\"", "Stdin must serialize as the JSON string \"stdin\"");
-        let t: Transport =
-            serde_json::from_str("\"stdin\"").expect("deserialize \"stdin\"");
-        assert_eq!(t, Transport::Stdin, "\"stdin\" must deserialize to Transport::Stdin");
+        assert_eq!(
+            s, "\"stdin\"",
+            "Stdin must serialize as the JSON string \"stdin\""
+        );
+        let t: Transport = serde_json::from_str("\"stdin\"").expect("deserialize \"stdin\"");
+        assert_eq!(
+            t,
+            Transport::Stdin,
+            "\"stdin\" must deserialize to Transport::Stdin"
+        );
 
         // goal-file <-> GoalFile
         let s = serde_json::to_string(&Transport::GoalFile).expect("serialize GoalFile");
-        assert_eq!(s, "\"goal-file\"", "GoalFile must serialize as the JSON string \"goal-file\"");
+        assert_eq!(
+            s, "\"goal-file\"",
+            "GoalFile must serialize as the JSON string \"goal-file\""
+        );
         let t: Transport =
             serde_json::from_str("\"goal-file\"").expect("deserialize \"goal-file\"");
-        assert_eq!(t, Transport::GoalFile, "\"goal-file\" must deserialize to Transport::GoalFile");
+        assert_eq!(
+            t,
+            Transport::GoalFile,
+            "\"goal-file\" must deserialize to Transport::GoalFile"
+        );
 
         // unknown -> Err
         let unknown = serde_json::from_str::<Transport>("\"weird\"");

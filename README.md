@@ -151,6 +151,27 @@ where  goalSignature = SHA256(salt + goalText + createdAt)
 - Editing `goal.json` `goalText` after creation breaks `signature.json` and every downstream hash.
 - Editing a stored APPROVE verdict invalidates the completion hash on recompute.
 
+## Observability / tracing (add-otel-observability)
+
+The full `jewilo`/`jewije` lifecycle is observable via structured tracing:
+
+- **Per-goal `traceId`**: minted at NEW, persisted to `<store>/goals/<goalId>/trace-id`,
+  reused across RESUME, and propagated to every V* child env (`VERIFIER_LOOP_TRACE_ID`)
+  so `jewije` verdict registrations join the spawning round's trace.
+- **Per-goal `trace.jsonl`**: newline-delimited JSON lifecycle events (round start,
+  consensus pass/reject, verdict registered) under `<store>/goals/<goalId>/trace.jsonl`.
+  camelCase keys. Append-only; one file per goal.
+- **Opt-in OTLP/gRPC**: build with `--features otel` + set
+  `VERIFIER_LOOP_OTEL_EXPORTER_OTLP_ENDPOINT` to ship spans to a collector. Default
+  builds link NO OpenTelemetry deps (`tracing` + `tracing-subscriber` only).
+- **Level/format**: `VERIFIER_LOOP_LOG` (default `info`; `error`/`warn`/`info`/`debug`/`trace`),
+  `VERIFIER_LOOP_LOG_FORMAT` (`text` legacy byte-identical stderr | `json` structured NDJSON).
+
+**Critical:** `traceId` is **metadata, not a hash input**. The completion-hash and
+receipt-`entryHash` formulas are byte-identical with and without tracing enabled.
+Tracing is **fail-open**: any tracing error is swallowed and never blocks a verdict or
+hash. See [`THREAT-MODEL.md`](THREAT-MODEL.md) "Observability artifacts are NOT evidence".
+
 ## Coverage gate (>=80% lines)
 
 ```bash

@@ -158,22 +158,21 @@ fn read_goal_json(home: &Path, goal_id: &str) -> Value {
 
 /// Read the completion hash from stdout (last `mmddyy-XXXXXXXX` line).
 fn hash_from_stdout(stdout: &str) -> Option<String> {
-    stdout
-        .lines()
-        .rev()
-        .find_map(|l| {
-            let l = l.trim();
-            // mmddyy-XXXXXXXX: 6 digits, hyphen, 8 hex.
-            if l.len() == 15
-                && l[6..7] == *"-"
-                && l[..6].chars().all(|c: char| c.is_ascii_digit())
-                && l[7..].chars().all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-            {
-                Some(l.to_string())
-            } else {
-                None
-            }
-        })
+    stdout.lines().rev().find_map(|l| {
+        let l = l.trim();
+        // mmddyy-XXXXXXXX: 6 digits, hyphen, 8 hex.
+        if l.len() == 15
+            && l[6..7] == *"-"
+            && l[..6].chars().all(|c: char| c.is_ascii_digit())
+            && l[7..]
+                .chars()
+                .all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            Some(l.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -219,25 +218,40 @@ fn new_with_approving_stub_produces_hash_and_goal_dir() {
 
     // goal.json + signature.json present.
     assert!(gdir.join("goal.json").exists(), "goal.json written");
-    assert!(gdir.join("signature.json").exists(), "signature.json written");
+    assert!(
+        gdir.join("signature.json").exists(),
+        "signature.json written"
+    );
 
     let v1 = gdir.join("rounds").join("1").join("v1");
     // verdict.json status APPROVE (written by the stub via verifier-verdict).
     let verdict: Value =
         serde_json::from_str(&fs::read_to_string(v1.join("verdict.json")).unwrap()).unwrap();
-    assert_eq!(verdict["status"], "APPROVE", "v1 verdict APPROVE: {verdict}");
+    assert_eq!(
+        verdict["status"], "APPROVE",
+        "v1 verdict APPROVE: {verdict}"
+    );
     assert!(verdict["registeredAt"].is_string(), "registeredAt present");
 
     // meta.json + final-output.txt + initial-prompt.txt populated by spawn/prompt layers.
     assert!(v1.join("meta.json").exists(), "meta.json written");
     let final_out = fs::read_to_string(v1.join("final-output.txt")).unwrap();
-    assert!(final_out.contains("stub final output"), "final-output captured: {final_out}");
-    assert!(v1.join("initial-prompt.txt").exists(), "initial-prompt persisted");
+    assert!(
+        final_out.contains("stub final output"),
+        "final-output captured: {final_out}"
+    );
+    assert!(
+        v1.join("initial-prompt.txt").exists(),
+        "initial-prompt persisted"
+    );
 
     // completion.json mirrors the printed hash.
     let completion: Value =
         serde_json::from_str(&fs::read_to_string(gdir.join("completion.json")).unwrap()).unwrap();
-    assert_eq!(completion["hash"], hash, "completion.json hash matches stdout");
+    assert_eq!(
+        completion["hash"], hash,
+        "completion.json hash matches stdout"
+    );
     assert_eq!(completion["goalId"].as_str().unwrap(), goal_id);
     assert_eq!(completion["roundNumber"], 1);
     assert!(completion["matchedAt"].is_string());
@@ -267,7 +281,10 @@ fn new_with_rejecting_stub_exits_non_zero_and_no_hash() {
         !out.status.success(),
         "rejected round must exit non-zero: {stderr}"
     );
-    assert!(hash_from_stdout(&stdout).is_none(), "no hash on failure: {stdout}");
+    assert!(
+        hash_from_stdout(&stdout).is_none(),
+        "no hash on failure: {stdout}"
+    );
 
     let goals_dir = home.join("goals");
     let goal_id = fs::read_dir(&goals_dir)
@@ -279,19 +296,25 @@ fn new_with_rejecting_stub_exits_non_zero_and_no_hash() {
         .to_string_lossy()
         .into_owned();
     assert!(
-        !home.join("goals").join(&goal_id).join("completion.json").exists(),
+        !home
+            .join("goals")
+            .join(&goal_id)
+            .join("completion.json")
+            .exists(),
         "no completion.json on failure"
     );
 
-    let verdict: Value = serde_json::from_str(&fs::read_to_string(
-        home.join("goals")
-            .join(&goal_id)
-            .join("rounds")
-            .join("1")
-            .join("v1")
-            .join("verdict.json"),
+    let verdict: Value = serde_json::from_str(
+        &fs::read_to_string(
+            home.join("goals")
+                .join(&goal_id)
+                .join("rounds")
+                .join("1")
+                .join("v1")
+                .join("verdict.json"),
+        )
+        .unwrap(),
     )
-    .unwrap())
     .unwrap();
     assert_eq!(verdict["status"], "REJECT");
     assert!(verdict["notes"].as_str().unwrap().contains("no proof"));
@@ -347,7 +370,9 @@ fn resume_after_reject_produces_hash_on_second_round() {
     );
 
     let hash = hash_from_stdout(&stdout).expect("hash on round 2");
-    assert!(predicate::str::is_match("^[0-9]{6}-[0-9a-f]{8}$").unwrap().eval(&hash));
+    assert!(predicate::str::is_match("^[0-9]{6}-[0-9a-f]{8}$")
+        .unwrap()
+        .eval(&hash));
 
     // Round 2 directory exists with an APPROVE verdict.
     let v2 = gdir.join("rounds").join("2").join("v1");
@@ -410,7 +435,8 @@ fn hash_recomputes_and_tamper_breaks_it() {
 
     // Recompute via the public consensus API and compare (audit reproducibility).
     let salt = fs::read_to_string(home.join(".salt")).unwrap();
-    let goal: Value = serde_json::from_str(&fs::read_to_string(gdir.join("goal.json")).unwrap()).unwrap();
+    let goal: Value =
+        serde_json::from_str(&fs::read_to_string(gdir.join("goal.json")).unwrap()).unwrap();
     let sig: Value =
         serde_json::from_str(&fs::read_to_string(gdir.join("signature.json")).unwrap()).unwrap();
     let goal_sig = sig["signature"].as_str().unwrap();
@@ -438,15 +464,24 @@ fn hash_recomputes_and_tamper_breaks_it() {
         matched_at,
         &receipt_head,
     );
-    assert_eq!(recomputed.short_hash(), stored_hash, "audit recomputes the stored short hash");
-    assert_eq!(recomputed.full_digest(), completion["fullDigest"].as_str().unwrap(), "audit recomputes the stored fullDigest");
+    assert_eq!(
+        recomputed.short_hash(),
+        stored_hash,
+        "audit recomputes the stored short hash"
+    );
+    assert_eq!(
+        recomputed.full_digest(),
+        completion["fullDigest"].as_str().unwrap(),
+        "audit recomputes the stored fullDigest"
+    );
 
     // Tamper 1: edit goalText → signature recomputation differs → hash differs.
     let mut tampered_goal = goal.clone();
     tampered_goal["goalText"] = serde_json::Value::String("tampered!".into());
     let tampered_goal_text = tampered_goal["goalText"].as_str().unwrap();
     let created_at = goal["createdAt"].as_str().unwrap();
-    let tampered_sig = verifier_loop::goal::compute_signature(salt.trim(), tampered_goal_text, created_at);
+    let tampered_sig =
+        verifier_loop::goal::compute_signature(salt.trim(), tampered_goal_text, created_at);
     let tampered_hash = verifier_loop::consensus::compute_hash(
         salt.trim(),
         &goal_id,
@@ -457,7 +492,8 @@ fn hash_recomputes_and_tamper_breaks_it() {
         &receipt_head,
     );
     assert_ne!(
-        tampered_hash.short_hash(), stored_hash,
+        tampered_hash.short_hash(),
+        stored_hash,
         "tampered goalText must break the hash"
     );
 
@@ -474,11 +510,13 @@ fn hash_recomputes_and_tamper_breaks_it() {
         &receipt_head,
     );
     assert_ne!(
-        tampered_v_hash.short_hash(), stored_hash,
+        tampered_v_hash.short_hash(),
+        stored_hash,
         "tampered verdict must break the hash"
     );
     assert_ne!(
-        tampered_v_hash.full_digest(), recomputed.full_digest(),
+        tampered_v_hash.full_digest(),
+        recomputed.full_digest(),
         "tampered verdict must break the full digest"
     );
 }
@@ -495,10 +533,22 @@ fn new_with_home_pointing_at_a_file_fails_closed() {
 
     let stub = stub_script(dir.path());
 
-    let out = run_vl_raw(dir.path(), &home_file, &stub, &["NEW", "goal that cannot be created"], &[]);
-    assert!(!out.status.success(), "must fail closed when home is a file");
+    let out = run_vl_raw(
+        dir.path(),
+        &home_file,
+        &stub,
+        &["NEW", "goal that cannot be created"],
+        &[],
+    );
+    assert!(
+        !out.status.success(),
+        "must fail closed when home is a file"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(hash_from_stdout(&stdout).is_none(), "no hash when store unusable");
+    assert!(
+        hash_from_stdout(&stdout).is_none(),
+        "no hash when store unusable"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -589,19 +639,23 @@ fn seed_workdir_with_config(
 
     fs::write(dir.join(".gitkeep"), "").unwrap();
     let _ = std::process::Command::new("git")
-        .arg("-C").arg(dir)
+        .arg("-C")
+        .arg(dir)
         .args(["config", "user.email", "test@example.com"])
         .status();
     let _ = std::process::Command::new("git")
-        .arg("-C").arg(dir)
+        .arg("-C")
+        .arg(dir)
         .args(["config", "user.name", "Test"])
         .status();
     let _ = std::process::Command::new("git")
-        .arg("-C").arg(dir)
+        .arg("-C")
+        .arg(dir)
         .args(["add", "."])
         .status();
     let _ = std::process::Command::new("git")
-        .arg("-C").arg(dir)
+        .arg("-C")
+        .arg(dir)
         .args(["commit", "-q", "-m", "seed"])
         .status();
 
@@ -793,13 +847,8 @@ fn new_with_empty_or_whitespace_goal_text_fails_closed() {
 fn new_with_goal_below_min_goal_chars_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
-    let stub = seed_workdir_with_config(
-        home,
-        1,
-        1,
-        serde_json::json!({ "minGoalChars": 50 }),
-        None,
-    );
+    let stub =
+        seed_workdir_with_config(home, 1, 1, serde_json::json!({ "minGoalChars": 50 }), None);
 
     // 10-char goalText, well under minGoalChars=50.
     let out = run_vl_raw(home, home, &stub, &["NEW", "0123456789"], &[]);
@@ -834,7 +883,13 @@ fn new_with_missing_verifier_prompt_file_fails_closed() {
         None,
     );
 
-    let out = run_vl_raw(home, home, &stub, &["NEW", "implement the verifier-loop CLI"], &[]);
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["NEW", "implement the verifier-loop CLI"],
+        &[],
+    );
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
         !out.status.success(),
@@ -855,13 +910,7 @@ fn new_without_verifier_prompt_file_keeps_baked_in_default_only() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     // No verifierPromptFile key at all -> today's behavior.
-    let stub = seed_workdir_with_config(
-        home,
-        1,
-        1,
-        serde_json::json!({}),
-        None,
-    );
+    let stub = seed_workdir_with_config(home, 1, 1, serde_json::json!({}), None);
 
     let mut cmd = vl_bin();
     let out = cmd
@@ -967,7 +1016,13 @@ fn snapshot_cwd_is_runtime_dir_regardless_of_anything_else() {
     let stub = seed_workdir_with_config(home, 1, 1, serde_json::json!({}), None);
 
     // Invoke jewilo from a SPECIFIC runtime dir (the worktree root = home here).
-    let out = run_vl_raw(home, home, &stub, &["NEW", "regression: snapshot cwd must be runtime"], &[]);
+    let out = run_vl_raw(
+        home,
+        home,
+        &stub,
+        &["NEW", "regression: snapshot cwd must be runtime"],
+        &[],
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "NEW exited {}: {stderr}", out.status);
 

@@ -134,16 +134,14 @@ printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$V
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
 
     // (a) The full prompt MUST arrive on stdin (the core stdin-transport contract).
-    let stdin_captured =
-        fs::read_to_string(vdir.join("stdin_capture.txt")).unwrap_or_default();
+    let stdin_captured = fs::read_to_string(vdir.join("stdin_capture.txt")).unwrap_or_default();
     assert_eq!(
         stdin_captured, prompt,
         "stdin transport must write the FULL rendered prompt to the child's stdin pipe"
     );
 
     // (b) The argv MUST NOT contain any prompt-derived bytes.
-    let argv_captured =
-        fs::read_to_string(vdir.join("argv_capture.txt")).unwrap_or_default();
+    let argv_captured = fs::read_to_string(vdir.join("argv_capture.txt")).unwrap_or_default();
     assert!(
         !argv_captured.contains("UNIQUE_PROMPT_BODY"),
         "argv must NOT contain prompt-derived bytes; got: {argv_captured}"
@@ -358,8 +356,7 @@ exit 1
     // Proves stdin was piped (currently RED: file empty/missing because stdin=null).
     let byte = fs::read(vdir.join("stdin_byte.txt")).unwrap_or_default();
     assert_eq!(
-        byte,
-        b"F",
+        byte, b"F",
         "the child must have received the first prompt byte on stdin (got {:?})",
         byte
     );

@@ -23,6 +23,18 @@ path = "src/bin/verifier_loop.rs"
 name = "verifier-verdict"
 path = "src/bin/verifier_verdict.rs"
 
+[features]
+# OTLP/gRPC trace export — opt-in. Default build links NO OpenTelemetry deps; only
+# `tracing` + `tracing-subscriber` (always-on) are pulled. See design.md D3,
+# trace-export spec "OTLP/gRPC export is opt-in behind the otel Cargo feature".
+default = []
+otel = [
+  "dep:tracing-opentelemetry",
+  "dep:opentelemetry",
+  "dep:opentelemetry-otlp",
+  "dep:opentelemetry_sdk",
+]
+
 [dependencies]
 # JSON (goal.json, verdict.json, config.json, ACP stream)         -> tasks.md §3,§7,§4
 serde = { version = "1", features = ["derive"] }
@@ -46,6 +58,20 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 # Portable advisory file locking (receipt-log append mutual exclusion) -> tamper-hardening PR#5 review
 fs4 = "0.12"
+# Structured logging + tracing (add-otel-observability, design.md D0).
+# Always-on: the `tracing` facade compiles its macros to no-ops when no subscriber
+# is active for the level, so the default-off behavior adds negligible overhead.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
+# OTLP/gRPC export — opt-in via the `otel` feature (design.md D3). These pull a sizable
+# transitive tree (tonic/tokio-runtime); gated so default builds stay lean.
+# Version pinning: `tracing-opentelemetry 0.27` depends on `opentelemetry 0.26`
+# (NOT 0.27). The compatible set is: tracing-opentelemetry 0.27 + opentelemetry 0.26 +
+# opentelemetry_sdk 0.26 + opentelemetry-otlp 0.26. Mixing breaks the trait bounds.
+tracing-opentelemetry = { version = "0.27", optional = true }
+opentelemetry = { version = "0.26", optional = true }
+opentelemetry-otlp = { version = "0.26", features = ["grpc-tonic"], optional = true }
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"], optional = true }
 
 [dev-dependencies]
 # deterministic temp HOMEs for store tests                        -> §2.3,§3.5

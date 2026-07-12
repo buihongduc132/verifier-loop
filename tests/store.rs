@@ -128,11 +128,7 @@ fn config_parses_verifier_prompt_file_when_present() {
 #[test]
 fn config_parses_min_goal_chars_when_present() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("config.json"),
-        r#"{"minGoalChars":50}"#,
-    )
-    .unwrap();
+    fs::write(dir.path().join("config.json"), r#"{"minGoalChars":50}"#).unwrap();
 
     let cfg = store::load_config_in(dir.path()).expect("config loads with minGoalChars");
     assert_eq!(
@@ -206,7 +202,10 @@ fn config_camel_case_round_trips_verifier_prompt_file_and_min_goal_chars() {
     );
 
     let back: store::Config = serde_json::from_str(&j).unwrap();
-    assert_eq!(back, cfg, "round-trip preserves verifier_prompt_file + min_goal_chars");
+    assert_eq!(
+        back, cfg,
+        "round-trip preserves verifier_prompt_file + min_goal_chars"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -238,13 +237,9 @@ fn config_rejects_unknown_key_cwd() {
 #[test]
 fn config_rejects_unknown_key_model() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("config.json"),
-        r#"{"model":null}"#,
-    )
-    .unwrap();
-    let err = store::load_config_in(dir.path())
-        .expect_err("model is not a config key; MUST be rejected");
+    fs::write(dir.path().join("config.json"), r#"{"model":null}"#).unwrap();
+    let err =
+        store::load_config_in(dir.path()).expect_err("model is not a config key; MUST be rejected");
     assert!(
         err.to_string().to_lowercase().contains("model"),
         "error must name 'model': {}",
@@ -286,7 +281,7 @@ fn config_accepts_canonical_keys_only() {
         r#"{"n":2,"m":2,"maxTurn":3,"backend":"pi","gitDiffMaxChars":10000,"verifierTimeoutSec":1800,"verifierPromptFile":null,"minGoalChars":0}"#,
     )
     .unwrap();
-    let cfg = store::load_config_in(dir.path())
-        .expect("canonical keys only must parse without error");
+    let cfg =
+        store::load_config_in(dir.path()).expect("canonical keys only must parse without error");
     assert_eq!((cfg.n, cfg.m), (2, 2));
 }

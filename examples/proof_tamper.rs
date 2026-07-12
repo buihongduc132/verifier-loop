@@ -8,8 +8,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use verifier_loop::consensus::{self, CompletionRecord};
 use verifier_loop::goal;
+use verifier_loop::store::load_config_in;
 use verifier_loop::verdict;
-use verifier_loop::store::{load_config_in};
 
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).expect("goal_dir arg"));

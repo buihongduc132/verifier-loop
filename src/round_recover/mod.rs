@@ -175,7 +175,11 @@ pub struct GoalStatus {
 
 /// Read-only goal status probe (LD7). Does NOT take the goal lock — a status check must
 /// never block on a long-running round. Each file read is independent and atomic.
-pub fn status(root: &Path, goal_id: &str, config: &store::Config) -> Result<GoalStatus, RoundRecoverError> {
+pub fn status(
+    root: &Path,
+    goal_id: &str,
+    config: &store::Config,
+) -> Result<GoalStatus, RoundRecoverError> {
     let round = goal::current_round(root, goal_id)?;
     let round_dir = goal::goal_dir(root, goal_id)
         .join(goal::ROUNDS_DIR)
@@ -199,12 +203,18 @@ pub fn status(root: &Path, goal_id: &str, config: &store::Config) -> Result<Goal
             });
             if rec.status == VerdictStatus::Null {
                 any_null = true;
-                slots.push(SlotStatus { id: vid, verdict: VerdictStatus::Null });
+                slots.push(SlotStatus {
+                    id: vid,
+                    verdict: VerdictStatus::Null,
+                });
             } else {
                 if rec.status == VerdictStatus::Approve {
                     raw_approve_count = raw_approve_count.saturating_add(1);
                 }
-                slots.push(SlotStatus { id: vid, verdict: rec.status });
+                slots.push(SlotStatus {
+                    id: vid,
+                    verdict: rec.status,
+                });
             }
         }
     }
@@ -318,7 +328,9 @@ pub fn recover_with_poll(
 
         if result.passed {
             let hash = finish_pass(root, goal_id, round, &result)?;
-            return Ok(RecoverOutcome::ConsensusPassed(hash.short_hash().to_string()));
+            return Ok(RecoverOutcome::ConsensusPassed(
+                hash.short_hash().to_string(),
+            ));
         }
 
         if null_slots.is_empty() {
@@ -385,9 +397,9 @@ fn finish_pass(
     use chrono::Utc;
     let salt = store::salt_in(root)?;
     let goal_root = goal::goal_dir(root, goal_id);
-    let sig_record: goal::SignatureRecord = serde_json::from_str(
-        &std::fs::read_to_string(goal_root.join(goal::SIGNATURE_FILE))?,
-    )?;
+    let sig_record: goal::SignatureRecord = serde_json::from_str(&std::fs::read_to_string(
+        goal_root.join(goal::SIGNATURE_FILE),
+    )?)?;
     let matched_at = Utc::now().to_rfc3339();
     let receipt_head = crate::receipt::read_receipt_head(root, goal_id);
     let hash = consensus::compute_hash(
@@ -399,7 +411,19 @@ fn finish_pass(
         &matched_at,
         &receipt_head,
     );
-    consensus::write_completion(root, goal_id, result, round, &hash, &matched_at)?;
+    consensus::write_completion(
+        root,
+        goal_id,
+        result,
+        round,
+        &hash,
+        &matched_at,
+        // Record the goal's trace id on completion.json as metadata (NOT a hash
+        // input, design D4). Fail-open.
+        crate::observe::ensure_goal_trace_id(root, goal_id)
+            .ok()
+            .as_deref(),
+    )?;
     Ok(hash)
 }
 

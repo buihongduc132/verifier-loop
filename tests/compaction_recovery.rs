@@ -163,11 +163,9 @@ fn parser_detects_compaction_event() {
 
 #[test]
 fn parser_detects_compaction_event_with_after() {
-    let ev = acp::parse_event(
-        r#"{"type":"compaction","tokensBefore":255106,"tokensAfter":32000}"#,
-    )
-    .unwrap()
-    .unwrap();
+    let ev = acp::parse_event(r#"{"type":"compaction","tokensBefore":255106,"tokensAfter":32000}"#)
+        .unwrap()
+        .unwrap();
     match ev {
         acp::AcpEvent::Compaction {
             tokens_before,
@@ -261,7 +259,9 @@ fi
     let cfg = store::Config::load_in(root).unwrap();
 
     let runs = rt()
-        .block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
+        .block_on(spawn::spawn_round(spawn_input(
+            root, &goal_id, &cfg, &adapter,
+        )))
         .expect("spawn succeeds");
     assert_eq!(runs.len(), 1);
 
@@ -328,8 +328,10 @@ EOF
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
     let meta: serde_json::Value =
@@ -372,8 +374,10 @@ EOF
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
     let meta: serde_json::Value =
@@ -435,8 +439,10 @@ fi
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
     let meta: serde_json::Value =
@@ -504,8 +510,10 @@ EOF
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     let count: u32 = fs::read_to_string(capture_dir.join("v1.count"))
         .unwrap()
@@ -591,8 +599,10 @@ EOF
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     let stdin_path = capture_dir.join("v1.recovery-stdin");
     assert!(
@@ -654,8 +664,10 @@ exit 0
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     let count: u32 = fs::read_to_string(capture_dir.join("v1.count"))
         .unwrap()
@@ -716,8 +728,10 @@ EOF
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
     let meta: serde_json::Value =
@@ -754,7 +768,10 @@ EOF
 fn real_verifier_verdict_bin() -> PathBuf {
     let prog = assert_cmd::cargo::cargo_bin("verifier-verdict");
     // Sanity: it must exist on disk.
-    assert!(prog.is_file(), "verifier-verdict binary must exist at {prog:?}");
+    assert!(
+        prog.is_file(),
+        "verifier-verdict binary must exist at {prog:?}"
+    );
     prog
 }
 
@@ -804,8 +821,10 @@ fi
     let adapter = script_adapter(&script);
     let cfg = store::Config::load_in(root).unwrap();
 
-    rt().block_on(spawn::spawn_round(spawn_input(root, &goal_id, &cfg, &adapter)))
-        .expect("spawn succeeds");
+    rt().block_on(spawn::spawn_round(spawn_input(
+        root, &goal_id, &cfg, &adapter,
+    )))
+    .expect("spawn succeeds");
 
     // (The EnvGuard restores VERIFIER_LOOP_VERDICT_BIN on Drop at end of scope.)
 
@@ -817,7 +836,11 @@ fi
     assert!(
         secret_file.exists(),
         "verifier-secret.hex must be persisted at initial spawn; got dir: {}",
-        fs::read_dir(&vdir).unwrap().map(|e| e.unwrap().path().to_string_lossy().to_string()).collect::<Vec<_>>().join(", ")
+        fs::read_dir(&vdir)
+            .unwrap()
+            .map(|e| e.unwrap().path().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     let mode = fs::metadata(&secret_file).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "secret file mode must be 0600, got {:o}", mode);

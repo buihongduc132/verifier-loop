@@ -50,28 +50,15 @@ fn seed_null_slot(root: &Path, goal_id: &str, round: u32, vid: &str) {
         .join(vid);
     fs::create_dir_all(&vdir).unwrap();
     if !vdir.join(verdict::VERDICT_FILE).exists() {
-        fs::write(
-            vdir.join(verdict::VERDICT_FILE),
-            r#"{"status":null}"#,
-        )
-        .unwrap();
+        fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     }
-    fs::write(
-        vdir.join("meta.json"),
-        r#"{"turnsUsed":0}"#,
-    )
-    .unwrap();
+    fs::write(vdir.join("meta.json"), r#"{"turnsUsed":0}"#).unwrap();
 }
 
 /// A real signed APPROVE — mint the slot's pinned pubkey and sign under it, exactly like
 /// a verifier process does via jewije. This produces a verdict that passes the signature
 /// gate in consensus::evaluate.
-fn signed_approve(
-    root: &Path,
-    goal_id: &str,
-    round: u32,
-    vid: &str,
-) -> verdict::VerdictRecord {
+fn signed_approve(root: &Path, goal_id: &str, round: u32, vid: &str) -> verdict::VerdictRecord {
     let sk = verdict::mint_and_pin_pubkey(root, goal_id, vid, round).unwrap();
     verdict::register_signed_approve(root, goal_id, vid, round, None, &sk).unwrap();
     verdict::read_verdict(root, goal_id, vid, round).unwrap_or(verdict::VerdictRecord {
@@ -146,7 +133,10 @@ fn goal_lock_drop_releases_so_later_acquire_succeeds() {
         let _g = round_recover::GoalLock::acquire_exclusive(dir.path(), &goal_id).unwrap();
     } // guard dropped here
     let again = round_recover::GoalLock::acquire_exclusive(dir.path(), &goal_id);
-    assert!(again.is_ok(), "after drop, a fresh acquire must succeed: {again:?}");
+    assert!(
+        again.is_ok(),
+        "after drop, a fresh acquire must succeed: {again:?}"
+    );
 }
 
 // ===========================================================================
@@ -177,8 +167,16 @@ fn status_needs_done_state_consensus_pass_when_completion_exists() {
         "2026-07-12T00:00:00Z",
         &head,
     );
-    consensus::write_completion(dir.path(), &goal_id, &result, round, &hash, "2026-07-12T00:00:00Z")
-        .unwrap();
+    consensus::write_completion(
+        dir.path(),
+        &goal_id,
+        &result,
+        round,
+        &hash,
+        "2026-07-12T00:00:00Z",
+        None,
+    )
+    .unwrap();
 
     let st = round_recover::status(dir.path(), &goal_id, &cfg()).unwrap();
     assert_eq!(st.state, round_recover::GoalState::ConsensusPass);
@@ -266,7 +264,10 @@ fn status_null_slot_emits_verdict_null_key() {
         v2.get("verdict").is_some(),
         "null slot MUST carry a verdict key (got {v2})"
     );
-    assert!(v2["verdict"].is_null(), "null slot verdict must be null (got {v2})");
+    assert!(
+        v2["verdict"].is_null(),
+        "null slot verdict must be null (got {v2})"
+    );
 }
 
 // ===========================================================================
@@ -296,13 +297,8 @@ fn recover_harvests_verdict_that_becomes_non_null_mid_poll() {
         let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, &sk_v2);
     });
 
-    let outcome = round_recover::recover(
-        dir.path(),
-        &goal_id,
-        &cfg(),
-        Duration::from_secs(5),
-    )
-    .unwrap();
+    let outcome =
+        round_recover::recover(dir.path(), &goal_id, &cfg(), Duration::from_secs(5)).unwrap();
     // Join the background writer so the test does not leak the thread into other tests.
     let _ = writer.join();
 
@@ -310,7 +306,10 @@ fn recover_harvests_verdict_that_becomes_non_null_mid_poll() {
         round_recover::RecoverOutcome::ConsensusPassed(_) => {
             // completion.json must now exist.
             let comp = goal::goal_dir(dir.path(), &goal_id).join(consensus::COMPLETION_FILE);
-            assert!(comp.exists(), "completion.json must be written on a passed recover");
+            assert!(
+                comp.exists(),
+                "completion.json must be written on a passed recover"
+            );
         }
         other => panic!("expected ConsensusPassed, got {other:?}"),
     }
@@ -325,7 +324,8 @@ fn recover_dead_null_slot_times_out_with_resume_guidance() {
     signed_approve(dir.path(), &goal_id, round, "v1");
     seed_null_slot(dir.path(), &goal_id, round, "v2");
 
-    let outcome = round_recover::recover(dir.path(), &goal_id, &cfg(), RECOVER_TEST_TIMEOUT).unwrap();
+    let outcome =
+        round_recover::recover(dir.path(), &goal_id, &cfg(), RECOVER_TEST_TIMEOUT).unwrap();
     match outcome {
         round_recover::RecoverOutcome::StillNullAfter { guidance, .. } => {
             assert!(
@@ -349,7 +349,8 @@ fn recover_round_decided_no_consensus_does_not_wait_full_timeout() {
     signed_reject(dir.path(), &goal_id, round, "v2", "missing tests");
 
     let start = std::time::Instant::now();
-    let outcome = round_recover::recover(dir.path(), &goal_id, &cfg(), Duration::from_secs(10)).unwrap();
+    let outcome =
+        round_recover::recover(dir.path(), &goal_id, &cfg(), Duration::from_secs(10)).unwrap();
     let elapsed = start.elapsed();
     match outcome {
         round_recover::RecoverOutcome::RoundDecidedNoConsensus => {}
@@ -360,7 +361,10 @@ fn recover_round_decided_no_consensus_does_not_wait_full_timeout() {
         "decided-failed must NOT wait the full timeout (elapsed {elapsed:?})"
     );
     let comp = goal::goal_dir(dir.path(), &goal_id).join(consensus::COMPLETION_FILE);
-    assert!(!comp.exists(), "no completion.json on a decided-failed recover");
+    assert!(
+        !comp.exists(),
+        "no completion.json on a decided-failed recover"
+    );
 }
 
 #[test]

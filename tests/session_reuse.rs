@@ -15,8 +15,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use verifier_loop::{acp, spawn, store};
 use verifier_loop::goal;
+use verifier_loop::{acp, spawn, store};
 
 const PROMPT: &str = "";
 
@@ -62,14 +62,7 @@ printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$S
 "#;
 
 /// Seed a prior round's per-verifier meta + null verdict, simulating a finished round 1.
-fn seed_prior_round(
-    root: &Path,
-    goal_id: &str,
-    round: u32,
-    vid: &str,
-    sid: &str,
-    turns_used: u32,
-) {
+fn seed_prior_round(root: &Path, goal_id: &str, round: u32, vid: &str, sid: &str, turns_used: u32) {
     let vdir = root
         .join("goals")
         .join(goal_id)
@@ -144,7 +137,11 @@ EOF
         .expect("resume spawn succeeds");
 
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].sid.as_deref(), Some("s1-resumed"), "new SID captured");
+    assert_eq!(
+        runs[0].sid.as_deref(),
+        Some("s1-resumed"),
+        "new SID captured"
+    );
 
     let cap = fs::read_to_string(capture_dir.join("v1.argv")).unwrap();
     let lines: Vec<&str> = cap.trim().lines().collect();
@@ -158,15 +155,17 @@ EOF
     );
 
     // New round's meta.json reflects the resumed session's captured SID.
-    let new_meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(
-        root.join("goals")
-            .join(&goal_id)
-            .join("rounds")
-            .join("2")
-            .join("v1")
-            .join("meta.json"),
+    let new_meta: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join("goals")
+                .join(&goal_id)
+                .join("rounds")
+                .join("2")
+                .join("v1")
+                .join("meta.json"),
+        )
+        .unwrap(),
     )
-    .unwrap())
     .unwrap();
     assert_eq!(new_meta["sid"], "s1-resumed", "round-2 meta has new sid");
 }
@@ -222,7 +221,11 @@ EOF
         .expect("resume spawn succeeds");
 
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].sid.as_deref(), Some("s1-fresh"), "fresh SID captured");
+    assert_eq!(
+        runs[0].sid.as_deref(),
+        Some("s1-fresh"),
+        "fresh SID captured"
+    );
 
     // Fresh spawn must NOT pass --session.
     let argv_line = fs::read_to_string(capture_dir.join("v1.argv")).unwrap();
@@ -306,5 +309,9 @@ EOF
 
     let history = fs::read_to_string(capture_dir.join("history")).unwrap();
     let entries: Vec<&str> = history.trim().lines().collect();
-    assert_eq!(entries, vec!["2 v1", "3 v1"], "round increments, verifierId stable");
+    assert_eq!(
+        entries,
+        vec!["2 v1", "3 v1"],
+        "round increments, verifierId stable"
+    );
 }

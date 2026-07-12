@@ -60,6 +60,10 @@ enum Cmd {
 }
 
 fn main() {
+    // Initialize tracing (fail-open, design D5). jewije runs inside the spawned V*
+    // process; VERIFIER_LOOP_TRACE_ID (set by the spawning jewilo) is picked up by
+    // the receipt layer at append time and by tracing spans via the subscriber.
+    let _ = verifier_loop::observe::init(None);
     let cli = Cli::parse();
     let code = match run(&cli) {
         Ok(()) => {
@@ -71,6 +75,9 @@ fn main() {
             1
         }
     };
+    // Flush + shut down the OTLP tracer before exit so in-flight spans are not
+    // lost (design D3). No-op when OTLP is not configured / feature off.
+    verifier_loop::observe::shutdown();
     std::process::exit(code);
 }
 
@@ -79,6 +86,24 @@ fn run(cli: &Cli) -> Result<(), String> {
     let goal_id = resolve_required(ENV_GOAL_ID, "goal id")?;
     let verifier_id = resolve_required(ENV_VERIFIER_ID, "verifier id")?;
     let round = resolve_round()?;
+
+    // Verdict registration span (lifecycle-tracing spec). The traceId comes from
+    // VERIFIER_LOOP_TRACE_ID (propagated by the spawning jewilo) or is empty when
+    // jewije is invoked manually — the receipt layer records whichever is active.
+    let trace_id = verifier_loop::observe::trace_id_from_env();
+    let kind = match cli.command {
+        Cmd::Approve { .. } => "approve",
+        Cmd::Reject { .. } => "reject",
+    };
+    let _span = tracing::info_span!(
+        "jewije.register",
+        goalId = %goal_id,
+        verifierId = %verifier_id,
+        round = round,
+        traceId = %trace_id.as_deref().unwrap_or(""),
+        kind = kind,
+    )
+    .entered();
 
     // Resolve the optional signing secret. A missing/empty secret is legal only for
     // slots in the legacy (unsigned) regime — see the regime gate below.
@@ -132,7 +157,27 @@ fn run(cli: &Cli) -> Result<(), String> {
         )),
     };
 
-    result.map_err(map_verdict_error)
+    result
+        .map(|()| {
+            // Record a verdict-registered event in the per-goal trace.jsonl (trace-export
+            // spec). Fail-open: a write error is swallowed inside append_trace_event.
+            let status = match cli.command {
+                Cmd::Approve { .. } => "APPROVE",
+                Cmd::Reject { .. } => "REJECT",
+            };
+            let _ = verifier_loop::observe::append_trace_event(
+                &root,
+                &goal_id,
+                "info",
+                "jewije.registered",
+                serde_json::json!({
+                    "verifierId": verifier_id,
+                    "round": round,
+                    "status": status,
+                }),
+            );
+        })
+        .map_err(map_verdict_error)
 }
 
 /// Map a `VerdictError` to a user-facing stderr string. Each arm fails closed.

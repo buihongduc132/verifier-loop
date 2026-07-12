@@ -91,8 +91,15 @@ fn main() -> ExitCode {
     let mut tampered = record.clone();
     tampered.goal_text = format!("{} [TAMPERED]", tampered.goal_text);
     let tampered_sig = goal::compute_signature(&salt, &tampered.goal_text, &tampered.created_at);
-    let hash_a =
-        consensus::compute_hash(&salt, &goal_id, &tampered_sig, round, &matching, matched_at, "");
+    let hash_a = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &tampered_sig,
+        round,
+        &matching,
+        matched_at,
+        "",
+    );
     println!("[3] tamper goalText → recompute");
     println!("    sig:    {sig}  → {tampered_sig}");
     println!("    hash:   {stored_hash}  → {hash_a}");
@@ -127,7 +134,10 @@ fn main() -> ExitCode {
     // Restore the file so the goal-dir transcript stays pristine for the audit trail.
     std::fs::write(&v1_path, &v1_raw).unwrap();
     println!("[4] tamper verdict registeredAt → recompute hash");
-    println!("    registeredAt: {original_registered_at} → {}", v1_tampered.registered_at.as_deref().unwrap_or(""));
+    println!(
+        "    registeredAt: {original_registered_at} → {}",
+        v1_tampered.registered_at.as_deref().unwrap_or("")
+    );
     println!("    hash:         {stored_hash} → {}", hash_b.short_hash());
     if stored_hash == hash_b.short_hash() {
         println!("    => FAIL: hash did NOT change after verdict edit");

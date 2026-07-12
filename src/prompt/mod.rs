@@ -452,7 +452,10 @@ pub fn capture_file_edit_times(cwd: &Path, max_chars: u64) -> Result<String, Pro
 /// followed by a second NUL-delimited path: `XY <new/dest>\0<old/source>\0` — the
 /// NEW/destination path comes FIRST, the OLD/source path comes SECOND.
 fn is_rename_status(xy: &str) -> bool {
-    xy.starts_with('R') || xy.starts_with('C') || xy.get(1..2) == Some("R") || xy.get(1..2) == Some("C")
+    xy.starts_with('R')
+        || xy.starts_with('C')
+        || xy.get(1..2) == Some("R")
+        || xy.get(1..2) == Some("C")
 }
 
 /// Truncates the `--context` input to `max_chars` characters, appending
@@ -486,7 +489,8 @@ pub fn budget_warning(rendered: &str, budget: usize) -> Option<String> {
     let mut heading: Option<&str> = None;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'#' && (i + 1 < bytes.len() && bytes[i + 1] == b' ')
+        if bytes[i] == b'#'
+            && (i + 1 < bytes.len() && bytes[i + 1] == b' ')
             && (i == 0 || bytes[i - 1] == b'\n')
         {
             // close previous section

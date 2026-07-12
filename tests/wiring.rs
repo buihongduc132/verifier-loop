@@ -114,7 +114,10 @@ fn cli_approve_with_notes_long_flag_stores_notes_and_exits_zero() {
     Command::cargo_bin("verifier-verdict")
         .unwrap()
         .env_clear()
-        .env("LLVM_PROFILE_FILE", std::env::var("LLVM_PROFILE_FILE").unwrap_or_default())
+        .env(
+            "LLVM_PROFILE_FILE",
+            std::env::var("LLVM_PROFILE_FILE").unwrap_or_default(),
+        )
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -146,7 +149,10 @@ fn cli_approve_with_notes_short_alias_stores_notes() {
     Command::cargo_bin("verifier-verdict")
         .unwrap()
         .env_clear()
-        .env("LLVM_PROFILE_FILE", std::env::var("LLVM_PROFILE_FILE").unwrap_or_default())
+        .env(
+            "LLVM_PROFILE_FILE",
+            std::env::var("LLVM_PROFILE_FILE").unwrap_or_default(),
+        )
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -176,7 +182,10 @@ fn cli_approve_without_notes_still_works_and_omits_notes_key() {
     Command::cargo_bin("verifier-verdict")
         .unwrap()
         .env_clear()
-        .env("LLVM_PROFILE_FILE", std::env::var("LLVM_PROFILE_FILE").unwrap_or_default())
+        .env(
+            "LLVM_PROFILE_FILE",
+            std::env::var("LLVM_PROFILE_FILE").unwrap_or_default(),
+        )
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -206,7 +215,10 @@ fn cli_approve_with_whitespace_notes_normalizes_to_no_notes_key() {
     Command::cargo_bin("verifier-verdict")
         .unwrap()
         .env_clear()
-        .env("LLVM_PROFILE_FILE", std::env::var("LLVM_PROFILE_FILE").unwrap_or_default())
+        .env(
+            "LLVM_PROFILE_FILE",
+            std::env::var("LLVM_PROFILE_FILE").unwrap_or_default(),
+        )
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -234,7 +246,10 @@ fn cli_approve_notes_long_flag_is_accepted_by_clap() {
     let assert = Command::cargo_bin("verifier-verdict")
         .unwrap()
         .env_clear()
-        .env("LLVM_PROFILE_FILE", std::env::var("LLVM_PROFILE_FILE").unwrap_or_default())
+        .env(
+            "LLVM_PROFILE_FILE",
+            std::env::var("LLVM_PROFILE_FILE").unwrap_or_default(),
+        )
         // No identity env on purpose — we only care that clap ACCEPTS the flag.
         .args(["approve", "--notes", "anything"])
         .assert()
@@ -262,7 +277,10 @@ fn cli_reject_without_notes_is_still_refused() {
     Command::cargo_bin("verifier-verdict")
         .unwrap()
         .env_clear()
-        .env("LLVM_PROFILE_FILE", std::env::var("LLVM_PROFILE_FILE").unwrap_or_default())
+        .env(
+            "LLVM_PROFILE_FILE",
+            std::env::var("LLVM_PROFILE_FILE").unwrap_or_default(),
+        )
         .env("VERIFIER_LOOP_HOME", dir.path())
         .env("VERIFIER_LOOP_GOAL_ID", &goal_id)
         .env("VERIFIER_LOOP_VERIFIER_ID", "v1")
@@ -273,5 +291,9 @@ fn cli_reject_without_notes_is_still_refused() {
 
     // Slot stays null — reject without notes must never write.
     let raw = raw_verdict_json(dir.path(), &goal_id, "v1", 1);
-    assert_eq!(raw["status"], Value::Null, "reject-without-notes must not write: {raw}");
+    assert_eq!(
+        raw["status"],
+        Value::Null,
+        "reject-without-notes must not write: {raw}"
+    );
 }

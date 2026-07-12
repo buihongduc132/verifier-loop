@@ -170,6 +170,28 @@ forgery cryptographically impossible.
 
 ---
 
+## Observability artifacts are NOT evidence (add-otel-observability)
+
+The `add-otel-observability` change adds two new per-goal artifacts — `trace-id` and
+`trace.jsonl` — plus a `traceId` field on `receipt-log.jsonl` entries and
+`completion.json`. **These are observability metadata, not tamper-evident evidence.**
+
+- `traceId` is **excluded** from the completion-hash inputs and from the receipt-log
+  `entryHash` canonical tuple (pinned by tests). Two entries identical except `traceId`
+  produce identical hashes. The hash formula is unchanged by this change.
+- `trace.jsonl` is a best-effort append-only debug log; an adversary with write access
+  to the store root can edit or delete it without affecting any verdict, the receipt
+  chain, or the completion hash.
+- Tracing is fail-**open**: a tracing error is swallowed and never blocks a verdict or
+  poisons consensus. This is the opposite polarity from the evidence layer (which is
+  fail-**closed**).
+
+The receipt log (`receipt-log.jsonl`) remains the sole tamper-evident evidence ledger.
+Use `trace.jsonl` + `traceId` only to pivot from a completion hash or receipt entry to
+the span trail for debugging.
+
+---
+
 ## Authoritative references
 
 - Specs: [`openspec/changes/add-verifier-tamper-hardening/specs/`](openspec/changes/add-verifier-tamper-hardening/specs/)

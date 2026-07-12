@@ -83,6 +83,12 @@ pub struct ConsensusResult {
 ///
 /// `hash` is the short `mmddyy-XXXXXXXX` form (displayed); `fullDigest` is the full
 /// 64-hex SHA-256 digest for exact audit recompute (not printed).
+///
+/// `trace_id` (add-otel-observability D4) is observability metadata: a convenience
+/// pivot from the completion record to the goal's span trail. It is NOT a hash
+/// input — `hash`/`fullDigest` are computed from the canonical tuple only.
+/// `None` when no trace id was resolved (backward-compat); omitted from JSON via
+/// skip_serializing_if so old completion.json files still deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionRecord {
@@ -92,6 +98,8 @@ pub struct CompletionRecord {
     pub round_number: u32,
     pub matched_at: String,
     pub matching_verdicts: Vec<MatchingVerdict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 /// Output of [`compute_hash`]: the short display hash + the full digest.
@@ -166,9 +174,10 @@ pub fn evaluate(
                     Ok(opt) => opt,
                     // Malformed pin → cannot trust the slot; fail closed.
                     Err(_) => {
-                        rejection
-                            .signature_failures
-                            .push((vid.clone(), "WrongPubkey: pinned pubkey is unreadable".to_string()));
+                        rejection.signature_failures.push((
+                            vid.clone(),
+                            "WrongPubkey: pinned pubkey is unreadable".to_string(),
+                        ));
                         continue;
                     }
                 };
@@ -297,10 +306,7 @@ fn mmddyy_of(matched_at_iso: &str) -> String {
     // Defensive: if shorter/malformed, fall back to zeros (the hash stays deterministic;
     // the prefix is only a sortable label, never a tamper guard).
     let bytes = matched_at_iso.as_bytes();
-    let (yyyy, mm, dd) = if bytes.len() >= 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-    {
+    let (yyyy, mm, dd) = if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
         (
             &matched_at_iso[0..4],
             &matched_at_iso[5..7],
@@ -344,8 +350,16 @@ pub fn compute_hash(
     // MODIFIED, D6). Empty for a fresh goal with no receipt log.
     let input = format!("{salt}{goal_id}{goal_sig}{round}{canon}{matched_at_iso}{receipt_head}");
     let full = hex::encode(Sha256::digest(input.as_bytes()));
-    debug_assert_eq!(full.len(), HASH_FULL_HEX_LEN, "SHA-256 hex digest must be 64 chars");
-    let short = format!("{}-{}", mmddyy_of(matched_at_iso), &full[..HASH_SHORT_HEX_LEN]);
+    debug_assert_eq!(
+        full.len(),
+        HASH_FULL_HEX_LEN,
+        "SHA-256 hex digest must be 64 chars"
+    );
+    let short = format!(
+        "{}-{}",
+        mmddyy_of(matched_at_iso),
+        &full[..HASH_SHORT_HEX_LEN]
+    );
     CompletionHash { short, full }
 }
 
@@ -363,6 +377,7 @@ pub fn write_completion(
     round: u32,
     hash: &CompletionHash,
     matched_at_iso: &str,
+    trace_id: Option<&str>,
 ) -> Result<PathBuf, ConsensusError> {
     if !result.passed {
         return Err(ConsensusError::NotPassed);
@@ -380,6 +395,7 @@ pub fn write_completion(
         round_number: round,
         matched_at: matched_at_iso.to_string(),
         matching_verdicts: result.matching_verdicts.clone(),
+        trace_id: trace_id.map(str::to_string),
     };
 
     let target = gdir.join(COMPLETION_FILE);
@@ -423,42 +439,76 @@ mod tests {
         // Keys alphabetical within each object: registeredAt before verifierId.
         assert!(j.find(r#""registeredAt""#).unwrap() < j.find(r#""verifierId""#).unwrap());
         // No whitespace.
-        assert!(!j.contains(' '), "canonical JSON must have no whitespace: {j}");
+        assert!(
+            !j.contains(' '),
+            "canonical JSON must have no whitespace: {j}"
+        );
     }
 
     #[test]
     fn compute_hash_uses_exact_concatenation_order() {
         let matching = vec![mv("v1", "2026-07-03T10:00:00Z")];
-        let h = compute_hash("SALT", "GID", "SIG", 1, &matching, "2026-07-03T10:05:00Z", "head0");
+        let h = compute_hash(
+            "SALT",
+            "GID",
+            "SIG",
+            1,
+            &matching,
+            "2026-07-03T10:05:00Z",
+            "head0",
+        );
 
         // Independent recompute — full digest + short form (head appended last).
         let canon = canonical_matching_json(&matching);
         let input = format!("SALTGIDSIG1{canon}2026-07-03T10:05:00Zhead0");
         let digest = hex::encode(Sha256::digest(input.as_bytes()));
-        assert_eq!(h.full_digest(), digest, "full digest must match exact concat order");
-        assert_eq!(h.short_hash(), format!("070326-{}", &digest[..HASH_SHORT_HEX_LEN]));
+        assert_eq!(
+            h.full_digest(),
+            digest,
+            "full digest must match exact concat order"
+        );
+        assert_eq!(
+            h.short_hash(),
+            format!("070326-{}", &digest[..HASH_SHORT_HEX_LEN])
+        );
     }
 
     #[test]
     fn evaluate_reject_notes_collected_on_fail() {
         let verdicts = vec![
-            ("v1".to_string(), VerdictRecord {
-                status: VerdictStatus::Approve,
-                notes: None,
-                registered_at: Some("t".into()),
-                signature: None,
-                pubkey_id: None,
-            }),
-            ("v2".to_string(), VerdictRecord {
-                status: VerdictStatus::Reject,
-                notes: Some("needs work".into()),
-                registered_at: Some("t".into()),
-                signature: None,
-                pubkey_id: None,
-            }),
+            (
+                "v1".to_string(),
+                VerdictRecord {
+                    status: VerdictStatus::Approve,
+                    notes: None,
+                    registered_at: Some("t".into()),
+                    signature: None,
+                    pubkey_id: None,
+                },
+            ),
+            (
+                "v2".to_string(),
+                VerdictRecord {
+                    status: VerdictStatus::Reject,
+                    notes: Some("needs work".into()),
+                    registered_at: Some("t".into()),
+                    signature: None,
+                    pubkey_id: None,
+                },
+            ),
         ];
-        let r = evaluate(std::path::Path::new("/nonexistent-consensus-internal-test"), "g", 1, &verdicts, 2, 2);
+        let r = evaluate(
+            std::path::Path::new("/nonexistent-consensus-internal-test"),
+            "g",
+            1,
+            &verdicts,
+            2,
+            2,
+        );
         assert!(!r.passed);
-        assert_eq!(r.rejection.reject_notes, vec![("v2".to_string(), "needs work".to_string())]);
+        assert_eq!(
+            r.rejection.reject_notes,
+            vec![("v2".to_string(), "needs work".to_string())]
+        );
     }
 }

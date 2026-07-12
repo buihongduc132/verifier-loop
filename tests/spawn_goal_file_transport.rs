@@ -165,8 +165,7 @@ EOF
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
 
     // (a) The child received the FULL prompt via the tempfile.
-    let captured =
-        fs::read_to_string(vdir.join("goalfile_capture.txt")).unwrap_or_default();
+    let captured = fs::read_to_string(vdir.join("goalfile_capture.txt")).unwrap_or_default();
     assert_eq!(
         captured, prompt,
         "goal-file transport must write the FULL rendered prompt to the tempfile and \
@@ -174,16 +173,14 @@ EOF
     );
 
     // (b) The argv MUST contain the tempfile path, NOT the prompt body.
-    let argv =
-        fs::read_to_string(vdir.join("argv_capture.txt")).unwrap_or_default();
+    let argv = fs::read_to_string(vdir.join("argv_capture.txt")).unwrap_or_default();
     assert!(
         !argv.contains("UNIQUE_GOALFILE_BODY"),
         "argv must NOT contain prompt-derived bytes; got: {argv}"
     );
     // The path handed to the child must look like a tempfile under the OS temp dir,
     // not the literal placeholder token.
-    let recorded_path =
-        fs::read_to_string(vdir.join("goalfile_path.txt")).unwrap_or_default();
+    let recorded_path = fs::read_to_string(vdir.join("goalfile_path.txt")).unwrap_or_default();
     assert!(
         !recorded_path.contains("{goalFile}") && !recorded_path.is_empty(),
         "the {{goalFile}} placeholder must be substituted with a real path, not passed \
@@ -274,8 +271,7 @@ exit 3
 
     // (a) The child received the FULL prompt via the tempfile (proves the goal-file
     //     path ran and wrote the file before spawn).
-    let captured =
-        fs::read_to_string(vdir.join("goalfile_capture.txt")).unwrap_or_default();
+    let captured = fs::read_to_string(vdir.join("goalfile_capture.txt")).unwrap_or_default();
     assert_eq!(
         captured, prompt,
         "the goal-file tempfile must contain the FULL prompt even when the verifier \
@@ -284,8 +280,7 @@ exit 3
 
     // (b) The path handed to the child must be a real tempfile path (not the literal
     //     `{goalFile}` placeholder).
-    let recorded_path =
-        fs::read_to_string(vdir.join("goalfile_path.txt")).unwrap_or_default();
+    let recorded_path = fs::read_to_string(vdir.join("goalfile_path.txt")).unwrap_or_default();
     assert!(
         !recorded_path.contains("{goalFile}") && !recorded_path.is_empty(),
         "the {{goalFile}} placeholder must be substituted with a real path even on \

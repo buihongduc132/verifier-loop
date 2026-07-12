@@ -38,20 +38,29 @@ const ENV_RESUME_CMD: &str = "VERIFIER_LOOP_RESUME_CMD";
 const DEFAULT_HOME_DIR: &str = ".verifier-loop";
 
 fn main() -> ExitCode {
+    // Initialize tracing (fail-open, design D5): errors are swallowed and logged
+    // to stderr; a broken logger never blocks a verdict or hash. Store root is
+    // resolved lazily inside run() — pass None here so init wires the stderr + OTLP
+    // layers; the per-goal JSONL file layer resolves its path from env at write time.
+    let _ = verifier_loop::observe::init(None);
     let cli = VerifierLoopCli::parse();
-    match run(&cli) {
+    let code = match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("{msg}");
             ExitCode::FAILURE
         }
-    }
+    };
+    // Flush + shut down the OTLP tracer before exit so in-flight spans are not
+    // lost (design D3). No-op when OTLP is not configured / feature off.
+    verifier_loop::observe::shutdown();
+    code
 }
 
 fn run(cli: &VerifierLoopCli) -> Result<(), String> {
     let root = resolve_home()?;
-    let config = verifier_loop::store::Config::load_in(&root)
-        .map_err(|e| format!("config: {e}"))?;
+    let config =
+        verifier_loop::store::Config::load_in(&root).map_err(|e| format!("config: {e}"))?;
     // Load the custom verifier-prompt preamble (if configured) BEFORE any goal dir / signature
     // is written, so a missing/unreadable file fails closed with NO side effects.
     let prepend = load_verifier_prompt_file(&root, config.verifier_prompt_file.as_deref())?;
@@ -64,12 +73,8 @@ fn run(cli: &VerifierLoopCli) -> Result<(), String> {
             ref goal_id,
             ref fix,
         } => run_resume(&root, &config, goal_id, fix.as_deref(), prepend.as_deref())?,
-        VerifierLoopCmd::Recover { ref goal_id } => {
-            run_recover(&root, &config, goal_id)?
-        }
-        VerifierLoopCmd::Status { ref goal_id } => {
-            run_status(&root, &config, goal_id)?
-        }
+        VerifierLoopCmd::Recover { ref goal_id } => run_recover(&root, &config, goal_id)?,
+        VerifierLoopCmd::Status { ref goal_id } => run_status(&root, &config, goal_id)?,
     }
     Ok(())
 }
@@ -111,7 +116,15 @@ fn run_resume(
     warn_if_round_is_recoverable(root, config, goal_id);
     let round = verifier_loop::goal::resume(root, goal_id, fix)
         .map_err(|e| format!("RESUME failed: {e}"))?;
-    run_round(root, config, goal_id, round, fix, RoundKind::Resume, prepend)
+    run_round(
+        root,
+        config,
+        goal_id,
+        round,
+        fix,
+        RoundKind::Resume,
+        prepend,
+    )
 }
 
 /// `RECOVER <goalId>`: cross-process round recovery (SHAPE-1, LD8). Wait-only: polls
@@ -200,10 +213,7 @@ fn run_status(
 
 /// Acquire the exclusive goal lock (LD5). Maps `GoalBusy` to a clear, user-facing message
 /// and exits the operation non-zero.
-fn acquire_goal_lock(
-    root: &Path,
-    goal_id: &str,
-) -> Result<round_recover::GoalLock, String> {
+fn acquire_goal_lock(root: &Path, goal_id: &str) -> Result<round_recover::GoalLock, String> {
     round_recover::GoalLock::acquire_exclusive(root, goal_id).map_err(|e| match e {
         RoundRecoverError::GoalBusy => {
             format!("goal {goal_id} busy; another NEW/RESUME/RECOVER is in progress")
@@ -243,7 +253,33 @@ fn run_round(
     kind: RoundKind,
     prepend: Option<&str>,
 ) -> Result<(), String> {
+    // Top-level round span (add-otel-observability lifecycle-tracing spec). Carries
+    // the goal/round/traceId so every nested phase correlates to one round of one goal.
+    let trace_id = verifier_loop::observe::ensure_goal_trace_id(root, goal_id).ok();
+    let kind_str = match kind {
+        RoundKind::New => "NEW",
+        RoundKind::Resume => "RESUME",
+    };
+    // Record a round-start event in the per-goal trace.jsonl (trace-export spec).
+    // Fail-open: a write error is swallowed inside append_trace_event.
+    let _ = verifier_loop::observe::append_trace_event(
+        root,
+        goal_id,
+        "info",
+        "jewilo.round.start",
+        serde_json::json!({ "kind": kind_str, "round": round }),
+    );
+    let round_span = tracing::info_span!(
+        "jewilo.round",
+        goalId = %goal_id,
+        round = round,
+        traceId = %trace_id.as_deref().unwrap_or(""),
+        kind = %kind_str,
+    );
+    let _guard = round_span.enter();
+
     let record = verifier_loop::goal::load(root, goal_id).map_err(|e| format!("goal load: {e}"))?;
+    tracing::debug!(fields = ?record.goal_text.len(), "goal loaded");
 
     // Frozen artifact snapshot (§9): captured once per round from cwd. Fails closed if cwd
     // is not a git work tree (V* must never receive a silently empty snapshot). The
@@ -350,6 +386,7 @@ fn run_round(
         adapter: &adapter,
     };
     rt.block_on(async {
+        let _spawn_span = tracing::info_span!("jewilo.spawn", m = config.m).entered();
         match kind {
             RoundKind::New => verifier_loop::spawn::spawn_round(input).await,
             RoundKind::Resume => verifier_loop::spawn::spawn_resume(input).await,
@@ -366,7 +403,17 @@ fn run_round(
         verdicts.push((vid, rec));
     }
 
-    let result = verifier_loop::consensus::evaluate(root, goal_id, round, &verdicts, config.n, config.m);
+    let result =
+        verifier_loop::consensus::evaluate(root, goal_id, round, &verdicts, config.n, config.m);
+    // Consensus span + result event (lifecycle-tracing spec): records pass/fail +
+    // the rejection summary (rejects, nulls, sig failures) under the round span.
+    let consensus_span = tracing::info_span!(
+        "jewilo.consensus",
+        approveCount = result.approve_count,
+        n = result.n,
+        m = result.m,
+    );
+    let _cg = consensus_span.enter();
     if result.passed {
         let salt = verifier_loop::store::salt_in(root).map_err(|e| format!("salt: {e}"))?;
         let sig_record: verifier_loop::goal::SignatureRecord = serde_json::from_str(
@@ -385,13 +432,54 @@ fn run_round(
             &matched_at,
             &receipt_head,
         );
-        verifier_loop::consensus::write_completion(root, goal_id, &result, round, &hash, &matched_at)
-            .map_err(|e| format!("completion write: {e}"))?;
+        verifier_loop::consensus::write_completion(
+            root,
+            goal_id,
+            &result,
+            round,
+            &hash,
+            &matched_at,
+            // Record the goal's trace id on completion.json as metadata (NOT a hash
+            // input, design D4). Fail-open: an unreadable trace-id → None.
+            verifier_loop::observe::ensure_goal_trace_id(root, goal_id)
+                .ok()
+                .as_deref(),
+        )
+        .map_err(|e| format!("completion write: {e}"))?;
+        tracing::info!(matchedAt = %matched_at, "consensus reached");
+        let _ = verifier_loop::observe::append_trace_event(
+            root,
+            goal_id,
+            "info",
+            "jewilo.consensus.passed",
+            serde_json::json!({ "matchedAt": matched_at, "hash": hash.short_hash() }),
+        );
         println!("{}", hash.short_hash());
         Ok(())
     } else {
+        // Structured rejection event under the consensus span (lifecycle-tracing spec).
+        tracing::warn!(
+            rejectCount = result.rejection.reject_notes.len(),
+            nullCount = result.rejection.null_verifiers.len(),
+            sigFailureCount = result.rejection.signature_failures.len(),
+            "round rejected"
+        );
+        let _ = verifier_loop::observe::append_trace_event(
+            root,
+            goal_id,
+            "warn",
+            "jewilo.consensus.rejected",
+            serde_json::json!({
+                "rejectCount": result.rejection.reject_notes.len(),
+                "nullCount": result.rejection.null_verifiers.len(),
+                "sigFailureCount": result.rejection.signature_failures.len(),
+            }),
+        );
         // Surface the rejection: REJECT notes + null markers (consensus-check spec).
-        eprintln!("round {round} did not reach {}/{} consensus", result.approve_count, config.m);
+        eprintln!(
+            "round {round} did not reach {}/{} consensus",
+            result.approve_count, config.m
+        );
         for (vid, notes) in &result.rejection.reject_notes {
             eprintln!("  {vid} REJECT: {notes}");
         }
@@ -411,8 +499,7 @@ fn run_round(
                     .join(verifier_loop::spawn::STDERR_FILE);
                 if let Ok(text) = std::fs::read_to_string(&stderr_path) {
                     if !text.trim().is_empty() {
-                        let preview: String =
-                            text.lines().take(10).collect::<Vec<_>>().join("\n");
+                        let preview: String = text.lines().take(10).collect::<Vec<_>>().join("\n");
                         eprintln!("  {vid} stderr:\n{preview}");
                     }
                 }
@@ -495,7 +582,9 @@ fn resolve_home() -> Result<PathBuf, String> {
 fn validate_goal_text(goal_text: &str, min_goal_chars: u64) -> Result<(), String> {
     let trimmed_len = goal_text.trim().chars().count() as u64;
     if trimmed_len == 0 {
-        return Err("goal text is empty or whitespace-only; a non-empty goal is required".to_string());
+        return Err(
+            "goal text is empty or whitespace-only; a non-empty goal is required".to_string(),
+        );
     }
     if min_goal_chars > 0 && trimmed_len < min_goal_chars {
         return Err(format!(
@@ -509,7 +598,10 @@ fn validate_goal_text(goal_text: &str, min_goal_chars: u64) -> Result<(), String
 /// Relative paths resolve against `home`; absolute paths are used as-is. A
 /// missing/unreadable file is a hard error (fail-closed: no goal dir / signature written).
 /// Returns `None` when no `verifierPromptFile` is configured (today's default behavior).
-fn load_verifier_prompt_file(home: &Path, configured: Option<&str>) -> Result<Option<String>, String> {
+fn load_verifier_prompt_file(
+    home: &Path,
+    configured: Option<&str>,
+) -> Result<Option<String>, String> {
     let rel = match configured {
         Some(p) => p,
         None => return Ok(None),
