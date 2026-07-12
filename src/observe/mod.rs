@@ -70,6 +70,20 @@ pub fn ensure_goal_trace_id(root: &Path, goal_id: &str) -> Result<String, Observ
     Ok(id)
 }
 
+/// Read-only lookup of the persisted per-goal trace id. Returns `None` if the file
+/// is absent or malformed. Does NOT mint or write — used by [`append_trace_event`]
+/// so a manual `jewije` call never persists a trace id (trace-export spec).
+fn read_goal_trace_id(root: &Path, goal_id: &str) -> Option<String> {
+    let trace_file = goal::goal_dir(root, goal_id).join(TRACE_ID_FILE);
+    let raw = std::fs::read_to_string(&trace_file).ok()?;
+    let trimmed = raw.trim().to_string();
+    if is_valid_trace_id(&trimmed) {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
 /// Read the propagated trace id from `VERIFIER_LOOP_TRACE_ID` env, if set.
 ///
 /// `jewije` uses this to join the spawning `jewilo`'s trace. Returns `None` when
@@ -88,10 +102,16 @@ pub fn trace_jsonl_path(root: &Path, goal_id: &str) -> PathBuf {
 /// is swallowed and `Ok(())` returned — a broken trace file never blocks a verdict.
 ///
 /// The record carries camelCase keys: `timestamp`, `level`, `traceId`, `goalId`,
-/// `event`, plus the merged `fields` object. The `traceId` is read from the goal's
-/// persisted `trace-id` file if present (so RESUME events join NEW's trace); the
-/// `VERIFIER_LOOP_TRACE_ID` env is the fallback (for jewije running in a V* process
-/// that received the id via env, not via the file).
+/// `event`, plus the merged `fields` object.
+///
+/// **traceId resolution (non-persisting):** resolved in priority order:
+/// 1. `VERIFIER_LOOP_TRACE_ID` env (set by the spawning jewilo for V* children),
+/// 2. read-only lookup of the persisted `trace-id` file (jewilo's own events),
+/// 3. a freshly minted fallback id that is NOT written to disk.
+///
+/// This ensures a manual `jewije` call without the env var does NOT create a
+/// `trace-id` file (trace-export spec: "manual jewije without traceId mints a
+/// non-persisted fallback").
 ///
 /// The file is created on first write and appended-to thereafter; never rewritten.
 pub fn append_trace_event(
@@ -101,12 +121,10 @@ pub fn append_trace_event(
     event: &str,
     fields: serde_json::Value,
 ) -> Result<(), ObserveError> {
-    // Resolve traceId: prefer the persisted file (jewilo path), fall back to env
-    // (jewije-in-V* path). Empty string when neither is available.
-    let trace_id = ensure_goal_trace_id(root, goal_id)
-        .ok()
-        .or_else(trace_id_from_env)
-        .unwrap_or_default();
+    // Resolve traceId WITHOUT persisting (see doc comment above).
+    let trace_id = trace_id_from_env()
+        .or_else(|| read_goal_trace_id(root, goal_id))
+        .unwrap_or_else(mint_trace_id);
 
     let mut record = serde_json::Map::new();
     record.insert(
@@ -161,12 +179,19 @@ pub fn append_trace_event(
 ///   1. an `EnvFilter` resolved from `VERIFIER_LOOP_LOG` (default `info`),
 ///   2. a `fmt` stderr layer in `text` (legacy) or `json` format per
 ///      `VERIFIER_LOOP_LOG_FORMAT`,
-///   3. the per-goal JSONL file layer (best-effort; wired in group 4),
-///   4. the opt-in OTLP layer behind the `otel` feature.
+///   3. the opt-in OTLP layer behind the `otel` feature.
 ///
-/// `store_root` is the store root for the file layer; `None` disables the file layer
-/// (the rest still work). Returns `Ok(())` unconditionally on best-effort paths —
-/// any init error is logged to stderr (the legacy channel) and swallowed.
+/// `store_root` is accepted for API completeness; the per-goal `trace.jsonl` is
+/// written by explicit [`append_trace_event`] calls at lifecycle points (round
+/// start, consensus pass/reject, verdict registered) rather than via a subscriber
+/// `Layer`. This events-based design is deliberate: it captures the semantically
+/// meaningful lifecycle events in a stable, greppable JSONL format without the
+/// complexity of a custom `Layer` that would need to resolve the goal id from
+/// span context on every event. Spans (for OTLP export) flow through the
+/// subscriber; lifecycle events (for the local trail) flow through this helper.
+///
+/// Returns `Ok(())` unconditionally on best-effort paths — any init error is
+/// logged to stderr (the legacy channel) and swallowed.
 ///
 /// **Re-entrancy:** safe to call multiple times across tests; subsequent calls
 /// are no-ops if a global subscriber is already set (`try_init` returns Err,
@@ -189,7 +214,8 @@ pub fn init(store_root: Option<&Path>) -> Result<(), ObserveError> {
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
 
-    // The file-layer root is consumed when (if) the JSONL layer is wired (group 4).
+    // store_root is not used for a subscriber layer (see doc comment above); the
+    // per-goal trace.jsonl path is resolved per-write inside append_trace_event.
     let _ = store_root;
 
     // Branch on feature + format so each composition has a concrete, inferrable
@@ -241,6 +267,22 @@ fn init_layers(filter: tracing_subscriber::EnvFilter, use_json: bool) {
         }
     }
     let _ = tracing_subscriber::registry().with(filter).try_init();
+}
+
+/// Flush + shut down the OTLP tracer provider (design D3, fail-open D5).
+///
+/// `opentelemetry_otlp` uses async gRPC transport; without an explicit flush,
+/// in-flight spans can be silently lost when the CLI exits. Both bins MUST call
+/// this at the end of `main()` (after `run()` returns) when the `otel` feature
+/// is enabled. It is a no-op when OTLP is not configured (no provider installed)
+/// or when the `otel` feature is off.
+pub fn shutdown() {
+    #[cfg(feature = "otel")]
+    {
+        // Best-effort: flush all pending spans + drop the provider. Errors are
+        // swallowed (fail-open D5) — a flush failure never blocks process exit.
+        opentelemetry::global::shutdown_tracer_provider();
+    }
 }
 
 /// Mint a fresh 16-byte random trace id, hex-encoded (32 lowercase chars).
@@ -328,6 +370,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("goals/unit-mint/trace-id")).unwrap(),
             id1
+        );
+    }
+
+    #[test]
+    fn read_goal_trace_id_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_goal_trace_id(dir.path(), "no-such-goal").is_none());
+    }
+
+    #[test]
+    fn read_goal_trace_id_returns_value_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let known = "0123456789abcdef0123456789abcdef";
+        ensure_goal_trace_id(dir.path(), "g-read").unwrap();
+        std::fs::write(dir.path().join("goals/g-read/trace-id"), known).unwrap();
+        assert_eq!(
+            read_goal_trace_id(dir.path(), "g-read").as_deref(),
+            Some(known)
         );
     }
 

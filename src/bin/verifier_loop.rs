@@ -44,13 +44,17 @@ fn main() -> ExitCode {
     // layers; the per-goal JSONL file layer resolves its path from env at write time.
     let _ = verifier_loop::observe::init(None);
     let cli = VerifierLoopCli::parse();
-    match run(&cli) {
+    let code = match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("{msg}");
             ExitCode::FAILURE
         }
-    }
+    };
+    // Flush + shut down the OTLP tracer before exit so in-flight spans are not
+    // lost (design D3). No-op when OTLP is not configured / feature off.
+    verifier_loop::observe::shutdown();
+    code
 }
 
 fn run(cli: &VerifierLoopCli) -> Result<(), String> {
