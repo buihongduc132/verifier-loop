@@ -63,7 +63,10 @@ pub struct Config {
     /// Byte cap on the `fileEditTimes` block (scoped to changed files). When the
     /// changed-files block exceeds this cap it is truncated with an indicator.
     /// Prompt-bloat fix D1 (default 8000).
-    #[serde(rename = "fileEditTimesMaxChars", default = "default_file_edit_times_max_chars")]
+    #[serde(
+        rename = "fileEditTimesMaxChars",
+        default = "default_file_edit_times_max_chars"
+    )]
     pub file_edit_times_max_chars: u64,
     /// Char cap on the `--context` input. Over-cap context is truncated with an
     /// indicator. Prompt-bloat fix D3 (default 20000).
@@ -125,8 +128,7 @@ pub fn load_config_in(root: &Path) -> Result<Config, StoreError> {
     }
 
     let raw = std::fs::read_to_string(&path)?;
-    let cfg: Config = serde_json::from_str(&raw)
-        .map_err(|e| StoreError::Json(e.to_string()))?;
+    let cfg: Config = serde_json::from_str(&raw).map_err(|e| StoreError::Json(e.to_string()))?;
     Ok(cfg)
 }
 
@@ -144,7 +146,10 @@ mod tests {
         let d = Config::default();
         assert_eq!((d.n, d.m, d.max_turn), (2, 2, 3));
         assert_eq!(d.backend, "pi");
-        assert_eq!((d.git_diff_max_chars, d.verifier_timeout_sec), (10_000, 1800));
+        assert_eq!(
+            (d.git_diff_max_chars, d.verifier_timeout_sec),
+            (10_000, 1800)
+        );
     }
 
     #[test]
@@ -164,7 +169,10 @@ mod tests {
         };
         let j = serde_json::to_string(&cfg).unwrap();
         // camelCase keys must appear verbatim (this is the on-disk contract).
-        assert!(j.contains("\"maxTurn\":11"), "maxTurn must be camelCase: {j}");
+        assert!(
+            j.contains("\"maxTurn\":11"),
+            "maxTurn must be camelCase: {j}"
+        );
         assert!(j.contains("\"gitDiffMaxChars\":4000"), "{j}");
         assert!(j.contains("\"verifierTimeoutSec\":99"), "{j}");
 

@@ -31,8 +31,8 @@ pub const RECEIPT_LOG_FILE: &str = "receipt-log.jsonl";
 
 /// One immutable, hash-chained line in the per-goal receipt log.
 ///
-/// On-disk keys are camelCase (`verdictId`, `prevHash`, `entryHash`, `signedBy`) per the
-/// receipt-log spec contract.
+/// On-disk keys are camelCase (`verdictId`, `prevHash`, `entryHash`, `signedBy`,
+/// `traceId`) per the receipt-log spec contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReceiptEntry {
@@ -50,6 +50,13 @@ pub struct ReceiptEntry {
     pub entry_hash: String,
     /// First 16 hex of the signer's pubkey id (provenance).
     pub signed_by: String,
+    /// Active per-goal trace id (observability metadata, add-otel-observability D2).
+    /// Sourced from `VERIFIER_LOOP_TRACE_ID` at append time. EXCLUDED from
+    /// `entry_hash` (design D4) — it is not tamper-evident evidence, only an audit
+    /// pivot to the span trail. `None` when the env var is unset (backward-compat
+    /// with pre-change logs); omitted from the JSON line via skip_serializing_if.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 /// Errors raised by the receipt log layer. All fail-closed.
@@ -136,7 +143,10 @@ fn append_receipt_locked(
     // 3 + 4. Canonical form + entry hash.
     let entry_hash = compute_entry_hash(&prev_hash, seq, kind, verdict_id, status);
 
-    // 5. Build the entry.
+    // 5. Build the entry. The traceId is observability metadata (design D2/D4):
+    // read from env at append time, EXCLUDED from `entry_hash` (computed above
+    // from the canonical tuple only). None when env unset → omitted from JSON.
+    let trace_id = crate::observe::trace_id_from_env();
     let entry = ReceiptEntry {
         seq,
         kind: kind.to_string(),
@@ -145,6 +155,7 @@ fn append_receipt_locked(
         prev_hash: prev_hash.clone(),
         entry_hash: entry_hash.clone(),
         signed_by: signed_by.to_string(),
+        trace_id,
     };
 
     // 6. Append one compact JSON line + '\n'. `file` was opened with append(true)
@@ -214,8 +225,13 @@ pub fn verify_chain(entries: &[ReceiptEntry]) -> Result<(), ReceiptError> {
         }
 
         // Recompute and compare.
-        let recomputed =
-            compute_entry_hash(&entry.prev_hash, entry.seq, &entry.kind, &entry.verdict_id, &entry.status);
+        let recomputed = compute_entry_hash(
+            &entry.prev_hash,
+            entry.seq,
+            &entry.kind,
+            &entry.verdict_id,
+            &entry.status,
+        );
         if recomputed != entry.entry_hash {
             return Err(ReceiptError::ChainBreak {
                 seq: entry.seq,
@@ -229,7 +245,13 @@ pub fn verify_chain(entries: &[ReceiptEntry]) -> Result<(), ReceiptError> {
 }
 
 /// Pinned canonical form: `lowercase_hex(SHA256(prevHash|seq|kind|verdictId|status))`.
-fn compute_entry_hash(prev_hash: &str, seq: u64, kind: &str, verdict_id: &str, status: &str) -> String {
+fn compute_entry_hash(
+    prev_hash: &str,
+    seq: u64,
+    kind: &str,
+    verdict_id: &str,
+    status: &str,
+) -> String {
     let input = format!("{prev_hash}|{seq}|{kind}|{verdict_id}|{status}");
     let mut h = Sha256::new();
     h.update(input.as_bytes());

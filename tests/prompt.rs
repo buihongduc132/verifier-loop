@@ -19,9 +19,7 @@
 use std::fs;
 use std::path::Path;
 
-use verifier_loop::prompt::{
-    self, PromptVars, Snapshot, INITIAL_PROMPT_FILE,
-};
+use verifier_loop::prompt::{self, PromptVars, Snapshot, INITIAL_PROMPT_FILE};
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -91,7 +89,10 @@ fn all_snapshot_vars_substituted() {
     .unwrap();
     assert!(out.contains("[/repo]"), "cwd: {out}");
     assert!(out.contains("[ M src/lib.rs\n]"), "gitStatus: {out}");
-    assert!(out.contains("[src/lib.rs:1234567\n]"), "fileEditTimes: {out}");
+    assert!(
+        out.contains("[src/lib.rs:1234567\n]"),
+        "fileEditTimes: {out}"
+    );
     assert!(out.contains("[diff --git"), "gitDiff: {out}");
     assert!(out.contains("[10000]"), "gitDiffMaxChars: {out}");
 }
@@ -107,7 +108,10 @@ fn context_substituted_when_present() {
 fn unknown_var_renders_empty_no_panic() {
     let v = vars_default();
     let out = prompt::render(Some("a={{totallyUnknown}}b"), &v).unwrap();
-    assert_eq!(out, "a=b", "unknown vars must disappear, not stay as {{...}}");
+    assert_eq!(
+        out, "a=b",
+        "unknown vars must disappear, not stay as {{...}}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +149,10 @@ fn null_template_uses_baked_default_with_policy() {
         "default must embed verifier policy text; got: {out}"
     );
     // And still carries the goal.
-    assert!(out.contains("build the thing"), "default must render goalText: {out}");
+    assert!(
+        out.contains("build the thing"),
+        "default must render goalText: {out}"
+    );
     assert!(out.contains("v1"), "default must render verifierId: {out}");
 }
 
@@ -156,8 +163,14 @@ fn default_template_const_contains_policy() {
         t.contains("Verifier") || t.contains("detective") || t.contains("ZERO trust"),
         "default_template const must embed policy"
     );
-    assert!(t.contains("{{goalText}}"), "default must reference {{goalText}}");
-    assert!(t.contains("{{verifierId}}"), "default must reference {{verifierId}}");
+    assert!(
+        t.contains("{{goalText}}"),
+        "default must reference {{goalText}}"
+    );
+    assert!(
+        t.contains("{{verifierId}}"),
+        "default must reference {{verifierId}}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +208,11 @@ fn snapshot_diff_truncated_flag_and_indicator() {
 
     let snap = prompt::capture_snapshot(dir.path(), 100).unwrap();
     assert!(snap.truncated, "snapshot over cap must set truncated=true");
-    assert!(snap.git_diff.len() <= 100 + 64, "git_diff must be near the cap: {}", snap.git_diff.len());
+    assert!(
+        snap.git_diff.len() <= 100 + 64,
+        "git_diff must be near the cap: {}",
+        snap.git_diff.len()
+    );
     assert!(
         snap.git_diff.contains("truncated") || snap.git_diff.contains("…"),
         "truncated snapshot diff must carry indicator: {}",
@@ -207,7 +224,10 @@ fn snapshot_diff_truncated_flag_and_indicator() {
 fn snapshot_diff_not_truncated_when_under_cap() {
     let dir = temp_git_repo();
     let snap = prompt::capture_snapshot(dir.path(), 10_000).unwrap();
-    assert!(!snap.truncated, "under-cap snapshot must set truncated=false");
+    assert!(
+        !snap.truncated,
+        "under-cap snapshot must set truncated=false"
+    );
     assert!(
         !snap.git_diff.contains("truncated") && !snap.git_diff.contains("…"),
         "under-cap diff must NOT carry truncation indicator: {}",
@@ -223,7 +243,11 @@ fn snapshot_diff_not_truncated_when_under_cap() {
 fn snapshot_records_cwd_git_status_and_file_edit_times() {
     let dir = temp_git_repo();
     let snap = prompt::capture_snapshot(dir.path(), 10_000).unwrap();
-    assert_eq!(snap.cwd, dir.path().to_string_lossy(), "snapshot cwd must equal repo");
+    assert_eq!(
+        snap.cwd,
+        dir.path().to_string_lossy(),
+        "snapshot cwd must equal repo"
+    );
     assert!(
         snap.git_status.contains("file.txt"),
         "git_status must reflect porcelain output: {}",
@@ -241,9 +265,15 @@ fn snapshot_consistent_within_round() {
     let dir = temp_git_repo();
     let a = prompt::capture_snapshot(dir.path(), 10_000).unwrap();
     let b = prompt::capture_snapshot(dir.path(), 10_000).unwrap();
-    assert_eq!(a.git_status, b.git_status, "same round = identical git_status");
+    assert_eq!(
+        a.git_status, b.git_status,
+        "same round = identical git_status"
+    );
     assert_eq!(a.git_diff, b.git_diff, "same round = identical git_diff");
-    assert_eq!(a.file_edit_times, b.file_edit_times, "same round = identical file_edit_times");
+    assert_eq!(
+        a.file_edit_times, b.file_edit_times,
+        "same round = identical file_edit_times"
+    );
 }
 
 #[test]
@@ -290,7 +320,10 @@ fn snapshot_on_repo_with_no_commits_captures_staged_without_error() {
 fn snapshot_in_non_git_repo_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let res = prompt::capture_snapshot(dir.path(), 10_000);
-    assert!(res.is_err(), "capture_snapshot in a non-git repo must fail closed, not silently empty");
+    assert!(
+        res.is_err(),
+        "capture_snapshot in a non-git repo must fail closed, not silently empty"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +336,9 @@ fn blindness_default_hides_round_number() {
     let v = vars_default(); // round = 3
     let out = prompt::render(None, &v).unwrap();
     assert!(
-        !out.contains("Round 3") && !out.contains("round: 3") && !out.contains("round=3")
+        !out.contains("Round 3")
+            && !out.contains("round: 3")
+            && !out.contains("round=3")
             && !out.contains("Round:3"),
         "default must not reveal round number; got: {out}"
     );
@@ -313,14 +348,20 @@ fn blindness_default_hides_round_number() {
 fn blindness_round_visible_only_when_template_opts_in() {
     let v = vars_default();
     let out = prompt::render(Some("current round = {{round}}"), &v).unwrap();
-    assert_eq!(out, "current round = 3", "opted-in round var must interpolate");
+    assert_eq!(
+        out, "current round = 3",
+        "opted-in round var must interpolate"
+    );
 }
 
 #[test]
 fn blindness_no_hash_or_threshold_in_output() {
     let v = vars_default();
     let out = prompt::render(None, &v).unwrap();
-    assert!(!out.contains("vl:"), "default must not contain completion hash prefix");
+    assert!(
+        !out.contains("vl:"),
+        "default must not contain completion hash prefix"
+    );
     assert!(
         !out.contains("n/m") && !out.contains("2/2") && !out.contains("2 of 2"),
         "default must not reveal n/m threshold: {out}"
@@ -335,7 +376,9 @@ fn blindness_no_other_verdicts_leak() {
     let v = vars_default();
     let out = prompt::render(None, &v).unwrap();
     assert!(
-        !out.contains("V2 APPROVE") && !out.contains("verifier v2") && !out.contains("peer verdict"),
+        !out.contains("V2 APPROVE")
+            && !out.contains("verifier v2")
+            && !out.contains("peer verdict"),
         "default must not reference other verifiers' verdicts: {out}"
     );
 }
@@ -398,14 +441,23 @@ fn null_resume_template_uses_baked_default() {
         out.contains("Verifier") || out.contains("detective") || out.contains("ZERO trust"),
         "default resume must embed policy: {out}"
     );
-    assert!(out.contains("build the thing"), "default resume must render goalText: {out}");
+    assert!(
+        out.contains("build the thing"),
+        "default resume must render goalText: {out}"
+    );
 }
 
 #[test]
 fn default_resume_template_const_exists_and_has_placeholders() {
     let t = prompt::default_resume_template();
-    assert!(t.contains("{{goalText}}"), "resume default must reference goalText");
-    assert!(t.contains("{{fixNotes}}"), "resume default must reference fixNotes");
+    assert!(
+        t.contains("{{goalText}}"),
+        "resume default must reference goalText"
+    );
+    assert!(
+        t.contains("{{fixNotes}}"),
+        "resume default must reference fixNotes"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +472,11 @@ fn write_initial_prompt_persists_file_in_slot() {
     let path = prompt::write_initial_prompt(goal_root, "goal-7", "v1", 1, rendered).unwrap();
     assert_eq!(path.file_name().unwrap(), INITIAL_PROMPT_FILE);
     assert!(path.exists(), "initial-prompt.txt must exist after write");
-    assert_eq!(fs::read_to_string(&path).unwrap(), rendered, "content must match rendered");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        rendered,
+        "content must match rendered"
+    );
     // Slot path layout: rounds/<round>/<verifierId>/initial-prompt.txt
     assert!(
         path.starts_with(goal_root.join("rounds").join("1").join("v1")),
@@ -436,8 +492,13 @@ fn write_initial_prompt_overwrites_on_resume_same_slot() {
     prompt::write_initial_prompt(root, "g", "v1", 1, "first").unwrap();
     prompt::write_initial_prompt(root, "g", "v1", 1, "second").unwrap();
     assert_eq!(
-        fs::read_to_string(root.join("rounds").join("1").join("v1").join(INITIAL_PROMPT_FILE))
-            .unwrap(),
+        fs::read_to_string(
+            root.join("rounds")
+                .join("1")
+                .join("v1")
+                .join(INITIAL_PROMPT_FILE)
+        )
+        .unwrap(),
         "second",
         "rewrite in same slot must overwrite"
     );
@@ -474,7 +535,10 @@ fn snapshot_is_serializable() {
     };
     let j = serde_json::to_string(&s).unwrap();
     assert!(j.contains("\"cwd\":\"/r\""), "{j}");
-    assert!(j.contains("\"gitDiffMaxChars\":10000"), "camelCase on disk: {j}");
+    assert!(
+        j.contains("\"gitDiffMaxChars\":10000"),
+        "camelCase on disk: {j}"
+    );
     let back: Snapshot = serde_json::from_str(&j).unwrap();
     assert_eq!(back.cwd, "/r");
 }
@@ -588,20 +652,32 @@ fn round1_prompt_body_structure_preserved_after_dedup() {
     let out = prompt::render(None, &v).unwrap();
 
     // Body sections required by verifier-prompt spec (single-message layout).
-    assert!(out.contains("# Goal"), "round-1 prompt must keep # Goal: {out}");
-    assert!(out.contains("# Context"), "round-1 prompt must keep # Context: {out}");
+    assert!(
+        out.contains("# Goal"),
+        "round-1 prompt must keep # Goal: {out}"
+    );
+    assert!(
+        out.contains("# Context"),
+        "round-1 prompt must keep # Context: {out}"
+    );
     assert!(
         out.contains("# Frozen artifact snapshot"),
         "round-1 prompt must keep # Frozen artifact snapshot: {out}"
     );
-    assert!(out.contains("# Your duty"), "round-1 prompt must keep # Your duty: {out}");
+    assert!(
+        out.contains("# Your duty"),
+        "round-1 prompt must keep # Your duty: {out}"
+    );
 
     // Variable substitution must still happen.
     assert!(
         out.contains("build the thing"),
         "round-1 prompt must substitute {{goalText}}: {out}"
     );
-    assert!(out.contains("v1"), "round-1 prompt must substitute {{verifierId}}: {out}");
+    assert!(
+        out.contains("v1"),
+        "round-1 prompt must substitute {{verifierId}}: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -617,9 +693,18 @@ fn resume_prompt_body_structure_preserved_after_dedup() {
     };
     let out = prompt::render_resume(None, &v).unwrap();
 
-    assert!(out.contains("# Goal"), "resume prompt must keep # Goal: {out}");
-    assert!(out.contains("# Context"), "resume prompt must keep # Context: {out}");
-    assert!(out.contains("# Your duty"), "resume prompt must keep # Your duty: {out}");
+    assert!(
+        out.contains("# Goal"),
+        "resume prompt must keep # Goal: {out}"
+    );
+    assert!(
+        out.contains("# Context"),
+        "resume prompt must keep # Context: {out}"
+    );
+    assert!(
+        out.contains("# Your duty"),
+        "resume prompt must keep # Your duty: {out}"
+    );
     // Resume-only sections.
     assert!(
         out.contains("fix notes") || out.contains("Author fix notes"),

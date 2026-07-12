@@ -121,21 +121,14 @@ pub fn new(root: &Path, goal_text: &str, context: Option<&str>) -> Result<String
 
     // Write state.json (current round = 1).
     let state = StateRecord { current_round: 1 };
-    fs::write(
-        gdir.join(STATE_FILE),
-        serde_json::to_string_pretty(&state)?,
-    )?;
+    fs::write(gdir.join(STATE_FILE), serde_json::to_string_pretty(&state)?)?;
 
     Ok(goal_id)
 }
 
 /// Resume a goal: increment the round, append fix notes (if any). `goal.json` and
 /// `signature.json` are never touched. Returns the new round number.
-pub fn resume(
-    root: &Path,
-    goal_id: &str,
-    fix_notes: Option<&str>,
-) -> Result<u32, GoalError> {
+pub fn resume(root: &Path, goal_id: &str, fix_notes: Option<&str>) -> Result<u32, GoalError> {
     let gdir = goal_dir(root, goal_id);
     if !gdir.exists() {
         return Err(GoalError::GoalNotFound);

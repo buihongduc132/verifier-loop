@@ -157,14 +157,21 @@ fn status_prints_json_with_documented_fields() {
 
     // NEW a goal so there is a round with a verdict.
     let out = run_vl_raw(home, home, &stub, &["NEW", "ship it"]);
-    assert!(out.status.success(), "NEW failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "NEW failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let goal_id = goal_id_from_new(&String::from_utf8_lossy(&out.stdout)).unwrap();
 
     // STATUS must print a single JSON object with the documented fields.
     let out = run_vl_raw(home, home, &stub, &["STATUS", &goal_id]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let json: Value =
-        serde_json::from_str(&String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert_eq!(json["goalId"], goal_id);
     assert!(json["round"].as_u64().is_some());
     assert!(json["state"].is_string());
@@ -289,7 +296,10 @@ fn recover_harvests_signed_verdict_written_mid_poll() {
         let l = l.trim();
         l.len() == 15 && l[6..7].to_string() == "-" && l[..6].chars().all(|c| c.is_ascii_digit())
     });
-    assert!(hash_line.is_some(), "RECOVER must print a completion hash; got: {stdout}");
+    assert!(
+        hash_line.is_some(),
+        "RECOVER must print a completion hash; got: {stdout}"
+    );
     let comp = home.join("goals").join(&goal_id).join("completion.json");
     assert!(comp.exists(), "completion.json must be written by RECOVER");
 }
@@ -311,8 +321,7 @@ fn concurrent_resume_is_rejected_as_goal_busy() {
     let goal_id = goal_id_from_new(&String::from_utf8_lossy(&out.stdout)).unwrap();
 
     // Hold the lock from this process.
-    let _lock =
-        verifier_loop::round_recover::GoalLock::acquire_exclusive(home, &goal_id).unwrap();
+    let _lock = verifier_loop::round_recover::GoalLock::acquire_exclusive(home, &goal_id).unwrap();
 
     // CLI RESUME while the lock is held must fail fast.
     let out = run_vl_raw(home, home, &stub, &["RESUME", &goal_id, "--fix", "x"]);

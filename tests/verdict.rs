@@ -66,11 +66,7 @@ fn fresh_goal_with_null_verdict(round: u32) -> (tempfile::TempDir, String) {
     // Simulate the spawn layer: pre-create rounds/<round>/v1/verdict.json {status:null}.
     let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round);
     fs::create_dir_all(&vdir).unwrap();
-    fs::write(
-        vdir.join(verdict::VERDICT_FILE),
-        r#"{"status":null}"#,
-    )
-    .unwrap();
+    fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     (dir, goal_id)
 }
 
@@ -96,7 +92,10 @@ fn approve_writes_verdict_with_status_and_registered_at() {
         Value::String(APPROVE.into())
     );
     // registeredAt must be present and non-empty.
-    let ts = rec.registered_at.as_deref().expect("registeredAt must be populated");
+    let ts = rec
+        .registered_at
+        .as_deref()
+        .expect("registeredAt must be populated");
     assert!(!ts.is_empty(), "registeredAt must be non-empty");
 }
 
@@ -290,7 +289,9 @@ fn verdict_writes_to_env_derived_slot_regardless_of_args() {
 
     // Written to the env-derived slot (goals/<goal_id>/rounds/1/v1/verdict.json).
     let vpath = verdict::verdict_path(dir.path(), &goal_id, "v1", 1);
-    let raw: Value = serde_json::from_str(&fs::read_to_string(vpath.join(verdict::VERDICT_FILE)).unwrap()).unwrap();
+    let raw: Value =
+        serde_json::from_str(&fs::read_to_string(vpath.join(verdict::VERDICT_FILE)).unwrap())
+            .unwrap();
     assert_eq!(raw["status"], Value::String(APPROVE.into()));
 }
 
@@ -328,7 +329,9 @@ fn cli_reject_with_empty_notes_string_is_refused() {
         .args(["reject", "--notes", ""])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("reject requires non-empty --notes"));
+        .stderr(predicates::str::contains(
+            "reject requires non-empty --notes",
+        ));
 
     // Stored verdict must remain null (no write on refused reject).
     assert_eq!(
@@ -457,18 +460,16 @@ fn mint_and_pin_pubkey_writes_file_before_returning() {
     assert!(file.exists(), "pinned pubkey file must exist at {file:?}");
 
     // On-disk schema: {pubkey: <64 hex>, mintedAt: <iso>}.
-    let raw: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
-    let pubkey_hex = raw["pubkey"].as_str().expect("pubkey field must be a hex string");
+    let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    let pubkey_hex = raw["pubkey"]
+        .as_str()
+        .expect("pubkey field must be a hex string");
     assert_eq!(
         pubkey_hex.len(),
         64,
         "pubkey must be the 64-hex encoding of a 32-byte Ed25519 verifying key"
     );
-    assert!(
-        hex::decode(pubkey_hex).is_ok(),
-        "pubkey must be valid hex"
-    );
+    assert!(hex::decode(pubkey_hex).is_ok(), "pubkey must be valid hex");
     let minted_at = raw["mintedAt"].as_str().expect("mintedAt must be a string");
     assert!(!minted_at.is_empty(), "mintedAt must be populated");
 
@@ -510,7 +511,8 @@ fn mint_and_pin_pubkey_distinct_keys_across_verifiers() {
 
     let read = |vid: &str| -> String {
         let file = verdict::pubkey_path(dir.path(), &goal_id, vid, 1).join("verifier-pubkey.json");
-        let raw: VerifierPubkeyFile = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let raw: VerifierPubkeyFile =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
         raw.pubkey
     };
 
@@ -570,14 +572,8 @@ fn signed_approve_record(
     registered_at: &str,
 ) -> verdict::VerdictRecord {
     let vk = sk.verifying_key();
-    let canon = crypto::canonical_record_bytes(
-        "APPROVE",
-        None,
-        registered_at,
-        goal_id,
-        verifier_id,
-        round,
-    );
+    let canon =
+        crypto::canonical_record_bytes("APPROVE", None, registered_at, goal_id, verifier_id, round);
     let sig = crypto::sign(&canon, sk);
     verdict::VerdictRecord {
         status: verdict::VerdictStatus::Approve,
@@ -624,8 +620,14 @@ fn null_placeholder_has_no_signature_fields() {
     };
 
     let j = serde_json::to_string(&rec).unwrap();
-    assert!(!j.contains("signature"), "null placeholder must omit signature: {j}");
-    assert!(!j.contains("pubkeyId"), "null placeholder must omit pubkeyId: {j}");
+    assert!(
+        !j.contains("signature"),
+        "null placeholder must omit signature: {j}"
+    );
+    assert!(
+        !j.contains("pubkeyId"),
+        "null placeholder must omit pubkeyId: {j}"
+    );
     assert!(!j.contains("pubkey_id"), "no snake_case leak: {j}");
 }
 
@@ -782,7 +784,10 @@ fn verify_record_untrusted_for_null_status() {
         .expect_err("null-status record must NOT verify even if a signature is set");
     let msg = format!("{err}").to_lowercase();
     assert!(
-        msg.contains("untrusted") || msg.contains("null") || msg.contains("not") || msg.contains("status"),
+        msg.contains("untrusted")
+            || msg.contains("null")
+            || msg.contains("not")
+            || msg.contains("status"),
         "null-status error must be Untrusted-shaped; got: {err}"
     );
 }
@@ -858,13 +863,26 @@ fn jewije_approve_without_secret_fails_closed() {
 
     // The slot must remain null — no verdict written.
     let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    assert_eq!(rec.status, verdict::VerdictStatus::Null, "no write on missing secret");
+    assert_eq!(
+        rec.status,
+        verdict::VerdictStatus::Null,
+        "no write on missing secret"
+    );
     // And no stray signature/pubkeyId appear.
-    assert!(rec.signature.is_none(), "no signature may be written without a secret");
-    assert!(rec.pubkey_id.is_none(), "no pubkeyId may be written without a secret");
+    assert!(
+        rec.signature.is_none(),
+        "no signature may be written without a secret"
+    );
+    assert!(
+        rec.pubkey_id.is_none(),
+        "no pubkeyId may be written without a secret"
+    );
     // Sanity: the file itself was not turned into an APPROVE record on disk.
     let raw = fs::read_to_string(&slot).unwrap();
-    assert!(!raw.contains("APPROVE"), "raw slot must not have been mutated: {raw}");
+    assert!(
+        !raw.contains("APPROVE"),
+        "raw slot must not have been mutated: {raw}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -908,7 +926,10 @@ fn jewije_approve_with_wrong_secret_fails_closed() {
         verdict::VerdictStatus::Null,
         "wrong-secret approve must not mutate the slot"
     );
-    assert!(rec.signature.is_none(), "no signature written on wrong-secret");
+    assert!(
+        rec.signature.is_none(),
+        "no signature written on wrong-secret"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -937,7 +958,9 @@ fn jewije_approve_with_correct_secret_writes_signed_verdict() {
     let slot = slot_verdict_file(dir.path(), &goal_id, "v1", 1);
     let raw: Value = serde_json::from_str(&fs::read_to_string(&slot).unwrap()).unwrap();
     assert_eq!(raw["status"], Value::String(APPROVE.into()));
-    let sig = raw["signature"].as_str().expect("signature must be present on signed verdict");
+    let sig = raw["signature"]
+        .as_str()
+        .expect("signature must be present on signed verdict");
     assert_eq!(
         sig.len(),
         128,
@@ -946,7 +969,12 @@ fn jewije_approve_with_correct_secret_writes_signed_verdict() {
     );
     hex::decode(sig).expect("signature must be valid hex");
     let pub_id = raw["pubkeyId"].as_str().expect("pubkeyId must be present");
-    assert_eq!(pub_id.len(), 16, "pubkeyId must be the 16-hex prefix; got len {}", pub_id.len());
+    assert_eq!(
+        pub_id.len(),
+        16,
+        "pubkeyId must be the 16-hex prefix; got len {}",
+        pub_id.len()
+    );
 
     // The written record MUST verify against the slot's pinned pubkey.
     let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
@@ -1028,7 +1056,11 @@ fn jewije_reject_without_notes_fails() {
 
     // Slot stays null.
     let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    assert_eq!(rec.status, verdict::VerdictStatus::Null, "empty-notes reject must not write");
+    assert_eq!(
+        rec.status,
+        verdict::VerdictStatus::Null,
+        "empty-notes reject must not write"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,7 +1088,10 @@ fn jewije_second_verdict_on_same_slot_fails_already_final() {
     // second attempt does not mutate it.
     let slot = slot_verdict_file(dir.path(), &goal_id, "v1", 1);
     let first_bytes = fs::read_to_string(&slot).unwrap();
-    assert!(first_bytes.contains("signature"), "first verdict must be signed (RED if unsigned)");
+    assert!(
+        first_bytes.contains("signature"),
+        "first verdict must be signed (RED if unsigned)"
+    );
 
     // Second attempt — even with the same correct secret — must fail (AlreadyFinal).
     let assert = hermetic_verifier_cmd()
@@ -1098,7 +1133,9 @@ fn jewije_approve_on_slot_without_pinned_pubkey_fails_closed() {
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     assert!(
-        !verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join(verdict::PUBKEY_FILE).exists(),
+        !verdict::pubkey_path(dir.path(), &goal_id, "v1", 1)
+            .join(verdict::PUBKEY_FILE)
+            .exists(),
         "test precondition: no pinned pubkey for this slot"
     );
 
@@ -1126,7 +1163,11 @@ fn jewije_approve_on_slot_without_pinned_pubkey_fails_closed() {
 
     // The slot stays null.
     let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    assert_eq!(rec.status, verdict::VerdictStatus::Null, "slot must remain null");
+    assert_eq!(
+        rec.status,
+        verdict::VerdictStatus::Null,
+        "slot must remain null"
+    );
 }
 
 // ===========================================================================
@@ -1157,8 +1198,14 @@ fn register_approve_with_notes_stores_them_on_the_record() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
     // NEW signature: 5th arg = notes. Old code: 4 args -> compile error.
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, Some("all DoD items verified"))
-        .expect("approve-with-notes must succeed on a null slot");
+    verdict::register_approve(
+        dir.path(),
+        &goal_id,
+        "v1",
+        1,
+        Some("all DoD items verified"),
+    )
+    .expect("approve-with-notes must succeed on a null slot");
 
     let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
     assert_eq!(rec.status, verdict::VerdictStatus::Approve);
@@ -1263,8 +1310,14 @@ fn register_signed_approve_with_notes_signature_verifies() {
         Some("signed evidence: tests green + clippy clean"),
         "notes must be stored verbatim on the signed APPROVE record"
     );
-    assert!(rec.signature.is_some(), "signed approve must carry a signature");
-    assert!(rec.pubkey_id.is_some(), "signed approve must carry a pubkeyId");
+    assert!(
+        rec.signature.is_some(),
+        "signed approve must carry a signature"
+    );
+    assert!(
+        rec.pubkey_id.is_some(),
+        "signed approve must carry a pubkeyId"
+    );
 
     // Signature MUST verify against the pinned pubkey over canonical bytes that include
     // the notes (crypto::canonical_record_bytes already binds notes).
@@ -1361,9 +1414,12 @@ fn verifier_secret_hex_persisted_with_mode_0600() {
         .expect("mint succeeds on a fresh slot");
 
     // The secret hex file MUST exist alongside the pinned pubkey.
-    let secret_file = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1)
-        .join(verdict::SECRET_FILE);
-    assert!(secret_file.exists(), "secret hex file must exist at {secret_file:?}");
+    let secret_file =
+        verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join(verdict::SECRET_FILE);
+    assert!(
+        secret_file.exists(),
+        "secret hex file must exist at {secret_file:?}"
+    );
 
     // Mode must be 0600 (owner read+write only — the secret is the per-verifier forge key).
     let mode = fs::metadata(&secret_file).unwrap().permissions().mode() & 0o777;
@@ -1401,8 +1457,8 @@ fn read_verifier_secret_returns_none_for_legacy_slot() {
     // harvested verdict fails consensus signature verification (fail-closed).
     let (dir, goal_id) = fresh_goal_for_pubkey();
     verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
-    let secret_file = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1)
-        .join(verdict::SECRET_FILE);
+    let secret_file =
+        verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join(verdict::SECRET_FILE);
     fs::remove_file(&secret_file).unwrap();
 
     let read = verdict::read_verifier_secret(dir.path(), &goal_id, "v1", 1)
@@ -1431,12 +1487,19 @@ fn mint_and_pin_does_not_overwrite_existing_secret() {
     // Pre-place a sentinel secret + pubkey so the slot looks already-pinned.
     let slot = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1);
     fs::create_dir_all(&slot).unwrap();
-    fs::write(slot.join(verdict::PUBKEY_FILE), r#"{"pubkey":"00","mintedAt":"t"}"#).unwrap();
+    fs::write(
+        slot.join(verdict::PUBKEY_FILE),
+        r#"{"pubkey":"00","mintedAt":"t"}"#,
+    )
+    .unwrap();
     fs::write(slot.join(verdict::SECRET_FILE), "sentinel").unwrap();
 
     // mint must fail (pubkey already pinned) and must NOT have overwritten the secret.
     let err = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1);
-    assert!(err.is_err(), "mint on a pinned slot must fail (AlreadyPinned)");
+    assert!(
+        err.is_err(),
+        "mint on a pinned slot must fail (AlreadyPinned)"
+    );
     assert_eq!(
         fs::read_to_string(slot.join(verdict::SECRET_FILE)).unwrap(),
         "sentinel",

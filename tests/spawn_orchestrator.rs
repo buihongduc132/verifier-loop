@@ -98,15 +98,16 @@ EOF
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn round succeeds");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+        }))
+        .expect("spawn round succeeds");
 
     assert_eq!(runs.len(), 2, "m=2 spawns exactly two verifier runs");
 
@@ -114,7 +115,11 @@ EOF
         let vdir = verifier_dir(root, &goal_id, 1, vid);
         let verdict: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
-        assert_eq!(verdict["status"], serde_json::Value::Null, "{vid} verdict null");
+        assert_eq!(
+            verdict["status"],
+            serde_json::Value::Null,
+            "{vid} verdict null"
+        );
 
         let meta: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(vdir.join("meta.json")).unwrap()).unwrap();
@@ -262,24 +267,32 @@ sleep 30
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn round still returns (timeout is not a hard error)");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+        }))
+        .expect("spawn round still returns (timeout is not a hard error)");
 
     assert_eq!(runs.len(), 1);
     assert!(runs[0].timed_out, "the verifier run is marked timed out");
-    assert!(runs[0].sid.is_none(), "no SID captured from a timed-out run");
+    assert!(
+        runs[0].sid.is_none(),
+        "no SID captured from a timed-out run"
+    );
 
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
     let verdict: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
-    assert_eq!(verdict["status"], serde_json::Value::Null, "null verdict preserved");
+    assert_eq!(
+        verdict["status"],
+        serde_json::Value::Null,
+        "null verdict preserved"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -308,15 +321,16 @@ EOF
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn succeeds");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+        }))
+        .expect("spawn succeeds");
 
     assert_eq!(runs[0].sid.as_deref(), Some("abc-123"));
     assert_eq!(runs[0].final_output.as_deref(), Some("VERIFY: approve me"));
@@ -431,7 +445,10 @@ EOF
 
     for vid in ["v1", "v2"] {
         let p = verifier_dir(root, &goal_id, 1, vid).join(verdict::PUBKEY_FILE);
-        assert!(p.exists(), "{vid} verifier-pubkey.json should be pinned at spawn time");
+        assert!(
+            p.exists(),
+            "{vid} verifier-pubkey.json should be pinned at spawn time"
+        );
         let raw = fs::read_to_string(&p).unwrap();
         let file: verdict::VerifierPubkeyFile = serde_json::from_str(&raw).unwrap();
         // 64 hex chars = 32-byte Ed25519 verifying key.
@@ -528,7 +545,11 @@ fn closed_loop_produces_signed_verdicts() {
         let rec = verdict::read_verdict(home, &goal_id, vid, 1).expect("verdict reads");
         assert_eq!(rec.status, verdict::VerdictStatus::Approve, "{vid} APPROVE");
         let sig = rec.signature.as_ref().expect("{vid} signature present");
-        assert_eq!(sig.len(), 128, "{vid} signature is 128 hex (64-byte Ed25519)");
+        assert_eq!(
+            sig.len(),
+            128,
+            "{vid} signature is 128 hex (64-byte Ed25519)"
+        );
         let pkid = rec.pubkey_id.as_ref().expect("{vid} pubkeyId present");
         assert_eq!(pkid.len(), 16, "{vid} pubkeyId is 16 hex");
 
@@ -603,16 +624,23 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
         .unwrap();
 
     let completion = read_completion(home, &goal_id);
-    let stored_full = completion["fullDigest"].as_str().expect("fullDigest present").to_string();
-    let matched_at = completion["matchedAt"].as_str().expect("matchedAt present").to_string();
-    let round = completion["roundNumber"].as_u64().expect("roundNumber present") as u32;
+    let stored_full = completion["fullDigest"]
+        .as_str()
+        .expect("fullDigest present")
+        .to_string();
+    let matched_at = completion["matchedAt"]
+        .as_str()
+        .expect("matchedAt present")
+        .to_string();
+    let round = completion["roundNumber"]
+        .as_u64()
+        .expect("roundNumber present") as u32;
 
     // Recompute the inputs we can read back.
     let salt = store::salt_in(home).expect("salt reads");
-    let sig_record: goal::SignatureRecord = serde_json::from_str(&fs::read_to_string(
-        goal::goal_dir(home, &goal_id).join(goal::SIGNATURE_FILE),
+    let sig_record: goal::SignatureRecord = serde_json::from_str(
+        &fs::read_to_string(goal::goal_dir(home, &goal_id).join(goal::SIGNATURE_FILE)).unwrap(),
     )
-    .unwrap())
     .unwrap();
 
     // Reconstruct matching verdicts from completion.json (already canonical order).
@@ -647,7 +675,10 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
     // The NEW contract: the digest must fold in the receipt head. Recompute WITH the
     // head appended to the canonical input string and assert it equals the stored
     // digest.
-    assert!(!head.is_empty(), "receipt head is non-empty after m=2 approves");
+    assert!(
+        !head.is_empty(),
+        "receipt head is non-empty after m=2 approves"
+    );
 
     // Mirror consensus::compute_hash's input assembly, then append the head.
     // (The exact insertion point is the GREEN task's choice; this test pins the
@@ -657,8 +688,14 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
             .iter()
             .map(|m| {
                 let mut map = std::collections::BTreeMap::new();
-                map.insert("registeredAt", serde_json::Value::String(m.registered_at.clone()));
-                map.insert("verifierId", serde_json::Value::String(m.verifier_id.clone()));
+                map.insert(
+                    "registeredAt",
+                    serde_json::Value::String(m.registered_at.clone()),
+                );
+                map.insert(
+                    "verifierId",
+                    serde_json::Value::String(m.verifier_id.clone()),
+                );
                 serde_json::to_value(&map).unwrap()
             })
             .collect::<Vec<_>>(),
@@ -754,15 +791,16 @@ EOF
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn succeeds");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+        }))
+        .expect("spawn succeeds");
 
     assert_eq!(runs.len(), 3, "gather returned all three runs");
     // Every verifier reached its done marker → barrier truly waited for all.
@@ -806,21 +844,25 @@ exit 1
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn round still returns (crash is not a hard error)");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+        }))
+        .expect("spawn round still returns (crash is not a hard error)");
 
     assert_eq!(runs.len(), 1);
     assert!(runs[0].sid.is_none(), "no SID from a crashed backend");
 
     // (a) stderr is surfaced on the run so the CLI can print it.
-    let surfaced = runs[0].stderr.as_deref().expect("stderr surfaced on the run");
+    let surfaced = runs[0]
+        .stderr
+        .as_deref()
+        .expect("stderr surfaced on the run");
     assert!(
         surfaced.contains("Failed to load extension bridge.ts"),
         "surfaced stderr carries the backend error: {surfaced}"
@@ -837,7 +879,11 @@ exit 1
     // (c) the verdict is still null (fail-closed intact — we surface, we do NOT fake).
     let verdict: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
-    assert_eq!(verdict["status"], serde_json::Value::Null, "fail-closed: verdict stays null");
+    assert_eq!(
+        verdict["status"],
+        serde_json::Value::Null,
+        "fail-closed: verdict stays null"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -887,15 +933,16 @@ exit 1
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn round returns");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+        }))
+        .expect("spawn round returns");
 
     let surfaced = runs[0].stderr.as_deref().expect("stderr surfaced");
 
@@ -924,8 +971,8 @@ exit 1
     );
 
     // (d) Persisted file is the same bounded content.
-    let persisted = fs::read_to_string(verifier_dir(root, &goal_id, 1, "v1").join(spawn::STDERR_FILE))
-        .unwrap();
+    let persisted =
+        fs::read_to_string(verifier_dir(root, &goal_id, 1, "v1").join(spawn::STDERR_FILE)).unwrap();
     assert!(persisted.contains("FATAL: the actual error is here"));
     assert!(persisted.contains("[...truncated"));
 }

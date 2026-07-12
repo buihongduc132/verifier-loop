@@ -232,12 +232,13 @@ async fn spawn_nudge_child(
     // pinned + a fresh key wouldn't match the pinned pubkey), so we read instead.
     // Ok(None) on a legacy unsigned slot → inject empty string (fail-closed: any
     // harvested verdict will fail consensus signature verification).
-    let secret_hex = verdict::read_verifier_secret(
-        input.root,
-        input.goal_id,
-        verifier_id,
-        input.round,
-    )?;
+    let secret_hex =
+        verdict::read_verifier_secret(input.root, input.goal_id, verifier_id, input.round)?;
+    // Resolve the goal trace id for the nudge child too (add-otel-observability D2):
+    // a nudge/recovery resume is a NEW process and cannot inherit the initial
+    // spawn env, so it must read the persisted trace-id (same as the persisted
+    // secret above). Fail-open per D5.
+    let trace_id = crate::observe::ensure_goal_trace_id(input.root, input.goal_id).ok();
     inject_identity_env(
         &mut cmd,
         input.goal_id,
@@ -245,6 +246,7 @@ async fn spawn_nudge_child(
         input.round,
         input.root,
         secret_hex.as_deref().unwrap_or(""),
+        trace_id.as_deref(),
     );
     inject_verifier_verdict_bin(&mut cmd);
     cmd.stdin(stdin_config)
@@ -460,6 +462,12 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
     let rounds_dir = round_dir(input.root, input.goal_id, input.round);
     fs::create_dir_all(&rounds_dir)?;
 
+    // Resolve the per-goal trace id ONCE (add-otel-observability D1/D2): mint-or-read
+    // <store>/goals/<goalId>/trace-id, then propagate to every V* child env so the
+    // V* process's `jewije` calls join this round's trace. Fail-open per D5: a
+    // resolution error is swallowed (None) — tracing never blocks a verdict.
+    let trace_id = crate::observe::ensure_goal_trace_id(input.root, input.goal_id).ok();
+
     // Build the launch plan: (verifierId, command, vdir, goal_file_guard) for each
     // of m verifiers. The goal_file_guard is `Some` only for `GoalFile` transport;
     // it is held in the plan / children vec so the tempfile lives until the gather
@@ -489,6 +497,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
             input.round,
             input.root,
             &secret_hex,
+            trace_id.as_deref(),
         );
         inject_verifier_verdict_bin(&mut cmd);
         plan.push((vid, cmd, vdir, goal_file_guard));
@@ -542,6 +551,10 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
     let prev_round = input.round.saturating_sub(1);
     let rounds_dir = round_dir(input.root, input.goal_id, input.round);
     fs::create_dir_all(&rounds_dir)?;
+
+    // Resolve the per-goal trace id once (add-otel-observability D1/D2): reuses the
+    // value persisted at NEW time, so RESUME joins the same trace as NEW. Fail-open.
+    let trace_id = crate::observe::ensure_goal_trace_id(input.root, input.goal_id).ok();
 
     let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>)> = Vec::new();
     for i in 0..input.config.m as usize {
@@ -599,6 +612,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
             input.round,
             input.root,
             &secret_hex,
+            trace_id.as_deref(),
         );
         inject_verifier_verdict_bin(&mut cmd);
         plan.push((vid, cmd, vdir, goal_file_guard));
@@ -654,10 +668,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
 /// Errors live at the end of a run; earlier chatter is discarded to bound RAM.
 /// If the stream exceeds `cap`, the returned buffer is prefixed with a truncation
 /// marker so the user knows output was elided.
-async fn bounded_stderr_tail<R: tokio::io::AsyncRead + Unpin>(
-    pipe: &mut R,
-    cap: usize,
-) -> Vec<u8> {
+async fn bounded_stderr_tail<R: tokio::io::AsyncRead + Unpin>(pipe: &mut R, cap: usize) -> Vec<u8> {
     use tokio::io::AsyncReadExt;
     let mut chunk = [0u8; 1024];
     let mut total_seen: u64 = 0;
@@ -950,8 +961,10 @@ fn read_meta(vdir: &Path) -> Result<Option<VerifierMeta>, SpawnError> {
     let mut val: serde_json::Value = serde_json::from_str(&raw)?;
     if let Some(obj) = val.as_object_mut() {
         obj.entry("nudgeAttempts").or_insert(serde_json::json!(0));
-        obj.entry("compactionObserved").or_insert(serde_json::json!(false));
-        obj.entry("recoveryAttempts").or_insert(serde_json::json!(0));
+        obj.entry("compactionObserved")
+            .or_insert(serde_json::json!(false));
+        obj.entry("recoveryAttempts")
+            .or_insert(serde_json::json!(0));
     }
     Ok(Some(serde_json::from_value(val)?))
 }
@@ -970,7 +983,10 @@ fn update_meta_after_run(
         compaction_observed: false,
         recovery_attempts: 0,
     });
-    let turns_used = existing.turns_used.saturating_add(1).min(input.config.max_turn);
+    let turns_used = existing
+        .turns_used
+        .saturating_add(1)
+        .min(input.config.max_turn);
     let updated = VerifierMeta {
         sid: sid.map(str::to_string).or(existing.sid),
         turns_used,
@@ -1037,7 +1053,9 @@ fn build_command_from_template(
 /// places prompt bytes in argv.
 fn split_into_command(template: &str) -> Command {
     let mut parts = template.split_whitespace();
-    let program = parts.next().expect("spawn template has a non-empty program");
+    let program = parts
+        .next()
+        .expect("spawn template has a non-empty program");
     let mut cmd = Command::new(program);
     for a in parts {
         cmd.arg(a);
@@ -1068,7 +1086,10 @@ fn build_resume_command(adapter: &acp::Adapter, sid: &str, goal_file: Option<&Pa
 /// The returned `JoinHandle` resolves to `io::Result<()>`. A `BrokenPipe` (`EPIPE`)
 /// error is expected when the child exits before draining the pipe; [`gather`] treats
 /// it as non-fatal when ACP output was produced, and as fail-closed otherwise (D4/R2).
-fn spawn_stdin_writer(stdin: Option<tokio::process::ChildStdin>, prompt: &[u8]) -> Option<JoinHandle<io::Result<()>>> {
+fn spawn_stdin_writer(
+    stdin: Option<tokio::process::ChildStdin>,
+    prompt: &[u8],
+) -> Option<JoinHandle<io::Result<()>>> {
     let mut stdin = stdin?;
     let prompt = prompt.to_vec();
     Some(tokio::spawn(async move {
@@ -1105,25 +1126,32 @@ fn mint_verifier_secret(
 /// The env pairs a spawned verifier needs: identity (D2) plus the store root so its
 /// `verifier-verdict` call writes into the orchestrator's store (fail-closed: a
 /// verdict written to a *different* store would be invisible → null slot → no hash),
-/// plus the per-verifier signing secret (D3) so its verdict registration is signed.
+/// plus the per-verifier signing secret (D3) so its verdict registration is signed,
+/// plus the per-goal trace id (add-otel-observability D2) so the V* process's
+/// `jewije` calls join the spawning round's trace.
 fn identity_env_pairs<'a>(
     goal_id: &'a str,
     verifier_id: &'a str,
     round: u32,
     root: &'a Path,
     secret_hex: &'a str,
+    trace_id: Option<&'a str>,
 ) -> Vec<(&'static str, std::ffi::OsString)> {
-    vec![
+    let mut pairs = vec![
         (ENV_GOAL_ID, goal_id.into()),
         (ENV_VERIFIER_ID, verifier_id.into()),
         (ENV_ROUND, round.to_string().into()),
         (ENV_HOME, root.as_os_str().into()),
         (ENV_VERIFIER_SECRET, secret_hex.into()),
-    ]
+    ];
+    if let Some(tid) = trace_id {
+        pairs.push((crate::observe::ENV_TRACE_ID, tid.into()));
+    }
+    pairs
 }
 
-/// Inject the identity + store-root + signing-secret env vars into a verifier command
-/// (D2 + D3).
+/// Inject the identity + store-root + signing-secret + trace-id env vars into a
+/// verifier command (D2 + D3 + add-otel-observability D2).
 fn inject_identity_env(
     cmd: &mut Command,
     goal_id: &str,
@@ -1131,8 +1159,9 @@ fn inject_identity_env(
     round: u32,
     root: &Path,
     secret_hex: &str,
+    trace_id: Option<&str>,
 ) {
-    for (k, v) in identity_env_pairs(goal_id, verifier_id, round, root, secret_hex) {
+    for (k, v) in identity_env_pairs(goal_id, verifier_id, round, root, secret_hex, trace_id) {
         cmd.env(k, v);
     }
 }
@@ -1231,7 +1260,10 @@ mod tests {
             "goalFile path substituted: {s}"
         );
         assert!(!s.contains("{sid}"), "no literal {{sid}} survives: {s}");
-        assert!(!s.contains("{goalFile}"), "no literal {{goalFile}} survives: {s}");
+        assert!(
+            !s.contains("{goalFile}"),
+            "no literal {{goalFile}} survives: {s}"
+        );
     }
 
     #[test]
@@ -1266,7 +1298,7 @@ mod tests {
     #[test]
     fn identity_env_pairs_propagate_store_root() {
         let root = Path::new("/tmp/vl-home");
-        let pairs = identity_env_pairs("g1", "v1", 2, root, "deadbeef");
+        let pairs = identity_env_pairs("g1", "v1", 2, root, "deadbeef", None);
         let home = pairs.iter().find(|(k, _)| *k == ENV_HOME);
         assert!(home.is_some(), "VERIFIER_LOOP_HOME must be injected");
         assert_eq!(
@@ -1280,7 +1312,10 @@ mod tests {
         assert!(pairs.iter().any(|(k, _)| *k == ENV_ROUND));
         // D3: per-verifier signing secret is injected.
         let secret = pairs.iter().find(|(k, _)| *k == ENV_VERIFIER_SECRET);
-        assert!(secret.is_some(), "VERIFIER_LOOP_VERIFIER_SECRET must be injected");
+        assert!(
+            secret.is_some(),
+            "VERIFIER_LOOP_VERIFIER_SECRET must be injected"
+        );
         assert_eq!(
             secret.unwrap().1.as_os_str(),
             "deadbeef",
@@ -1292,10 +1327,7 @@ mod tests {
     fn round_dir_layout_matches_goal_layer() {
         let root = Path::new("/tmp/x");
         let d = round_dir(root, "g1", 2);
-        assert_eq!(
-            d,
-            Path::new("/tmp/x/goals/g1/rounds/2")
-        );
+        assert_eq!(d, Path::new("/tmp/x/goals/g1/rounds/2"));
     }
 
     // F2 (cubic r2): checkpoint_meta persists the loop counters BEFORE the nudge child
@@ -1322,12 +1354,20 @@ mod tests {
         // and about to spawn a child that gets killed mid-spawn.
         checkpoint_meta(vdir, 2, 1, true).unwrap();
 
-        let m = read_meta(vdir).unwrap().expect("meta.json present after checkpoint");
+        let m = read_meta(vdir)
+            .unwrap()
+            .expect("meta.json present after checkpoint");
         assert_eq!(m.nudge_attempts, 2, "nudge_attempts persisted pre-spawn");
-        assert_eq!(m.recovery_attempts, 1, "recovery_attempts persisted pre-spawn");
+        assert_eq!(
+            m.recovery_attempts, 1,
+            "recovery_attempts persisted pre-spawn"
+        );
         assert!(m.compaction_observed, "compaction_observed OR-ed into meta");
         // sid + turns_used MUST be untouched (reap owns them).
         assert_eq!(m.sid.as_deref(), Some("pre-existing-sid"));
-        assert_eq!(m.turns_used, 3, "turns_used must NOT advance at checkpoint time");
+        assert_eq!(
+            m.turns_used, 3,
+            "turns_used must NOT advance at checkpoint time"
+        );
     }
 }

@@ -115,7 +115,9 @@ pub fn parse_event(line: &str) -> Result<Option<AcpEvent>, AcpError> {
             let messages = value
                 .get("messages")
                 .and_then(Value::as_array)
-                .ok_or_else(|| AcpError::BadEventShape("agent_end missing 'messages' array".into()))?
+                .ok_or_else(|| {
+                    AcpError::BadEventShape("agent_end missing 'messages' array".into())
+                })?
                 .iter()
                 .map(parse_message_value)
                 .collect::<Result<Vec<_>, _>>()?;
@@ -185,10 +187,7 @@ pub fn extract_final_output(stream: &str) -> Option<String> {
 /// kill (recoverable) vs a plain crash (fail-closed).
 pub fn extract_compaction_observed(stream: &str) -> bool {
     for line in stream.lines() {
-        if matches!(
-            parse_event(line),
-            Ok(Some(AcpEvent::Compaction { .. }))
-        ) {
+        if matches!(parse_event(line), Ok(Some(AcpEvent::Compaction { .. }))) {
             return true;
         }
     }

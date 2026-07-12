@@ -36,7 +36,20 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 | `consensus/` | §8 | consensus-check + completion-proof |
 | `prompt/`  | §9 | verifier-prompt |
 | `round_recover/` | add-round-recovery | cross-process round recovery (RECOVER + STATUS + GoalLock) |
+| `observe/` | add-otel-observability | lifecycle-tracing + trace-export (per-goal traceId + trace.jsonl + opt-in OTLP) |
 | `cli/`     | §10 | wiring |
+
+## Observability / tracing (add-otel-observability)
+
+The full `jewilo`/`jewije` lifecycle is observable via structured tracing:
+- **Per-goal traceId**: `<store>/goals/<goalId>/trace-id` — minted at NEW, reused across RESUME, propagated to every V* child env (`VERIFIER_LOOP_TRACE_ID`) so `jewije` verdict registrations join the spawning round's trace.
+- **Per-goal `trace.jsonl`**: newline-delimited JSON lifecycle events under `<store>/goals/<goalId>/trace.jsonl` (round start, consensus pass/reject, verdict registered). camelCase keys.
+- **Opt-in OTLP**: build with `--features otel` + set `VERIFIER_LOOP_OTEL_EXPORTER_OTLP_ENDPOINT` to ship spans to a collector. Default builds link NO OpenTelemetry deps.
+- **Level/format env**: `VERIFIER_LOOP_LOG` (default `info`), `VERIFIER_LOOP_LOG_FORMAT` (`text` legacy | `json` structured).
+
+**Critical invariants (design D4/D5):**
+- `traceId` is **metadata, NOT a completion-hash or receipt-`entryHash` input** — the hash inputs are byte-identical with and without tracing.
+- Tracing is **fail-open**: any error in the observe layer is swallowed and never propagates to a verdict, consensus, or hash decision.
 
 ## TDD discipline (hard constraint)
 

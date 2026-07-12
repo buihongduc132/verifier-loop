@@ -76,7 +76,11 @@ fn capture_file_edit_times_scoped_to_changed_files() {
     let dir = temp_git_repo_with(100, 3);
     let snap = prompt::capture_snapshot(dir.path(), 100_000).unwrap();
 
-    let entries: Vec<&str> = snap.file_edit_times.lines().filter(|l| !l.is_empty()).collect();
+    let entries: Vec<&str> = snap
+        .file_edit_times
+        .lines()
+        .filter(|l| !l.is_empty())
+        .collect();
     // After GREEN: only the 3 changed files appear. Today: all 100 tracked files.
     assert_eq!(
         entries.len(),
@@ -173,7 +177,10 @@ fn config_bloat_caps_round_trip_camel_case() {
         ..Config::default()
     };
     let j = serde_json::to_string(&cfg).unwrap();
-    assert!(j.contains("\"fileEditTimesMaxChars\":1234"), "camelCase: {j}");
+    assert!(
+        j.contains("\"fileEditTimesMaxChars\":1234"),
+        "camelCase: {j}"
+    );
     assert!(j.contains("\"contextMaxChars\":5678"), "camelCase: {j}");
     assert!(j.contains("\"promptBudgetBytes\":9012"), "camelCase: {j}");
 

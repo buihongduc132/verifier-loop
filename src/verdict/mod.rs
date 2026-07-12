@@ -909,8 +909,14 @@ mod tests {
 
         let sk1 = mint_and_pin_pubkey(root, &goal_id, "v1", 1).expect("first mint");
         let slot = verdict_path(root, &goal_id, "v1", 1);
-        assert!(slot.join(PUBKEY_FILE).exists(), "pubkey pin must exist after mint");
-        assert!(slot.join(SECRET_FILE).exists(), "secret must exist after mint");
+        assert!(
+            slot.join(PUBKEY_FILE).exists(),
+            "pubkey pin must exist after mint"
+        );
+        assert!(
+            slot.join(SECRET_FILE).exists(),
+            "secret must exist after mint"
+        );
 
         // The persisted secret must round-trip back.
         let persisted = read_verifier_secret(root, &goal_id, "v1", 1)
@@ -951,7 +957,10 @@ mod tests {
             Err(VerdictError::AlreadyPinned)
         ));
         let after = fs::read_to_string(slot.join(SECRET_FILE)).unwrap();
-        assert_eq!(first_secret, after, "secret must be unchanged after AlreadyPinned");
+        assert_eq!(
+            first_secret, after,
+            "secret must be unchanged after AlreadyPinned"
+        );
     }
 
     #[cfg(unix)]
@@ -1047,9 +1056,7 @@ mod tests {
             Err(VerdictError::Io(_)) => {
                 // expected on non-root
             }
-            other => panic!(
-                "permission-denied secret MUST surface as Err(Io), got {other:?}"
-            ),
+            other => panic!("permission-denied secret MUST surface as Err(Io), got {other:?}"),
         }
     }
 }

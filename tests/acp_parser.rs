@@ -25,8 +25,8 @@ use verifier_loop::acp;
 
 /// Loads the real `pi --mode json` fixture shipped with the repo.
 fn fixture_stream() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("flow/fixtures/acp_pi_sample.jsonl");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("flow/fixtures/acp_pi_sample.jsonl");
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("missing ACP fixture at {path:?}: {e}"))
 }
@@ -84,7 +84,13 @@ fn parse_ignorable_event_types_yield_none() {
     // the spec's essential events (session/agent_start/turn_start/message_start/message_end/
     // agent_end). The fixture is full of these; they must not error and must not masquerade
     // as essential events.
-    for ty in ["message_update", "turn_end", "text_delta", "text_start", "text_end"] {
+    for ty in [
+        "message_update",
+        "turn_end",
+        "text_delta",
+        "text_start",
+        "text_end",
+    ] {
         let line = format!(r#"{{"type":"{ty}"}}"#);
         let parsed = acp::parse_event(&line)
             .unwrap_or_else(|e| panic!("ignorable '{ty}' must not error: {e:?}"));
@@ -201,10 +207,23 @@ fn pi_adapter_spawn_uses_stdin_transport_no_prompt_token() {
     // verifier-spawn spec (post §8/D6): built-in `pi` spawn is `pi --mode json` — the
     // prompt travels on stdin, NOT in argv (no `-p`, no `{prompt}` token).
     let t = acp::adapter_for("pi").expect("pi is a built-in adapter");
-    assert_eq!(t.spawn, "pi --mode json", "pi spawn template must be the stdin form, got: {}", t.spawn);
-    assert!(!t.spawn.contains("-p"), "spawn must NOT inline the prompt via -p (E2BIG risk)");
-    assert!(!t.spawn.contains("{prompt}"), "spawn must NOT carry a {{prompt}} token");
-    assert!(t.transport == acp::Transport::Stdin, "built-in pi transport must be Stdin");
+    assert_eq!(
+        t.spawn, "pi --mode json",
+        "pi spawn template must be the stdin form, got: {}",
+        t.spawn
+    );
+    assert!(
+        !t.spawn.contains("-p"),
+        "spawn must NOT inline the prompt via -p (E2BIG risk)"
+    );
+    assert!(
+        !t.spawn.contains("{prompt}"),
+        "spawn must NOT carry a {{prompt}} token"
+    );
+    assert!(
+        t.transport == acp::Transport::Stdin,
+        "built-in pi transport must be Stdin"
+    );
 }
 
 #[test]
@@ -212,18 +231,32 @@ fn pi_adapter_resume_uses_session_flag_and_mode_json() {
     // verifier-spawn spec (post §8/D6): resume is `pi --session {sid} --mode json` —
     // `{sid}` is the only placeholder; the prompt still travels on stdin.
     let t = acp::adapter_for("pi").expect("pi is a built-in adapter");
-    assert_eq!(t.resume, "pi --session {sid} --mode json", "pi resume template, got: {}", t.resume);
+    assert_eq!(
+        t.resume, "pi --session {sid} --mode json",
+        "pi resume template, got: {}",
+        t.resume
+    );
     assert!(t.resume.contains("--session") && t.resume.contains("--mode json"));
-    assert!(!t.resume.contains("-p"), "resume must NOT inline the prompt via -p");
-    assert!(!t.resume.contains("{prompt}"), "resume must NOT carry a {{prompt}} token");
+    assert!(
+        !t.resume.contains("-p"),
+        "resume must NOT inline the prompt via -p"
+    );
+    assert!(
+        !t.resume.contains("{prompt}"),
+        "resume must NOT carry a {{prompt}} token"
+    );
 }
 
 #[test]
 fn hermes_and_acpx_are_builtin_adapters() {
     // §4.3: hermes and acpx each provide spawn/resume templates.
     for backend in ["hermes", "acpx"] {
-        let t = acp::adapter_for(backend).unwrap_or_else(|e| panic!("{backend} must be built-in: {e:?}"));
-        assert!(!t.spawn.is_empty() && !t.resume.is_empty(), "{backend} templates non-empty");
+        let t = acp::adapter_for(backend)
+            .unwrap_or_else(|e| panic!("{backend} must be built-in: {e:?}"));
+        assert!(
+            !t.spawn.is_empty() && !t.resume.is_empty(),
+            "{backend} templates non-empty"
+        );
     }
 }
 
@@ -237,7 +270,10 @@ fn unknown_builtin_backend_errors_fail_closed() {
 #[test]
 fn render_spawn_substitutes_prompt_into_template() {
     let template = "run --prompt {prompt} --json";
-    assert_eq!(acp::render_spawn(template, "hello world"), "run --prompt hello world --json");
+    assert_eq!(
+        acp::render_spawn(template, "hello world"),
+        "run --prompt hello world --json"
+    );
 }
 
 #[test]
@@ -274,5 +310,8 @@ fn extract_final_output_works_on_real_pi_stream_fixture() {
     assert!(sid.starts_with("019f"), "sid looks like a UUID: {sid}");
     let final_output = acp::extract_final_output(&stream)
         .expect("real pi stream has an agent_end with assistant text");
-    assert!(final_output.contains("VERIFIER DONE"), "final output captured: {final_output}");
+    assert!(
+        final_output.contains("VERIFIER DONE"),
+        "final output captured: {final_output}"
+    );
 }

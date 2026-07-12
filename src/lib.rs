@@ -29,6 +29,7 @@ pub mod cli;
 pub mod consensus;
 pub mod crypto;
 pub mod goal;
+pub mod observe;
 pub mod prompt;
 pub mod receipt;
 pub mod round_recover;
