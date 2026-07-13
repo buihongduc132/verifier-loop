@@ -57,3 +57,6 @@ examples_tmp/
 /node_modules/
 .smoke/
 target
+
+# worktrees (never commit)
+.worktrees/

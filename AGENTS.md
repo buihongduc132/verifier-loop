@@ -37,6 +37,7 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 | `prompt/`  | §9 | verifier-prompt |
 | `round_recover/` | add-round-recovery | cross-process round recovery (RECOVER + STATUS + GoalLock) |
 | `observe/` | add-otel-observability | lifecycle-tracing + trace-export (per-goal traceId + trace.jsonl + opt-in OTLP) |
+| `health/`  | 2026-07-14 health-cooldown | unhealthy-run detection (`health.jsonl`) + cooldown fallback hash (`<mmddyy>-ffffff`) |
 | `cli/`     | §10 | wiring |
 
 ## Observability / tracing (add-otel-observability)
@@ -65,6 +66,40 @@ Never implement without a test first. Never have the same author write both RED 
 ```bash
 cargo llvm-cov --fail-under-lines 80
 ```
+
+## Health self-awareness + cooldown (2026-07-14)
+
+The `jewilo` CLI is self-aware of backend health. A verifier run is **unhealthy** when it
+times out, produces no usable result (no SID + no final output), OR the child exits
+non-zero. Unhealthy events are appended to `<store>/health.jsonl` (one JSON line per
+event, `{"event":"unhealthy","at":"<rfc3339>"}`).
+
+If **more than 3** unhealthy events occur within a rolling **1-hour** window, `jewilo`
+enters **cooldown mode**: instead of spawning verifiers (which would almost certainly fail
+again and leave nulls), it immediately returns a recognizable **fallback hash** of the form
+`<mmddyy>-ffffff`. This does NOT weaken fail-closed invariants — it returns a clearly
+marked fallback (6 `f`s, vs a real 8-hex consensus hash), never an APPROVE or a real hash.
+See `src/health/mod.rs`. Intention: [`flow/intentions/2026-07-14_health-cooldown-and-reject-notes-prompt.md`](flow/intentions/2026-07-14_health-cooldown-and-reject-notes-prompt.md).
+
+The verifier prompt is also built **dynamically from prior REJECT notes** —
+`prompt::collect_prior_reject_notes` gathers every REJECT verdict's notes across all prior
+rounds of the goal and `prompt::append_prior_reject_notes` appends them under a
+`# Prior rejection notes` heading so the verifier sees the rejection history and can
+verify fixes against it.
+
+## jewilo-dev deploy ceremony (for WIP verifier-loop changes)
+
+When iterating on `jewilo` (the `verifier-loop` binary) itself, the WIP build is deployed
+as **`jewilo-dev`** so it does NOT shadow the stable `jewilo` on PATH. The ceremony:
+
+1. **Build + deploy WIP as `jewilo-dev`** — `cargo build` then symlink/copy the built
+   `verifier-loop` binary to `jewilo-dev` (next to the stable `jewilo`).
+2. **Run the normal verifier-loop workflow once with the stable `jewilo`** — confirms the
+   stable path is unaffected by the WIP changes.
+3. **Run the workflow again with `jewilo-dev`** — exercises the new WIP features end to
+   end.
+
+This keeps a known-good `jewilo` on PATH at all times; `jewilo-dev` is the canary.
 
 ## Fail-closed invariants (must always hold)
 

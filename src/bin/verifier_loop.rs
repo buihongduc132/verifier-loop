@@ -25,6 +25,7 @@ use chrono::Utc;
 use clap::Parser;
 
 use verifier_loop::cli::{VerifierLoopCli, VerifierLoopCmd};
+use verifier_loop::health;
 use verifier_loop::round_recover::{self, RecoverOutcome, RoundRecoverError};
 use verifier_loop::verdict::{self, VerdictStatus};
 
@@ -278,6 +279,30 @@ fn run_round(
     );
     let _guard = round_span.enter();
 
+    // Health self-awareness (intention 2026-07-14 feature a): if the store is in
+    // cooldown (>3 unhealthy verifier runs in the last hour), do NOT spawn verifiers.
+    // Instead return the recognizable fallback hash `<mmddyy>-ffffff` so the outer
+    // driving process is not completely blocked. This does NOT weaken fail-closed
+    // invariants — it returns a clearly-marked fallback, never an APPROVE or a real
+    // consensus hash.
+    if health::in_cooldown(root, Utc::now()) {
+        let fb = health::fallback_hash();
+        eprintln!(
+            "cooldown: >{} unhealthy verifier runs in the last hour; \
+             returning fallback hash {fb} (no verifiers spawned)",
+            health::cooldown_threshold()
+        );
+        let _ = verifier_loop::observe::append_trace_event(
+            root,
+            goal_id,
+            "warn",
+            "jewilo.cooldown.fallback",
+            serde_json::json!({ "fallbackHash": fb, "round": round }),
+        );
+        println!("{fb}");
+        return Ok(());
+    }
+
     let record = verifier_loop::goal::load(root, goal_id).map_err(|e| format!("goal load: {e}"))?;
     tracing::debug!(fields = ?record.goal_text.len(), "goal loaded");
 
@@ -352,6 +377,13 @@ fn run_round(
         }
         .map_err(|e| format!("prompt render failed: {e}"))?;
         let rendered = verifier_loop::prompt::prepend_custom(rendered, prepend);
+        // Feature b (intention 2026-07-14): build the prompt dynamically by collecting
+        // ALL prior REJECT verdict notes for this goal and appending them so the verifier
+        // sees the rejection history and can verify fixes. No-op when there are no prior
+        // rejects (e.g. round 1, or all-prior-APPROVE).
+        let prior_reject_notes =
+            verifier_loop::prompt::collect_prior_reject_notes(root, goal_id, round);
+        let rendered = verifier_loop::prompt::append_prior_reject_notes(&rendered, &prior_reject_notes);
         verifier_loop::prompt::write_initial_prompt(&goal_root, goal_id, &vid, round, &rendered)
             .map_err(|e| format!("initial-prompt persist failed: {e}"))?;
         rendered_prompts.push(rendered);
@@ -385,7 +417,7 @@ fn run_round(
         prompt: &prompt,
         adapter: &adapter,
     };
-    rt.block_on(async {
+    let runs = rt.block_on(async {
         let _spawn_span = tracing::info_span!("jewilo.spawn", m = config.m).entered();
         match kind {
             RoundKind::New => verifier_loop::spawn::spawn_round(input).await,
@@ -393,6 +425,16 @@ fn run_round(
         }
     })
     .map_err(|e| format!("spawn failed: {e}"))?;
+
+    // Health self-awareness (intention 2026-07-14 feature a): record any unhealthy
+    // verifier run to the store-wide health.jsonl so repeated backend failures trip
+    // cooldown (see the cooldown check at the top of this function). Best-effort: a
+    // write error is swallowed (health tracking must never block a verdict).
+    let now = Utc::now();
+    let unhealthy = runs.iter().filter(|r| health::is_run_unhealthy(r)).count();
+    for _ in 0..unhealthy {
+        let _ = health::record_unhealthy_at(root, now);
+    }
 
     // Gather verdicts for every verifier slot (missing → null → fail-closed).
     let mut verdicts: Vec<(String, verifier_loop::verdict::VerdictRecord)> = Vec::new();

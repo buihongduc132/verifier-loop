@@ -540,6 +540,93 @@ pub fn write_initial_prompt(
     Ok(path)
 }
 
+/// Collect the REJECT verdict notes across ALL prior rounds of a goal (every verifier
+/// slot, every round < `current_round`), returning a single concatenated section
+/// (intention 2026-07-14 feature b).
+///
+/// This generalizes the per-verifier own-prior-notes (`prevNotes`) mechanism — which
+/// feeds a single verifier its OWN prior-round notes — to a cross-round aggregation of
+/// EVERY prior REJECT for the goal. The returned string is fed to
+/// [`append_prior_reject_notes`] so the current round's verifier prompt carries the full
+/// rejection history and can verify fixes against it.
+///
+/// APPROVE and null verdicts are ignored. A round directory that is missing or has no
+/// verdicts contributes nothing. The notes are de-duplicated and ordered by round then
+/// verifier id for deterministic output.
+///
+/// Returns an empty string when there are no prior REJECTs (the caller treats empty as a
+/// no-op in [`append_prior_reject_notes`]).
+pub fn collect_prior_reject_notes(root: &Path, goal_id: &str, current_round: u32) -> String {
+    use crate::verdict::{self, VerdictStatus};
+    use std::collections::BTreeSet;
+
+    let rounds_root = crate::goal::goal_dir(root, goal_id).join(crate::goal::ROUNDS_DIR);
+    let mut entries: Vec<(u32, String, String)> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    let Ok(round_dirs) = fs::read_dir(&rounds_root) else {
+        return String::new();
+    };
+    for entry in round_dirs.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        let Ok(round) = name_str.parse::<u32>() else {
+            continue;
+        };
+        if round >= current_round {
+            continue; // exclude the current (and any future) round
+        }
+        // Each round dir contains per-verifier slot dirs (v1, v2, ...).
+        let Ok(slot_dirs) = fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for slot in slot_dirs.flatten() {
+            let vid = slot.file_name();
+            let Some(vid_str) = vid.to_str() else {
+                continue;
+            };
+            if let Ok(rec) = verdict::read_verdict(root, goal_id, vid_str, round) {
+                if rec.status == VerdictStatus::Reject {
+                    if let Some(notes) = rec.notes.as_deref() {
+                        let notes = notes.trim();
+                        if !notes.is_empty() && seen.insert(notes.to_string()) {
+                            entries.push((round, vid_str.to_string(), notes.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return String::new();
+    }
+    // Deterministic order: by round, then verifier id.
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut out = String::new();
+    for (round, vid, notes) in entries {
+        out.push_str(&format!("round {round} {vid}: {notes}\n"));
+    }
+    out
+}
+
+/// Append a prior-reject-notes section to an already-rendered prompt (intention
+/// 2026-07-14 feature b). `notes` is the output of [`collect_prior_reject_notes`].
+///
+/// Empty `notes` is a no-op (the prompt is returned unchanged) so the caller can always
+/// call this without checking. Non-empty notes are appended under a clearly labelled
+/// `# Prior rejection notes` heading so the verifier sees the rejection history and can
+/// verify fixes against it, without it leaking into the frozen snapshot section.
+pub fn append_prior_reject_notes(rendered: &str, notes: &str) -> String {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return rendered.to_string();
+    }
+    format!(
+        "{rendered}\n\n---\n# Prior rejection notes (from earlier rounds)\n\n{trimmed}\n"
+    )
+}
+
 /// Errors emitted by prompt rendering / capture.
 #[derive(Debug, thiserror::Error)]
 pub enum PromptError {
