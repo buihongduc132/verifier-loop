@@ -126,6 +126,10 @@ pub struct VerifierRun {
     pub stderr: Option<String>,
     /// True iff the verifier was killed by `verifierTimeoutSec`.
     pub timed_out: bool,
+    /// Raw exit code of the child process, when it exited normally. `None` on timeout
+    /// (killed) or when the OS did not report an exit code (e.g. signaled). Used by the
+    /// health layer to flag an unhealthy run (non-success exit code).
+    pub exit_code: Option<i32>,
 }
 
 /// On-disk per-verifier metadata, written at spawn time and updated after gather.
@@ -272,6 +276,7 @@ struct NudgeOutcome {
     timed_out: bool,
     compaction_observed: bool,
     agent_end_seen: bool,
+    exit_code: Option<i32>,
 }
 
 async fn reap_nudge_child(
@@ -334,6 +339,7 @@ async fn reap_nudge_child(
                 timed_out: true,
                 compaction_observed: false,
                 agent_end_seen: false,
+                exit_code: None,
             }
         }
         status = child.wait() => {
@@ -357,7 +363,8 @@ async fn reap_nudge_child(
             if let Some(text) = &final_output {
                 let _ = fs::write(vdir.join(FINAL_OUTPUT_FILE), text);
             }
-            let _ = status;
+            let _ = &status;
+            let nudge_exit_code = status.as_ref().ok().and_then(|s| s.code());
             // Update meta: increment turns and record compaction.
             let existing = read_meta(vdir)?.unwrap_or(VerifierMeta {
                 sid: None,
@@ -385,6 +392,7 @@ async fn reap_nudge_child(
                 timed_out: false,
                 compaction_observed,
                 agent_end_seen,
+                exit_code: nudge_exit_code,
             }
         }
     };
@@ -762,7 +770,7 @@ async fn gather(
                 if let Some(text) = &stderr {
                     let _ = fs::write(vdir.join(STDERR_FILE), text);
                 }
-                VerifierRun { verifier_id: vid, sid: None, final_output: None, stderr, timed_out: true }
+                VerifierRun { verifier_id: vid, sid: None, final_output: None, stderr, timed_out: true, exit_code: None }
             }
             status = child.wait() => {
                 // Child exited; the drain task finishes shortly after (pipe hits EOF).
@@ -797,7 +805,10 @@ async fn gather(
                     }
                     update_meta_after_run(&vdir, sid.as_deref(), &input)?;
                 }
-                let _ = status;
+                // `status` is `io::Result<ExitStatus>`; capture the exit code for the
+                // health layer (a non-success exit flags the run as unhealthy even if
+                // some output was produced). A wait error or signal yields `None`.
+                let mut run_exit_code = status.as_ref().ok().and_then(|s| s.code());
 
                 // Verdict-enforcement + compaction-recovery loop (D5 + D6).
                 // After the initial child exits, if the slot still has no verdict and
@@ -867,6 +878,11 @@ async fn gather(
                         if nudge.timed_out {
                             break;
                         }
+                        // A nudge child that exited carries the latest exit code; track it
+                        // so the health layer sees the most recent backend health signal.
+                        if let Some(code) = nudge.exit_code {
+                            run_exit_code = Some(code);
+                        }
                         if let Some(s) = nudge.sid {
                             nudge_sid = Some(s);
                             run_sid = nudge_sid.clone();
@@ -902,6 +918,7 @@ async fn gather(
                     final_output: if fail_closed { None } else { run_final },
                     stderr: run_stderr,
                     timed_out: false,
+                    exit_code: run_exit_code,
                 }
             }
         };
