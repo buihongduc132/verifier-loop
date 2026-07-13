@@ -38,6 +38,7 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 | `round_recover/` | add-round-recovery | cross-process round recovery (RECOVER + STATUS + GoalLock) |
 | `observe/` | add-otel-observability | lifecycle-tracing + trace-export (per-goal traceId + trace.jsonl + opt-in OTLP) |
 | `health/`  | 2026-07-14 health-cooldown | unhealthy-run detection (`health.jsonl`) + cooldown fallback hash (`<mmddyy>-ffffff`) |
+| `stats/`  | 2026-07-14 stats-audit | run introspection (`STATS`) + completion audit (`AUDIT`) |
 | `cli/`     | §10 | wiring |
 
 ## Observability / tracing (add-otel-observability)
@@ -86,6 +87,32 @@ The verifier prompt is also built **dynamically from prior REJECT notes** —
 rounds of the goal and `prompt::append_prior_reject_notes` appends them under a
 `# Prior rejection notes` heading so the verifier sees the rejection history and can
 verify fixes against it.
+
+## Run introspection + completion audit (2026-07-14)
+
+Two read-only `jewilo` subcommands surface run statistics and verify a final completion
+truly matches the requirement. Neither takes the goal lock or spawns verifiers.
+
+- **`STATS <goalId>`** — aggregates EVERYTHING currently stored as JSON for a goal into one
+  machine-readable JSON object to stdout: goal record, creation-time config snapshot (the
+  authoritative n/m requirement), current round, per-round verdicts, completion (hash +
+  matching verdicts), health (unhealthy-event count + cooldown flag), and durations
+  (createdAt, matchedAt, wallClockSeconds). See `src/stats/mod.rs`. Intention:
+  [`flow/intentions/2026-07-14_stats-and-audit-subcommands.md`](flow/intentions/2026-07-14_stats-and-audit-subcommands.md).
+
+- **`AUDIT <goalId>`** — post-hoc verification that the final completion truly matches the
+  creation-time config requirement. Reads the creation-time n/m from `goal.json` (the
+  snapshot taken at `NEW`, NOT the current `config.json`), re-checks the matching APPROVE
+  count reaches `n` of `m`, recomputes the completion hash from the stored inputs, and
+  compares it to the stored `fullDigest`. Prints a JSON report
+  `{ valid, requiredN, requiredM, matchingVerdicts, hashRecomputed, hashStored, checks }`;
+  exits 0 if valid, non-zero otherwise. This is the "do these 2/X verdicts truly match the
+  requirement recorded at creation time?" audit.
+
+**Config snapshot at creation (single source of truth):** `goal::GoalRecord` carries a
+`config: store::Config` field, written into `goal.json` at `NEW`. This is the authoritative
+requirement — `config.json` may change later, but `AUDIT` always uses the creation-time
+snapshot from `goal.json`.
 
 ## jewilo-dev deploy ceremony (for WIP verifier-loop changes)
 

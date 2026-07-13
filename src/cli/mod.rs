@@ -60,4 +60,21 @@ pub enum VerifierLoopCmd {
         /// The goalId (UUID) to inspect.
         goal_id: String,
     },
+    /// Read-only aggregate of ALL stored JSON for a goal run: goal record, creation-time
+    /// config snapshot, per-round verdicts, completion, health, and durations. Does not
+    /// take the goal lock; never blocks or spawns verifiers (intention 2026-07-14).
+    #[command(name = "STATS")]
+    Stats {
+        /// The goalId (UUID) to inspect.
+        goal_id: String,
+    },
+    /// Read-only post-hoc audit: verifies the final completion TRULY matches the
+    /// creation-time config requirement (n/m verdict match + hash recompute). Prints a
+    /// JSON report and exits 0 if valid, non-zero otherwise. Does not take the goal lock
+    /// or spawn verifiers (intention 2026-07-14).
+    #[command(name = "AUDIT")]
+    Audit {
+        /// The goalId (UUID) to audit.
+        goal_id: String,
+    },
 }

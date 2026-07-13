@@ -76,6 +76,8 @@ fn run(cli: &VerifierLoopCli) -> Result<(), String> {
         } => run_resume(&root, &config, goal_id, fix.as_deref(), prepend.as_deref())?,
         VerifierLoopCmd::Recover { ref goal_id } => run_recover(&root, &config, goal_id)?,
         VerifierLoopCmd::Status { ref goal_id } => run_status(&root, &config, goal_id)?,
+        VerifierLoopCmd::Stats { ref goal_id } => run_stats(&root, goal_id)?,
+        VerifierLoopCmd::Audit { ref goal_id } => run_audit(&root, goal_id)?,
     }
     Ok(())
 }
@@ -210,6 +212,34 @@ fn run_status(
         serde_json::to_string_pretty(&st).map_err(|e| format!("STATUS serialize: {e}"))?
     );
     Ok(())
+}
+
+/// `STATS <goalId>`: read-only aggregate of ALL stored JSON for a goal run (intention
+/// 2026-07-14). Prints one JSON object to stdout. Takes NO goal lock; never spawns
+/// verifiers (a stats probe must never block on a long round).
+fn run_stats(root: &Path, goal_id: &str) -> Result<(), String> {
+    let stats = verifier_loop::stats::collect_stats(root, goal_id)
+        .map_err(|e| format!("STATS: {e}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&stats).map_err(|e| format!("STATS serialize: {e}"))?
+    );
+    Ok(())
+}
+
+/// `AUDIT <goalId>`: read-only post-hoc audit of the final completion against the
+/// creation-time config requirement (intention 2026-07-14). Prints a JSON report to
+/// stdout; exits 0 if valid, non-zero otherwise. Takes NO goal lock; never spawns.
+fn run_audit(root: &Path, goal_id: &str) -> Result<(), String> {
+    let report = verifier_loop::stats::audit(root, goal_id).map_err(|e| format!("AUDIT: {e}"))?;
+    let json = serde_json::to_string_pretty(&report).map_err(|e| format!("AUDIT serialize: {e}"))?;
+    // Always print the report so the caller sees the reason even on an invalid audit.
+    println!("{json}");
+    if report.valid {
+        Ok(())
+    } else {
+        Err("audit: completion does not match the creation-time requirement".to_string())
+    }
 }
 
 /// Acquire the exclusive goal lock (LD5). Maps `GoalBusy` to a clear, user-facing message

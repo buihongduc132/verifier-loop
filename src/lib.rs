@@ -36,6 +36,7 @@ pub mod prompt;
 pub mod receipt;
 pub mod round_recover;
 pub mod spawn;
+pub mod stats;
 pub mod store;
 pub mod verdict;
 
