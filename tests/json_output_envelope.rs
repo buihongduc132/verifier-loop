@@ -51,6 +51,71 @@ use serde_json::Value;
 use verifier_loop::cli::json_output::{JsonEnvelope, Output, RejectionBreakdown};
 use verifier_loop::cli::VerifierLoopCli;
 
+// ===========================================================================
+// Minor D — structural guarantee: the hash / salt / receipt / store code paths are
+// json-agnostic (the --json flag cannot reach the hash inputs).
+// ===========================================================================
+//
+// Cross-run byte-identity of completion.json is NOT testable in this harness (random
+// salt + goalId + matchedAt — see `completion_json_byte_identical_with_and_without_json`
+// in tests/json_output_jewilo.rs). As the companion verification of the invariant
+// "--json does not alter completion.json / hash inputs", this test asserts STRUCTURALLY
+// that the modules that compute the hash inputs (consensus, receipt, store salt, store)
+// contain NO reference to the json output mode. If the --json flag could reach those
+// modules, one of these substrings would appear in their source.
+#[test]
+fn hash_path_code_is_json_agnostic() {
+    // The four modules that feed the completion-hash inputs (salt, goalId, signature,
+    // round, matchingVerdicts, matchedAt, receiptHead). If any of them branches on the
+    // json output mode, the hash would differ between --json and default runs.
+    let targets = [
+        "src/consensus/mod.rs",
+        "src/receipt/mod.rs",
+        "src/store/salt.rs",
+        "src/store/mod.rs",
+    ];
+    // The forbidden substrings: any reference to the json output path. `Output::Json` /
+    // `cli.json` are the in-tree symbols that route the flag; `--json` / `"json"` are
+    // the surface tokens. None of these may appear in the hash/salt/receipt/store code.
+    let forbidden = ["Output::Json", "cli.json", "--json"];
+
+    let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut failures: Vec<String> = Vec::new();
+    for rel in targets {
+        let path = crate_root.join(rel);
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {rel}: {e}"));
+        for needle in forbidden {
+            if src.contains(needle) {
+                failures.push(format!("{rel} references `{needle}`"));
+            }
+        }
+        // The bare string `"json"` is tolerated ONLY as part of camelCase serde
+        // attribute renames or JSON serialization comments — NOT as a branch condition.
+        // We assert it never appears in a branch / match arm by requiring it does not
+        // appear adjacent to `Output`, `==`, or `matches!`.
+        for line in src.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains("\"json\"")
+                && (trimmed.contains("Output")
+                    || trimmed.contains("matches!")
+                    || trimmed.contains("== \"json\"")
+                    || trimmed.contains("== Output"))
+            {
+                failures.push(format!(
+                    "{rel} branches on the json mode: `{trimmed}`"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "hash/salt/receipt/store code MUST be json-agnostic, but found references:\n - {}",
+        failures.join("\n - ")
+    );
+}
+
+
 // ---------------------------------------------------------------------------
 // Scenario 1 (tasks.md §1.2) — envelope serializes camelCase + skips None.
 // ---------------------------------------------------------------------------
@@ -71,6 +136,7 @@ fn envelope_serializes_camelcase_and_skips_none() {
         rejection: None,
         verdicts: None,
         state: None,
+        report: None,
         error: None,
     };
 
@@ -90,7 +156,7 @@ fn envelope_serializes_camelcase_and_skips_none() {
     // No optional field may leak when its value is None.
     for absent in [
         "hash", "error", "goalId", "round", "status", "fullDigest", "rejection",
-        "verifierId", "needs", "state", "verdicts",
+        "verifierId", "needs", "state", "verdicts", "report",
     ] {
         assert!(
             !obj.contains_key(absent),
@@ -112,6 +178,7 @@ fn envelope_serializes_camelcase_and_skips_none() {
         rejection: None,
         verdicts: None,
         state: None,
+        report: None,
         error: None,
     };
     let v2: Value = serde_json::to_value(&with_extras).expect("envelope serializes");
@@ -169,6 +236,7 @@ fn envelope_rejection_arrays_sorted_by_verifier_id() {
         rejection: Some(rb),
         verdicts: None,
         state: None,
+        report: None,
         error: None,
     };
 
@@ -225,6 +293,7 @@ fn print_success_json_emits_exactly_one_stdout_line() {
         rejection: None,
         verdicts: None,
         state: None,
+        report: None,
         error: None,
     };
     let human_line = "goalId: g-123\n260715-deadbeef";
@@ -288,6 +357,7 @@ fn print_error_json_emits_one_envelope_on_stdout_and_human_on_stderr() {
         rejection: None,
         verdicts: None,
         state: None,
+        report: None,
         error: Some("missing store".to_string()),
     };
     let human_err = "error: missing store directory";

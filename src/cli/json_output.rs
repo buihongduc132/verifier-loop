@@ -51,6 +51,11 @@ pub struct JsonEnvelope {
     pub verdicts: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Carries the STATS / AUDIT body under `--json` (add-json-output-mode Blocker B).
+    /// Omitted entirely when `None`. STATS/AUDIT success envelopes carry `report` and
+    /// omit `status`; the bare body is the byte-identical legacy output under Human mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

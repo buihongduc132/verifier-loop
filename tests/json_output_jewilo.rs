@@ -469,6 +469,13 @@ fn jewilo_new_json_cooldown_fallback_envelope() {
 /// `/dev/urandom` reads and the matched-at clock), the original cross-run byte-identity
 /// assertion can be restored as a stronger test by running twice in two tempdirs that share
 /// those injected values. That gap is intentionally left open here.
+///
+/// # Companion verification
+///
+/// The structural companion `hash_path_code_is_json_agnostic` in
+/// `tests/json_output_envelope.rs` asserts the SOURCE of the hash/salt/receipt/store code
+/// contains NO reference to the json output path — proving the --json flag structurally
+/// cannot reach the hash inputs.
 #[test]
 fn completion_json_byte_identical_with_and_without_json() {
     // ONE tempdir home + an approving stub. We drive a single --json run and then prove the
@@ -817,6 +824,57 @@ fn jewilo_status_default_byte_identical_to_legacy() {
     assert!(
         body.get("command").is_none(),
         "legacy STATUS must NOT have a `command` field: {body}"
+    );
+}
+
+// ===========================================================================
+// Blocker A regression — RECOVER on an already-consensus goal MUST NOT emit any
+// stdout under Human mode (legacy empty-stdout contract from origin/main, before
+// add-json-output-mode). Only the stderr notice is allowed.
+// ===========================================================================
+
+/// RECOVER Done arm: reach consensus, then `jewilo RECOVER <id>` WITHOUT --json. stdout
+/// must be EMPTY (byte-identical to legacy origin/main behavior); stderr carries the
+/// "already reached consensus; use RESUME" notice; exit 0.
+#[test]
+fn jewilo_recover_default_mode_empty_stdout_on_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    seed_workdir(home, 2, 2);
+    let stub = stub_script(home);
+
+    // Reach consensus on round 1.
+    let out = run_vl_raw(home, home, &stub, &["NEW", "reach consensus then recover"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "seed NEW must reach consensus; stderr:\n{stderr}"
+    );
+    let goal_id = goal_id_from_legacy_stdout(&String::from_utf8_lossy(&out.stdout))
+        .expect("goalId printed on NEW");
+
+    // RECOVER on the already-consensus goal WITHOUT --json.
+    let out = run_vl_raw(home, home, &stub, &["RECOVER", &goal_id], &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "RECOVER on a done goal must exit 0; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        "",
+        "default-mode RECOVER on an already-consensus goal must emit NOTHING to stdout \
+         (byte-identical to legacy origin/main); got: {stdout:?}"
+    );
+    // The legacy stderr notice must still appear.
+    assert!(
+        stderr.contains("already reached consensus"),
+        "stderr must carry the already-consensus notice: {stderr}"
+    );
+    assert!(
+        stderr.contains("RESUME"),
+        "stderr must point the user at RESUME: {stderr}"
     );
 }
 

@@ -121,11 +121,10 @@ fn run(cli: &VerifierLoopCli, output: Output) -> Outcome {
         VerifierLoopCmd::Recover { ref goal_id } => run_recover(&root, &config, goal_id, &output),
         VerifierLoopCmd::Status { ref goal_id } => run_status(&root, &config, goal_id, &output),
         VerifierLoopCmd::Stats { ref goal_id } => {
-            run_simple_json_passthrough(&output, command, run_stats(&root, goal_id))
+            run_stats_dispatch(&root, &output, goal_id)
         }
         VerifierLoopCmd::Audit { ref goal_id } => {
-            let res = run_audit(&root, goal_id);
-            run_simple_json_passthrough(&output, command, res)
+            run_audit_dispatch(&root, &output, goal_id)
         }
     }
 }
@@ -224,13 +223,19 @@ fn run_recover(
                 "round {} already reached consensus; use `jewilo RESUME {goal_id}` to start a new round",
                 st.round
             );
+            // LD3 / Blocker A (v2 D1): under Human mode the legacy behavior is an empty
+            // stdout (the notice rides stderr only — byte-identical to origin/main). The
+            // `--json` envelope is emitted only under Json mode so stdout stays empty in
+            // the default path. The stderr message is unchanged.
             eprintln!("{msg}");
-            let env = envelope(command, true)
-                .with_goal(goal_id)
-                .with_round(st.round)
-                .with_status("already-done")
-                .with_needs(GoalNeeds::Done);
-            print_success(output, env, &format!("round {} already reached consensus", st.round));
+            if matches!(output, Output::Json) {
+                let env = envelope(command, true)
+                    .with_goal(goal_id)
+                    .with_round(st.round)
+                    .with_status("already-done")
+                    .with_needs(GoalNeeds::Done);
+                print_success(output, env, "");
+            }
             return Outcome::Success;
         }
         round_recover::GoalNeeds::Resume => {
@@ -366,45 +371,113 @@ fn run_status(
 }
 
 /// `STATS <goalId>`: read-only aggregate of ALL stored JSON for a goal run (intention
-/// 2026-07-14). Prints one JSON object to stdout. Takes NO goal lock; never spawns
-/// verifiers (a stats probe must never block on a long round).
-fn run_stats(root: &Path, goal_id: &str) -> Result<(), String> {
+/// 2026-07-14). Returns the stats body as a `serde_json::Value`; the caller
+/// (`run_stats_dispatch`) decides whether to print it bare (Human, byte-identical to
+/// legacy) or wrap it in the JSON envelope (Json, Blocker B). Takes NO goal lock; never
+/// spawns verifiers (a stats probe must never block on a long round).
+fn run_stats(root: &Path, goal_id: &str) -> Result<serde_json::Value, String> {
     let stats = verifier_loop::stats::collect_stats(root, goal_id)
         .map_err(|e| format!("STATS: {e}"))?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&stats).map_err(|e| format!("STATS serialize: {e}"))?
-    );
-    Ok(())
+    serde_json::to_value(&stats).map_err(|e| format!("STATS serialize: {e}"))
 }
 
 /// `AUDIT <goalId>`: read-only post-hoc audit of the final completion against the
-/// creation-time config requirement (intention 2026-07-14). Prints a JSON report to
-/// stdout; exits 0 if valid, non-zero otherwise. Takes NO goal lock; never spawns.
-fn run_audit(root: &Path, goal_id: &str) -> Result<(), String> {
+/// creation-time config requirement (intention 2026-07-14). Returns the report as a
+/// `serde_json::Value` plus its validity flag. The caller (`run_audit_dispatch`) always
+/// surfaces the report (so the caller sees the reason even on an invalid audit) and maps
+/// the validity to the exit code. Takes NO goal lock; never spawns.
+fn run_audit(root: &Path, goal_id: &str) -> Result<(serde_json::Value, bool), String> {
     let report = verifier_loop::stats::audit(root, goal_id).map_err(|e| format!("AUDIT: {e}"))?;
-    let json = serde_json::to_string_pretty(&report).map_err(|e| format!("AUDIT serialize: {e}"))?;
-    // Always print the report so the caller sees the reason even on an invalid audit.
-    println!("{json}");
-    if report.valid {
-        Ok(())
-    } else {
-        Err("audit: completion does not match the creation-time requirement".to_string())
+    let valid = report.valid;
+    let value = serde_json::to_value(&report).map_err(|e| format!("AUDIT serialize: {e}"))?;
+    Ok((value, valid))
+}
+
+/// Print a STATS / AUDIT result. The `report` body is ALWAYS surfaced so the caller can
+/// see the reason even on an invalid audit.
+///
+/// * **Human mode (byte-identical legacy)**: the bare pretty JSON body is printed to
+///   stdout. On the soft-error path (`error = Some`) the human-readable error is mirrored
+///   to stderr and the outcome is `Failure` (non-zero exit) — the bare report is still on
+///   stdout. Hard errors (goal not found, serialize failure) use [`emit_error`] instead.
+/// * **Json mode (Blocker B)**: exactly ONE envelope object is printed to stdout, carrying
+///   `report`. On success: `{ok:true, command, goalId, report}` (no `status` — STATS/AUDIT
+///   use `report` instead, per spec). On the soft-error path:
+///   `{ok:false, command, goalId, report, error}` — still exactly ONE object (the bug was
+///   that the bare report + the error envelope produced TWO root objects).
+///
+/// Returns `Failure` on the soft-error path, else `Success`.
+fn emit_report(
+    output: &Output,
+    command: &str,
+    goal_id: &str,
+    report: serde_json::Value,
+    error: Option<&str>,
+) -> Outcome {
+    match output {
+        Output::Human => {
+            // Bare pretty JSON body — byte-identical to the pre-change legacy output.
+            let body = serde_json::to_string_pretty(&report)
+                .unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"));
+            println!("{body}");
+            if let Some(e) = error {
+                eprintln!("{e}");
+                Outcome::Failure
+            } else {
+                Outcome::Success
+            }
+        }
+        Output::Json => {
+            // Exactly ONE envelope object on stdout (Blocker B: never two). The report
+            // body rides inside `report`; `status` is intentionally omitted (STATS/AUDIT
+            // carry `report` instead, per the spec).
+            let mut b = envelope(command, error.is_none())
+                .with_goal(goal_id)
+                .with_report(report);
+            if let Some(e) = error {
+                b = b.with_error(e);
+            }
+            match error {
+                None => {
+                    print_success(output, b, "");
+                    Outcome::Success
+                }
+                Some(e) => {
+                    // print_error writes the ok:false envelope to stdout AND mirrors the
+                    // human text to stderr (design D7) — still exactly ONE stdout object.
+                    print_error(output, b, e);
+                    Outcome::Failure
+                }
+            }
+        }
     }
 }
 
-/// STATS / AUDIT are out of scope for the `--json` envelope (no spec scenario); under
-/// Human mode they keep their bare-JSON stdout + stderr-error behavior. Under `--json`
-/// the legacy bare body is still printed (consumers tolerate extra fields); a top-level
-/// `Err` is surfaced through the error envelope + non-zero exit.
-fn run_simple_json_passthrough(
-    output: &Output,
-    command: &str,
-    res: Result<(), String>,
-) -> Outcome {
-    match res {
-        Ok(()) => Outcome::Success,
-        Err(msg) => emit_error(output, command, None, None, &msg),
+/// Dispatch `STATS` through the report-emission path. Hard errors (collect / serialize)
+/// surface through the standard error envelope; success surfaces the body either bare
+/// (Human) or wrapped (Json).
+fn run_stats_dispatch(root: &Path, output: &Output, goal_id: &str) -> Outcome {
+    match run_stats(root, goal_id) {
+        Ok(report) => emit_report(output, "stats", goal_id, report, None),
+        Err(msg) => emit_error(output, "stats", Some(goal_id), None, &msg),
+    }
+}
+
+/// Dispatch `AUDIT` through the report-emission path. The report is ALWAYS surfaced (so
+/// the caller sees the reason); on an invalid audit the soft-error path carries
+/// `report` + `error` in one envelope and a non-zero exit. Hard errors (goal not found,
+/// serialize) use the standard error envelope.
+fn run_audit_dispatch(root: &Path, output: &Output, goal_id: &str) -> Outcome {
+    match run_audit(root, goal_id) {
+        Ok((report, true)) => emit_report(output, "audit", goal_id, report, None),
+        Ok((report, false)) => emit_report(
+            output,
+            "audit",
+            goal_id,
+            report,
+            Some("audit: completion does not match the creation-time requirement"),
+        ),
+        Err(msg) => emit_error(output, "audit", Some(goal_id), None, &msg),
     }
 }
 
@@ -928,6 +1001,11 @@ impl EnvBuilder {
         self.inner.verdicts = v;
         self
     }
+    /// Carry the STATS/AUDIT body inside the envelope under `--json` (Blocker B).
+    fn with_report(mut self, report: serde_json::Value) -> Self {
+        self.inner.report = Some(report);
+        self
+    }
     fn with_error(mut self, err: &str) -> Self {
         self.inner.error = Some(err.to_string());
         self
@@ -950,6 +1028,7 @@ fn envelope(command: &str, ok: bool) -> EnvBuilder {
             rejection: None,
             verdicts: None,
             state: None,
+            report: None,
             error: None,
         },
     }

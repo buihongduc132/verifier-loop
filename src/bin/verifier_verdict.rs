@@ -91,6 +91,7 @@ fn main() {
                 rejection: None,
                 verdicts: None,
                 state: None,
+                report: None,
                 error: None,
             };
             output.print_success(&env, "Verdict registered", &mut std::io::stdout());
@@ -112,6 +113,7 @@ fn main() {
                 rejection: None,
                 verdicts: None,
                 state: None,
+                report: None,
                 error: Some(envelope_error(&msg)),
             };
             // Human-readable diagnostic rides stderr under both modes (design D7);
