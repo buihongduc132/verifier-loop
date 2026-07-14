@@ -41,6 +41,11 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 | `stats/`  | 2026-07-14 stats-audit | run introspection (`STATS`) + completion audit (`AUDIT`) |
 | `cli/`     | §10 | wiring |
 
+Both binaries (`jewilo`, `jewije`) support a global `--json` flag emitting one stable
+camelCase envelope object on stdout (machine-readable contract; default output unchanged) —
+see `## JSON output mode (--json)` in [`README.md`](README.md) and
+[`flow/usecases/programmatic-json-output.md`](flow/usecases/programmatic-json-output.md).
+
 ## Observability / tracing (add-otel-observability)
 
 The full `jewilo`/`jewije` lifecycle is observable via structured tracing:

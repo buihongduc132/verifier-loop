@@ -17,13 +17,22 @@
 //!
 //! Fail-closed (D9): every error path is explicit; a NULL verdict never becomes APPROVE; a
 //! missing store yields no hash. The salt is never printed.
+//!
+//! `--json` output mode (`add-json-output-mode`): when the global `--json` flag is set,
+//! every success / failure site routes through `cli::json_output::Output` so stdout carries
+//! exactly ONE JSON envelope object per process invocation (design D0/D1). Legacy
+//! free-text lines never leak onto stdout under `--json`. Human-readable diagnostics stay
+//! on stderr in BOTH modes. On-disk artifacts, hash inputs, signature verification, and
+//! exit codes are byte-identical / identical with and without `--json`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use chrono::Utc;
 use clap::Parser;
 
+use verifier_loop::cli::json_output::{JsonEnvelope, Output, RejectionBreakdown};
 use verifier_loop::cli::{VerifierLoopCli, VerifierLoopCmd};
 use verifier_loop::health;
 use verifier_loop::round_recover::{self, RecoverOutcome, RoundRecoverError};
@@ -38,6 +47,14 @@ const ENV_SPAWN_CMD: &str = "VERIFIER_LOOP_SPAWN_CMD";
 const ENV_RESUME_CMD: &str = "VERIFIER_LOOP_RESUME_CMD";
 const DEFAULT_HOME_DIR: &str = ".verifier-loop";
 
+/// Coarse process outcome. `Failure` always maps to a non-zero exit code. Every site that
+/// has already emitted its own (JSON or human) output returns one of these instead of
+/// propagating a raw `Err(String)` so the top-level handler never double-prints.
+enum Outcome {
+    Success,
+    Failure,
+}
+
 fn main() -> ExitCode {
     // Initialize tracing (fail-open, design D5): errors are swallowed and logged
     // to stderr; a broken logger never blocks a verdict or hash. Store root is
@@ -45,41 +62,72 @@ fn main() -> ExitCode {
     // layers; the per-goal JSONL file layer resolves its path from env at write time.
     let _ = verifier_loop::observe::init(None);
     let cli = VerifierLoopCli::parse();
-    let code = match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(msg) => {
-            eprintln!("{msg}");
-            ExitCode::FAILURE
-        }
+    let output = if cli.json {
+        Output::Json
+    } else {
+        Output::Human
     };
+    let outcome = run(&cli, output);
     // Flush + shut down the OTLP tracer before exit so in-flight spans are not
     // lost (design D3). No-op when OTLP is not configured / feature off.
     verifier_loop::observe::shutdown();
-    code
+    match outcome {
+        Outcome::Success => ExitCode::SUCCESS,
+        Outcome::Failure => ExitCode::FAILURE,
+    }
 }
 
-fn run(cli: &VerifierLoopCli) -> Result<(), String> {
-    let root = resolve_home()?;
-    let config =
-        verifier_loop::store::Config::load_in(&root).map_err(|e| format!("config: {e}"))?;
+fn run(cli: &VerifierLoopCli, output: Output) -> Outcome {
+    let command = command_name(&cli.command);
+    let root = match resolve_home() {
+        Ok(r) => r,
+        Err(msg) => return emit_error(&output, command, None, None, &msg),
+    };
+    let config = match verifier_loop::store::Config::load_in(&root) {
+        Ok(c) => c,
+        Err(e) => {
+            return emit_error(&output, command, None, None, &format!("config: {e}"));
+        }
+    };
     // Load the custom verifier-prompt preamble (if configured) BEFORE any goal dir / signature
     // is written, so a missing/unreadable file fails closed with NO side effects.
-    let prepend = load_verifier_prompt_file(&root, config.verifier_prompt_file.as_deref())?;
+    let prepend = match load_verifier_prompt_file(&root, config.verifier_prompt_file.as_deref()) {
+        Ok(p) => p,
+        Err(msg) => return emit_error(&output, command, None, None, &msg),
+    };
     match cli.command {
         VerifierLoopCmd::New {
             ref goal,
             ref context,
-        } => run_new(&root, &config, goal, context.as_deref(), prepend.as_deref())?,
+        } => run_new(
+            &root,
+            &config,
+            goal,
+            context.as_deref(),
+            prepend.as_deref(),
+            &output,
+        ),
         VerifierLoopCmd::Resume {
             ref goal_id,
             ref fix,
-        } => run_resume(&root, &config, goal_id, fix.as_deref(), prepend.as_deref())?,
-        VerifierLoopCmd::Recover { ref goal_id } => run_recover(&root, &config, goal_id)?,
-        VerifierLoopCmd::Status { ref goal_id } => run_status(&root, &config, goal_id)?,
-        VerifierLoopCmd::Stats { ref goal_id } => run_stats(&root, goal_id)?,
-        VerifierLoopCmd::Audit { ref goal_id } => run_audit(&root, goal_id)?,
+        } => run_resume(
+            &root,
+            &config,
+            goal_id,
+            fix.as_deref(),
+            prepend.as_deref(),
+            &output,
+        ),
+        VerifierLoopCmd::Recover { ref goal_id } => run_recover(&root, &config, goal_id, &output),
+        VerifierLoopCmd::Status { ref goal_id } => run_status(&root, &config, goal_id, &output),
+        VerifierLoopCmd::Stats { ref goal_id } => {
+            run_simple_json_passthrough(&output, command, run_stats(&root, goal_id))
+        }
+        VerifierLoopCmd::Audit { ref goal_id } => {
+            let res = run_audit(&root, goal_id);
+            run_simple_json_passthrough(&output, command, res)
+        }
     }
-    Ok(())
 }
 
 /// `NEW`: create the goal, spawn round 1, evaluate, print hash or rejection.
@@ -89,18 +137,30 @@ fn run_new(
     goal_text: &str,
     context: Option<&str>,
     prepend: Option<&str>,
-) -> Result<(), String> {
+    output: &Output,
+) -> Outcome {
     // Validate goalText BEFORE any goal dir / signature is written (fail-closed).
-    validate_goal_text(goal_text, config.min_goal_chars)?;
+    if let Err(msg) = validate_goal_text(goal_text, config.min_goal_chars) {
+        return emit_error(output, "new", None, None, &msg);
+    }
 
-    let goal_id = verifier_loop::goal::new(root, goal_text, context)
-        .map_err(|e| format!("NEW failed: {e}"))?;
+    let goal_id = match verifier_loop::goal::new(root, goal_text, context) {
+        Ok(id) => id,
+        Err(e) => return emit_error(output, "new", None, None, &format!("NEW failed: {e}")),
+    };
     // LD5: hold the exclusive goal lock for the whole round (spawn+gather+evaluate).
     // Acquired AFTER goal::new creates the goal dir (the lock file lives under it).
-    let _lock = acquire_goal_lock(root, &goal_id)?;
+    let _lock = match acquire_goal_lock(root, &goal_id) {
+        Ok(l) => l,
+        Err(msg) => return emit_error(output, "new", Some(&goal_id), None, &msg),
+    };
     let round = 1u32;
-    println!("goalId: {goal_id}");
-    run_round(root, config, &goal_id, round, None, RoundKind::New, prepend)
+    // Under Human mode the legacy `goalId: <id>` line is the first stdout line. Under
+    // JSON it is suppressed (the id rides inside the envelope instead).
+    if matches!(output, Output::Human) {
+        println!("goalId: {goal_id}");
+    }
+    run_round(root, config, &goal_id, round, None, RoundKind::New, prepend, output)
 }
 
 /// `RESUME`: increment the round, append fix notes, respawn, evaluate.
@@ -110,15 +170,21 @@ fn run_resume(
     goal_id: &str,
     fix: Option<&str>,
     prepend: Option<&str>,
-) -> Result<(), String> {
+    output: &Output,
+) -> Outcome {
     // LD5: hold the exclusive goal lock for the whole round.
-    let _lock = acquire_goal_lock(root, goal_id)?;
+    let _lock = match acquire_goal_lock(root, goal_id) {
+        Ok(l) => l,
+        Err(msg) => return emit_error(output, "resume", Some(goal_id), None, &msg),
+    };
     // LD3 symmetric warning: if the current round has null verdicts and no completion,
     // suggest RECOVER first (the user may have meant to harvest in-flight verdicts).
     // RESUME still proceeds — it is the explicit escape hatch.
     warn_if_round_is_recoverable(root, config, goal_id);
-    let round = verifier_loop::goal::resume(root, goal_id, fix)
-        .map_err(|e| format!("RESUME failed: {e}"))?;
+    let round = match verifier_loop::goal::resume(root, goal_id, fix) {
+        Ok(r) => r,
+        Err(e) => return emit_error(output, "resume", Some(goal_id), None, &format!("RESUME failed: {e}")),
+    };
     run_round(
         root,
         config,
@@ -127,6 +193,7 @@ fn run_resume(
         fix,
         RoundKind::Resume,
         prepend,
+        output,
     )
 }
 
@@ -138,80 +205,164 @@ fn run_recover(
     root: &Path,
     config: &verifier_loop::store::Config,
     goal_id: &str,
-) -> Result<(), String> {
+    output: &Output,
+) -> Outcome {
+    let command = "recover";
     // LD3: if the round already reached consensus, there is nothing to recover — warn and
     // succeed without polling (the user likely meant RESUME N+1). If the round is already
     // decided-but-failed (needs=Resume), fail fast with the same guidance instead of
     // acquiring the lock + doing redundant disk reads only to return
     // RoundDecidedNoConsensus. Only needs=Recover (null slots or interrupted-pass) is
     // worth polling.
-    let st = round_recover::status(root, goal_id, config).map_err(|e| format!("STATUS: {e}"))?;
+    let st = match round_recover::status(root, goal_id, config) {
+        Ok(s) => s,
+        Err(e) => return emit_error(output, command, Some(goal_id), None, &format!("STATUS: {e}")),
+    };
     match st.needs {
         round_recover::GoalNeeds::Done => {
-            eprintln!(
+            let msg = format!(
                 "round {} already reached consensus; use `jewilo RESUME {goal_id}` to start a new round",
                 st.round
             );
-            return Ok(());
+            eprintln!("{msg}");
+            let env = envelope(command, true)
+                .with_goal(goal_id)
+                .with_round(st.round)
+                .with_status("already-done")
+                .with_needs(GoalNeeds::Done);
+            print_success(output, env, &format!("round {} already reached consensus", st.round));
+            return Outcome::Success;
         }
         round_recover::GoalNeeds::Resume => {
-            eprintln!(
+            let msg = format!(
                 "round {} is decided but did not reach {}/{} consensus; \
                  run `jewilo RESUME {goal_id}` for a fresh round",
                 st.round, config.n, config.m
             );
-            return Err(format!("round {} rejected", st.round));
+            eprintln!("{msg}");
+            let env = envelope(command, false)
+                .with_goal(goal_id)
+                .with_round(st.round)
+                .with_status("rejected")
+                .with_needs(GoalNeeds::Resume)
+                .with_error(&format!("round {} rejected", st.round));
+            print_error(output, env, &format!("round {} rejected", st.round));
+            return Outcome::Failure;
         }
         round_recover::GoalNeeds::Recover => {}
     }
 
     let timeout = std::time::Duration::from_secs(config.verifier_timeout_sec.max(1));
-    let outcome = round_recover::recover(root, goal_id, config, timeout)
-        .map_err(|e| format!("RECOVER: {e}"))?;
+    let outcome = match round_recover::recover(root, goal_id, config, timeout) {
+        Ok(o) => o,
+        Err(e) => return emit_error(output, command, Some(goal_id), Some(st.round), &format!("RECOVER: {e}")),
+    };
     match outcome {
         RecoverOutcome::ConsensusPassed(hash) => {
-            println!("{hash}");
-            Ok(())
+            // fullDigest is not carried by the outcome; read it from the just-written
+            // completion.json so the envelope matches the NEW/RESUME success shape.
+            let full_digest = read_completion_full_digest(root, goal_id);
+            let env = envelope(command, true)
+                .with_goal(goal_id)
+                .with_round(st.round)
+                .with_status("consensus-passed")
+                .with_hash(&hash)
+                .maybe_with_full_digest(full_digest.as_deref());
+            print_success(output, env, &hash);
+            Outcome::Success
         }
         RecoverOutcome::RoundDecidedNoConsensus => {
-            eprintln!(
+            let msg = format!(
                 "round {} is decided but did not reach {}/{} consensus; \
                  run `jewilo RESUME {goal_id}` for a fresh round",
                 st.round, config.n, config.m
             );
-            Err(format!("round {} rejected", st.round))
+            eprintln!("{msg}");
+            let env = envelope(command, false)
+                .with_goal(goal_id)
+                .with_round(st.round)
+                .with_status("rejected")
+                .with_needs(GoalNeeds::Resume)
+                .with_error(&format!("round {} rejected", st.round));
+            print_error(output, env, &format!("round {} rejected", st.round));
+            Outcome::Failure
         }
         RecoverOutcome::StillNullAfter {
             null_slots,
             guidance,
         } => {
-            eprintln!(
+            let msg = format!(
                 "round {} still has null verdict slots ({}); {guidance}",
                 st.round,
                 null_slots.join(", ")
             );
-            Err(format!(
+            eprintln!("{msg}");
+            let breakdown = RejectionBreakdown::from_unsorted(
+                Vec::new(),
+                null_slots.clone(),
+                Vec::new(),
+            );
+            let env = envelope(command, false)
+                .with_goal(goal_id)
+                .with_round(st.round)
+                .with_status("recover-null-after-timeout")
+                .with_rejection(breakdown)
+                .with_error(&format!(
+                    "round {} not recoverable (null slots after timeout)",
+                    st.round
+                ));
+            print_error(output, env, &format!(
                 "round {} not recoverable (null slots after timeout)",
                 st.round
-            ))
+            ));
+            Outcome::Failure
         }
     }
 }
 
 /// `STATUS <goalId>`: read-only machine-readable goal state (LD7). Prints one JSON object
 /// to stdout. Takes NO goal lock (a status probe must never block on a long round).
+///
+/// Under `--json` the legacy body is wrapped in the standard envelope: `round`, `state`,
+/// `needs` are lifted to the top level and the body's `slots` array is exposed as
+/// `verdicts`. Under Human mode the bare body is printed byte-identical to before this
+/// change.
 fn run_status(
     root: &Path,
     config: &verifier_loop::store::Config,
     goal_id: &str,
-) -> Result<(), String> {
-    let st = round_recover::status(root, goal_id, config).map_err(|e| format!("STATUS: {e}"))?;
-    // Pretty-printed JSON to stdout; the on-disk contract is camelCase.
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&st).map_err(|e| format!("STATUS serialize: {e}"))?
-    );
-    Ok(())
+    output: &Output,
+) -> Outcome {
+    let st = match round_recover::status(root, goal_id, config) {
+        Ok(s) => s,
+        Err(e) => return emit_error(output, "status", Some(goal_id), None, &format!("STATUS: {e}")),
+    };
+    match output {
+        Output::Human => {
+            // Byte-identical legacy body (pretty JSON, no envelope wrapper).
+            let body = match serde_json::to_string_pretty(&st) {
+                Ok(b) => b,
+                Err(e) => return emit_error(output, "status", Some(goal_id), None, &format!("STATUS serialize: {e}")),
+            };
+            println!("{body}");
+            Outcome::Success
+        }
+        Output::Json => {
+            // Lift round/state/needs to the envelope; pass the body's `slots` as `verdicts`.
+            let body: serde_json::Value = match serde_json::to_value(&st) {
+                Ok(v) => v,
+                Err(e) => return emit_error(output, "status", Some(goal_id), None, &format!("STATUS serialize: {e}")),
+            };
+            let env = envelope("status", true)
+                .with_goal(goal_id)
+                .with_round_value(body.get("round").cloned())
+                .with_state_value(body.get("state").cloned())
+                .with_needs_value(body.get("needs").cloned())
+                .with_verdicts(body.get("slots").cloned());
+            print_success(output, env, "");
+            Outcome::Success
+        }
+    }
 }
 
 /// `STATS <goalId>`: read-only aggregate of ALL stored JSON for a goal run (intention
@@ -239,6 +390,21 @@ fn run_audit(root: &Path, goal_id: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("audit: completion does not match the creation-time requirement".to_string())
+    }
+}
+
+/// STATS / AUDIT are out of scope for the `--json` envelope (no spec scenario); under
+/// Human mode they keep their bare-JSON stdout + stderr-error behavior. Under `--json`
+/// the legacy bare body is still printed (consumers tolerate extra fields); a top-level
+/// `Err` is surfaced through the error envelope + non-zero exit.
+fn run_simple_json_passthrough(
+    output: &Output,
+    command: &str,
+    res: Result<(), String>,
+) -> Outcome {
+    match res {
+        Ok(()) => Outcome::Success,
+        Err(msg) => emit_error(output, command, None, None, &msg),
     }
 }
 
@@ -274,6 +440,15 @@ enum RoundKind {
     Resume,
 }
 
+impl RoundKind {
+    fn command(self) -> &'static str {
+        match self {
+            RoundKind::New => "new",
+            RoundKind::Resume => "resume",
+        }
+    }
+}
+
 /// Shared round driver: snapshot → render → spawn → gather → evaluate → hash/reject.
 fn run_round(
     root: &Path,
@@ -283,7 +458,12 @@ fn run_round(
     fix_notes: Option<&str>,
     kind: RoundKind,
     prepend: Option<&str>,
-) -> Result<(), String> {
+    output: &Output,
+) -> Outcome {
+    let command = kind.command();
+    let fail = |msg: String| -> Outcome {
+        emit_error(output, command, Some(goal_id), Some(round), &msg)
+    };
     // Top-level round span (add-otel-observability lifecycle-tracing spec). Carries
     // the goal/round/traceId so every nested phase correlates to one round of one goal.
     let trace_id = verifier_loop::observe::ensure_goal_trace_id(root, goal_id).ok();
@@ -329,23 +509,36 @@ fn run_round(
             "jewilo.cooldown.fallback",
             serde_json::json!({ "fallbackHash": fb, "round": round }),
         );
-        println!("{fb}");
-        return Ok(());
+        let env = envelope(command, true)
+            .with_goal(goal_id)
+            .with_round(round)
+            .with_status("cooldown-fallback")
+            .with_hash(&fb);
+        print_success(output, env, &fb);
+        return Outcome::Success;
     }
 
-    let record = verifier_loop::goal::load(root, goal_id).map_err(|e| format!("goal load: {e}"))?;
+    let record = match verifier_loop::goal::load(root, goal_id) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("goal load: {e}")),
+    };
     tracing::debug!(fields = ?record.goal_text.len(), "goal loaded");
 
     // Frozen artifact snapshot (§9): captured once per round from cwd. Fails closed if cwd
     // is not a git work tree (V* must never receive a silently empty snapshot). The
     // fileEditTimes block is capped to Config.file_edit_times_max_chars (D1).
-    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-    let snapshot = verifier_loop::prompt::capture_snapshot_with(
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("cwd: {e}")),
+    };
+    let snapshot = match verifier_loop::prompt::capture_snapshot_with(
         &cwd,
         config.git_diff_max_chars,
         config.file_edit_times_max_chars,
-    )
-    .map_err(|e| format!("snapshot capture failed: {e}"))?;
+    ) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("snapshot capture failed: {e}")),
+    };
 
     // Cap the --context input to Config.context_max_chars (D3).
     let context_capped: Option<String> = record
@@ -353,7 +546,10 @@ fn run_round(
         .as_deref()
         .map(|c| verifier_loop::prompt::cap_context(c, config.context_max_chars).0);
 
-    let adapter = resolve_adapter(config)?;
+    let adapter = match resolve_adapter(config) {
+        Ok(a) => a,
+        Err(msg) => return fail(msg),
+    };
 
     // Render + persist the verifier prompt per verifier slot (correct audit trail). The
     // spawn layer takes a single prompt per round (its API), so the round's spawned
@@ -404,8 +600,11 @@ fn run_round(
                 Some(verifier_loop::prompt::default_resume_template_no_policy()),
                 &vars,
             ),
-        }
-        .map_err(|e| format!("prompt render failed: {e}"))?;
+        };
+        let rendered = match rendered {
+            Ok(r) => r,
+            Err(e) => return fail(format!("prompt render failed: {e}")),
+        };
         let rendered = verifier_loop::prompt::prepend_custom(rendered, prepend);
         // Feature b (intention 2026-07-14): build the prompt dynamically by collecting
         // ALL prior REJECT verdict notes for this goal and appending them so the verifier
@@ -414,8 +613,9 @@ fn run_round(
         let prior_reject_notes =
             verifier_loop::prompt::collect_prior_reject_notes(root, goal_id, round);
         let rendered = verifier_loop::prompt::append_prior_reject_notes(&rendered, &prior_reject_notes);
-        verifier_loop::prompt::write_initial_prompt(&goal_root, goal_id, &vid, round, &rendered)
-            .map_err(|e| format!("initial-prompt persist failed: {e}"))?;
+        if let Err(e) = verifier_loop::prompt::write_initial_prompt(&goal_root, goal_id, &vid, round, &rendered) {
+            return fail(format!("initial-prompt persist failed: {e}"));
+        }
         rendered_prompts.push(rendered);
     }
 
@@ -435,10 +635,13 @@ fn run_round(
     let prompt = rendered_prompts.first().cloned().unwrap_or_default();
 
     // Drive the async spawn in a dedicated runtime (the bin is sync).
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| format!("runtime: {e}"))?;
+    {
+        Ok(rt) => rt,
+        Err(e) => return fail(format!("runtime: {e}")),
+    };
     let input = verifier_loop::spawn::SpawnInput {
         root,
         goal_id,
@@ -447,14 +650,16 @@ fn run_round(
         prompt: &prompt,
         adapter: &adapter,
     };
-    let runs = rt.block_on(async {
+    let runs = match rt.block_on(async {
         let _spawn_span = tracing::info_span!("jewilo.spawn", m = config.m).entered();
         match kind {
             RoundKind::New => verifier_loop::spawn::spawn_round(input).await,
             RoundKind::Resume => verifier_loop::spawn::spawn_resume(input).await,
         }
-    })
-    .map_err(|e| format!("spawn failed: {e}"))?;
+    }) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("spawn failed: {e}")),
+    };
 
     // Health self-awareness (intention 2026-07-14 feature a): record any unhealthy
     // verifier run to the store-wide health.jsonl so repeated backend failures trip
@@ -470,8 +675,10 @@ fn run_round(
     let mut verdicts: Vec<(String, verifier_loop::verdict::VerdictRecord)> = Vec::new();
     for i in 0..m {
         let vid = verifier_id(i);
-        let rec = verdict::read_verdict(root, goal_id, &vid, round)
-            .map_err(|e| format!("verdict read {vid}: {e}"))?;
+        let rec = match verdict::read_verdict(root, goal_id, &vid, round) {
+            Ok(r) => r,
+            Err(e) => return fail(format!("verdict read {vid}: {e}")),
+        };
         verdicts.push((vid, rec));
     }
 
@@ -487,12 +694,22 @@ fn run_round(
     );
     let _cg = consensus_span.enter();
     if result.passed {
-        let salt = verifier_loop::store::salt_in(root).map_err(|e| format!("salt: {e}"))?;
-        let sig_record: verifier_loop::goal::SignatureRecord = serde_json::from_str(
-            &std::fs::read_to_string(goal_root.join(verifier_loop::goal::SIGNATURE_FILE))
-                .map_err(|e| format!("signature read: {e}"))?,
-        )
-        .map_err(|e| format!("signature parse: {e}"))?;
+        let salt = match verifier_loop::store::salt_in(root) {
+            Ok(s) => s,
+            Err(e) => return fail(format!("salt: {e}")),
+        };
+        let sig_record: verifier_loop::goal::SignatureRecord = {
+            let raw = match std::fs::read_to_string(
+                goal_root.join(verifier_loop::goal::SIGNATURE_FILE),
+            ) {
+                Ok(s) => s,
+                Err(e) => return fail(format!("signature read: {e}")),
+            };
+            match serde_json::from_str(&raw) {
+                Ok(r) => r,
+                Err(e) => return fail(format!("signature parse: {e}")),
+            }
+        };
         let matched_at = Utc::now().to_rfc3339();
         let receipt_head = verifier_loop::receipt::read_receipt_head(root, goal_id);
         let hash = verifier_loop::consensus::compute_hash(
@@ -504,7 +721,7 @@ fn run_round(
             &matched_at,
             &receipt_head,
         );
-        verifier_loop::consensus::write_completion(
+        if let Err(e) = verifier_loop::consensus::write_completion(
             root,
             goal_id,
             &result,
@@ -516,8 +733,9 @@ fn run_round(
             verifier_loop::observe::ensure_goal_trace_id(root, goal_id)
                 .ok()
                 .as_deref(),
-        )
-        .map_err(|e| format!("completion write: {e}"))?;
+        ) {
+            return fail(format!("completion write: {e}"));
+        }
         tracing::info!(matchedAt = %matched_at, "consensus reached");
         let _ = verifier_loop::observe::append_trace_event(
             root,
@@ -526,8 +744,14 @@ fn run_round(
             "jewilo.consensus.passed",
             serde_json::json!({ "matchedAt": matched_at, "hash": hash.short_hash() }),
         );
-        println!("{}", hash.short_hash());
-        Ok(())
+        let env = envelope(command, true)
+            .with_goal(goal_id)
+            .with_round(round)
+            .with_status("consensus-passed")
+            .with_hash(hash.short_hash())
+            .with_full_digest(hash.full_digest());
+        print_success(output, env, hash.short_hash());
+        Outcome::Success
     } else {
         // Structured rejection event under the consensus span (lifecycle-tracing spec).
         tracing::warn!(
@@ -548,6 +772,8 @@ fn run_round(
             }),
         );
         // Surface the rejection: REJECT notes + null markers (consensus-check spec).
+        // These human-readable lines stay on stderr in BOTH modes (design: only stdout
+        // shape changes between modes).
         eprintln!(
             "round {round} did not reach {}/{} consensus",
             result.approve_count, config.m
@@ -583,8 +809,198 @@ fn run_round(
                 eprintln!("    {vid}: {reason}");
             }
         }
-        Err(format!("round {round} rejected"))
+        // Under --json emit a single rejection envelope on stdout. Arrays are sorted by
+        // verifierId ascending via `RejectionBreakdown::from_unsorted` (design D5).
+        let breakdown = RejectionBreakdown::from_unsorted(
+            result.rejection.reject_notes.clone(),
+            result.rejection.null_verifiers.clone(),
+            result.rejection.signature_failures.clone(),
+        );
+        let env = envelope(command, false)
+            .with_goal(goal_id)
+            .with_round(round)
+            .with_status("rejected")
+            .with_rejection(breakdown)
+            .with_error(&format!("round {round} rejected"));
+        print_error(output, env, &format!("round {round} rejected"));
+        Outcome::Failure
     }
+}
+
+// ---------------------------------------------------------------------------
+// `--json` envelope helpers
+// ---------------------------------------------------------------------------
+
+/// Map a parsed subcommand to its envelope `command` string.
+fn command_name(cmd: &VerifierLoopCmd) -> &'static str {
+    match cmd {
+        VerifierLoopCmd::New { .. } => "new",
+        VerifierLoopCmd::Resume { .. } => "resume",
+        VerifierLoopCmd::Recover { .. } => "recover",
+        VerifierLoopCmd::Status { .. } => "status",
+        VerifierLoopCmd::Stats { .. } => "stats",
+        VerifierLoopCmd::Audit { .. } => "audit",
+    }
+}
+
+/// A small string sentinel used to carry the `needs` value onto the envelope. Mirrors the
+/// `GoalNeeds` snake_case serialization ("done" | "recover" | "resume").
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum GoalNeeds {
+    Done,
+    Recover,
+    Resume,
+}
+
+impl GoalNeeds {
+    fn as_str(self) -> &'static str {
+        match self {
+            GoalNeeds::Done => "done",
+            GoalNeeds::Recover => "recover",
+            GoalNeeds::Resume => "resume",
+        }
+    }
+}
+
+/// Builder wrapper around `JsonEnvelope` so call sites stay readable. All optional fields
+/// start `None`; the `.with_*` setters fill only what a given path carries.
+struct EnvBuilder {
+    inner: JsonEnvelope,
+}
+
+#[allow(dead_code)]
+impl EnvBuilder {
+    fn with_goal(mut self, goal_id: &str) -> Self {
+        self.inner.goal_id = Some(goal_id.to_string());
+        self
+    }
+    fn with_round(mut self, round: u32) -> Self {
+        self.inner.round = Some(round);
+        self
+    }
+    fn with_round_value(mut self, round: Option<serde_json::Value>) -> Self {
+        if let Some(serde_json::Value::Null) | None = round {
+            return self;
+        }
+        if let Some(n) = round.and_then(|v| v.as_u64()) {
+            self.inner.round = Some(n as u32);
+        }
+        self
+    }
+    fn with_status(mut self, status: &str) -> Self {
+        self.inner.status = Some(status.to_string());
+        self
+    }
+    fn with_hash(mut self, hash: &str) -> Self {
+        self.inner.hash = Some(hash.to_string());
+        self
+    }
+    fn with_full_digest(mut self, digest: &str) -> Self {
+        self.inner.full_digest = Some(digest.to_string());
+        self
+    }
+    fn maybe_with_full_digest(mut self, digest: Option<&str>) -> Self {
+        self.inner.full_digest = digest.map(|s| s.to_string());
+        self
+    }
+    fn with_needs(mut self, needs: GoalNeeds) -> Self {
+        self.inner.needs = Some(needs.as_str().to_string());
+        self
+    }
+    fn with_needs_value(mut self, needs: Option<serde_json::Value>) -> Self {
+        if let Some(n @ serde_json::Value::String(_)) = needs {
+            self.inner.needs = Some(n.to_string().trim_matches('"').to_string());
+        }
+        self
+    }
+    fn with_state_value(mut self, state: Option<serde_json::Value>) -> Self {
+        if let Some(s @ serde_json::Value::String(_)) = state {
+            self.inner.state = Some(s.to_string().trim_matches('"').to_string());
+        }
+        self
+    }
+    fn with_rejection(mut self, br: RejectionBreakdown) -> Self {
+        self.inner.rejection = Some(br);
+        self
+    }
+    fn with_verdicts(mut self, v: Option<serde_json::Value>) -> Self {
+        self.inner.verdicts = v;
+        self
+    }
+    fn with_error(mut self, err: &str) -> Self {
+        self.inner.error = Some(err.to_string());
+        self
+    }
+}
+
+/// Start a new envelope builder with the always-present `ok` + `command` fields.
+fn envelope(command: &str, ok: bool) -> EnvBuilder {
+    EnvBuilder {
+        inner: JsonEnvelope {
+            ok,
+            command: command.to_string(),
+            goal_id: None,
+            round: None,
+            verifier_id: None,
+            status: None,
+            hash: None,
+            full_digest: None,
+            needs: None,
+            rejection: None,
+            verdicts: None,
+            state: None,
+            error: None,
+        },
+    }
+}
+
+/// Print a successful result via the formatter. `human_line` is the legacy stdout line
+/// (used verbatim under Human mode; ignored under Json).
+fn print_success(output: &Output, env: EnvBuilder, human_line: &str) {
+    output.print_success(&env.inner, human_line, &mut std::io::stdout());
+}
+
+/// Print a failed result via the formatter. The human-readable `human_err` mirrors to
+/// stderr under Json; under Human it is the only stderr line. The structured envelope
+/// goes to stdout under Json.
+fn print_error(output: &Output, env: EnvBuilder, human_err: &str) {
+    // The formatter's `print_error<W>` takes a single type parameter for both writers;
+    // stdout and stderr are distinct concrete types, so erase them behind `Box<dyn Write>`.
+    let mut out: Box<dyn Write> = Box::new(std::io::stdout());
+    let mut err: Box<dyn Write> = Box::new(std::io::stderr());
+    output.print_error(&env.inner, human_err, &mut out, &mut err);
+}
+
+/// Top-level error emitter used by `run()` for setup-phase failures (store / config /
+/// prompt-file) and by subcommands for their own fatal errors. Always returns `Failure`.
+fn emit_error(
+    output: &Output,
+    command: &str,
+    goal_id: Option<&str>,
+    round: Option<u32>,
+    msg: &str,
+) -> Outcome {
+    let mut b = envelope(command, false).with_error(msg);
+    if let Some(g) = goal_id {
+        b = b.with_goal(g);
+    }
+    if let Some(r) = round {
+        b = b.with_round(r);
+    }
+    print_error(output, b, msg);
+    Outcome::Failure
+}
+
+/// Best-effort read of `fullDigest` from a goal's `completion.json`. Returns `None` when
+/// the file is absent or unreadable (used by RECOVER success, which only carries the
+/// short hash in its outcome).
+fn read_completion_full_digest(root: &Path, goal_id: &str) -> Option<String> {
+    let path = verifier_loop::goal::goal_dir(root, goal_id)
+        .join(verifier_loop::consensus::COMPLETION_FILE);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("fullDigest").and_then(|d| d.as_str()).map(|s| s.to_string())
 }
 
 /// Resolve the backend adapter: built-in (pi/hermes/acpx) first, else a stub/custom
@@ -690,3 +1106,4 @@ fn load_verifier_prompt_file(
         )
     })
 }
+

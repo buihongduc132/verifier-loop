@@ -11,6 +11,8 @@
 
 use clap::{Parser, Subcommand};
 
+pub mod json_output;
+
 /// `verifier-loop` (jewilo) top-level CLI.
 #[derive(Debug, Parser)]
 #[command(
@@ -20,6 +22,12 @@ use clap::{Parser, Subcommand};
     about = "Spawn verifiers, gather verdicts, and produce a tamper-evident completion hash."
 )]
 pub struct VerifierLoopCli {
+    /// Machine-readable JSON output mode (`add-json-output-mode`, design D2). Global so it
+    /// parses both before AND after the subcommand: `jewilo --json NEW <goal>` and
+    /// `jewilo NEW <goal> --json` both work.
+    #[arg(long, short = 'j', global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: VerifierLoopCmd,
 }

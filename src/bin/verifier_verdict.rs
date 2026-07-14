@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use verifier_loop::cli::json_output::{JsonEnvelope, Output};
 use verifier_loop::verdict::{self, VerdictError};
 
 /// `VERIFIER_LOOP_HOME` overrides the store root; otherwise `~/.verifier-loop`.
@@ -35,6 +36,12 @@ const DEFAULT_HOME_DIR: &str = ".verifier-loop";
     about = "Register a verifier verdict (approve / reject --notes)."
 )]
 struct Cli {
+    /// Machine-readable JSON output mode (`add-json-output-mode`, design D2). Global so
+    /// it parses both before AND after the subcommand: `jewije --json approve` and
+    /// `jewije approve --json` both work.
+    #[arg(long, short = 'j', global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Cmd,
 }
@@ -65,13 +72,55 @@ fn main() {
     // the receipt layer at append time and by tracing spans via the subscriber.
     let _ = verifier_loop::observe::init(None);
     let cli = Cli::parse();
+    // Output channel selector (design D6). Chosen once from the parsed --json flag so
+    // every success / error site routes through a single abstraction.
+    let output = if cli.json { Output::Json } else { Output::Human };
+    let command_label = command_label(&cli.command);
     let code = match run(&cli) {
         Ok(()) => {
-            println!("Verdict registered");
+            let env = JsonEnvelope {
+                ok: true,
+                command: command_label.to_string(),
+                goal_id: env_value(ENV_GOAL_ID),
+                round: env_round(),
+                verifier_id: env_value(ENV_VERIFIER_ID),
+                status: Some("verdict-registered".to_string()),
+                hash: None,
+                full_digest: None,
+                needs: None,
+                rejection: None,
+                verdicts: None,
+                state: None,
+                error: None,
+            };
+            output.print_success(&env, "Verdict registered", &mut std::io::stdout());
             0
         }
         Err(msg) => {
-            eprintln!("{msg}");
+            // Error envelope: ok:false + the human error string. Identity fields are
+            // best-effort populated from env (None when not yet resolved).
+            let env = JsonEnvelope {
+                ok: false,
+                command: command_label.to_string(),
+                goal_id: env_value(ENV_GOAL_ID),
+                round: env_round(),
+                verifier_id: env_value(ENV_VERIFIER_ID),
+                status: None,
+                hash: None,
+                full_digest: None,
+                needs: None,
+                rejection: None,
+                verdicts: None,
+                state: None,
+                error: Some(envelope_error(&msg)),
+            };
+            // Human-readable diagnostic rides stderr under both modes (design D7);
+            // stdout carries the structured envelope under Json only. Both writers are
+            // boxed to a common `dyn Write` so they share the formatter's single generic
+            // `W` (stdout and stderr are distinct concrete types).
+            let mut out: Box<dyn std::io::Write> = Box::new(std::io::stdout());
+            let mut err: Box<dyn std::io::Write> = Box::new(std::io::stderr());
+            output.print_error(&env, &msg, &mut out, &mut err);
             1
         }
     };
@@ -79,6 +128,36 @@ fn main() {
     // lost (design D3). No-op when OTLP is not configured / feature off.
     verifier_loop::observe::shutdown();
     std::process::exit(code);
+}
+
+/// Map a `Cmd` to its command label for the JSON envelope (`approve` / `reject`).
+fn command_label(cmd: &Cmd) -> &'static str {
+    match cmd {
+        Cmd::Approve { .. } => "approve",
+        Cmd::Reject { .. } => "reject",
+    }
+}
+
+/// Best-effort read of an env identity var for envelope population (None when unset).
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// Best-effort parse of `VERIFIER_LOOP_ROUND` for envelope population (None when unset / invalid).
+fn env_round() -> Option<u32> {
+    std::env::var(ENV_ROUND).ok().and_then(|s| s.parse().ok())
+}
+
+/// Map the verbose human-facing error string to a concise machine-readable label for
+/// the JSON envelope's `error` field (design D4: structured equivalents ride the
+/// envelope; the verbose human text rides stderr unchanged). Only phrases that would
+/// leak the human diagnostic onto stdout are remapped; everything else passes through.
+fn envelope_error(human: &str) -> String {
+    if human.contains("requires non-empty --notes") {
+        "notes-required".to_string()
+    } else {
+        human.to_string()
+    }
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
