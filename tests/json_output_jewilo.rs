@@ -879,7 +879,75 @@ fn jewilo_recover_default_mode_empty_stdout_on_done() {
 }
 
 // ===========================================================================
-// Group 7 — Determinism + single-object invariants (tasks.md 7.1)
+// Round-2 fix — RECOVER Done arm under `--json` MUST emit status:"consensus-passed"
+// (the only consensus-positive value in the GOAL contract's 5-value enum). The prior
+// round incorrectly emitted a SIXTH value outside the immutable goal contract. The
+// round DID reach consensus, so status:"consensus-passed" is correct; needs:"done"
+// still signals the round is already complete.
+// ===========================================================================
+
+/// RED→GREEN — `jewilo --json RECOVER <id>` on an already-consensus round emits
+/// ok:true, command:"recover", status:"consensus-passed", needs:"done". The emitted
+/// status MUST be one of the goal's 5-value enum (no sixth value allowed).
+#[test]
+fn jewilo_recover_json_done_emits_consensus_passed() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    seed_workdir(home, 2, 2);
+    let stub = stub_script(home);
+
+    // Reach consensus on round 1.
+    let out = run_vl_raw(home, home, &stub, &["NEW", "recover-done status enum goal"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "seed NEW must reach consensus; stderr:\n{stderr}"
+    );
+    let goal_id = goal_id_from_legacy_stdout(&String::from_utf8_lossy(&out.stdout))
+        .expect("goalId printed on NEW");
+
+    // RECOVER on the already-consensus round under --json.
+    let out = run_vl_raw(home, home, &stub, &["--json", "RECOVER", &goal_id], &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "RECOVER on a done goal must exit 0; stderr:\n{stderr}"
+    );
+
+    let env = parse_json_envelope(&stdout);
+    assert_eq!(env["ok"], true, "recover-done envelope.ok must be true: {env}");
+    assert_eq!(
+        env["command"].as_str(),
+        Some("recover"),
+        "envelope.command must be 'recover': {env}"
+    );
+    assert_eq!(
+        env["status"].as_str(),
+        Some("consensus-passed"),
+        "envelope.status must be 'consensus-passed' (goal 5-value enum): {env}"
+    );
+    assert_eq!(
+        env["needs"].as_str(),
+        Some("done"),
+        "envelope.needs must be 'done' so consumers still know the round is complete: {env}"
+    );
+    // The goal contract enumerates EXACTLY these 5 status values. The RECOVER Done arm
+    // must reuse one of them rather than mint a sixth.
+    let allowed = [
+        "consensus-passed",
+        "rejected",
+        "recover-null-after-timeout",
+        "verdict-registered",
+        "cooldown-fallback",
+    ];
+    let status = env["status"].as_str().expect("status present");
+    assert!(
+        allowed.contains(&status),
+        "status '{status}' is not in the goal 5-value enum {allowed:?}: {env}"
+    );
+}
+
 // ===========================================================================
 
 /// 7.1 RED — an m=5 RESUME round reaching consensus under `--json` emits exactly ONE top-level

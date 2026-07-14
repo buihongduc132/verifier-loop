@@ -232,7 +232,7 @@ fn run_recover(
                 let env = envelope(command, true)
                     .with_goal(goal_id)
                     .with_round(st.round)
-                    .with_status("already-done")
+                    .with_status("consensus-passed")
                     .with_needs(GoalNeeds::Done);
                 print_success(output, env, "");
             }
