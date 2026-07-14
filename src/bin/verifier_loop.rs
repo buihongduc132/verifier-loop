@@ -953,9 +953,8 @@ impl EnvBuilder {
         self
     }
     fn with_round_value(mut self, round: Option<serde_json::Value>) -> Self {
-        if let Some(serde_json::Value::Null) | None = round {
-            return self;
-        }
+        // `as_u64()` returns None for both `Value::Null` and `None`, so no separate
+        // null-check is needed (review feedback).
         if let Some(n) = round.and_then(|v| v.as_u64()) {
             self.inner.round = Some(n as u32);
         }
@@ -982,14 +981,14 @@ impl EnvBuilder {
         self
     }
     fn with_needs_value(mut self, needs: Option<serde_json::Value>) -> Self {
-        if let Some(n @ serde_json::Value::String(_)) = needs {
-            self.inner.needs = Some(n.to_string().trim_matches('"').to_string());
+        if let Some(s) = needs.and_then(|v| v.as_str().map(str::to_string)) {
+            self.inner.needs = Some(s);
         }
         self
     }
     fn with_state_value(mut self, state: Option<serde_json::Value>) -> Self {
-        if let Some(s @ serde_json::Value::String(_)) = state {
-            self.inner.state = Some(s.to_string().trim_matches('"').to_string());
+        if let Some(s) = state.and_then(|v| v.as_str().map(str::to_string)) {
+            self.inner.state = Some(s);
         }
         self
     }
