@@ -99,22 +99,31 @@ fn run(cli: &VerifierLoopCli, output: Output) -> Outcome {
         VerifierLoopCmd::New {
             ref goal,
             ref context,
-        } => run_new(
-            &root,
-            &config,
-            goal,
-            context.as_deref(),
-            prepend.as_deref(),
-            &output,
-        ),
+            ref init_prompt_file,
+        } => {
+            let goal_text = match resolve_goal_text(goal.as_deref(), init_prompt_file.as_deref()) {
+                Ok(t) => t,
+                Err(msg) => return emit_error(&output, command, None, None, &msg),
+            };
+            run_new(
+                &root,
+                &config,
+                &goal_text,
+                context.as_deref(),
+                prepend.as_deref(),
+                &output,
+            )
+        }
         VerifierLoopCmd::Resume {
             ref goal_id,
             ref fix,
+            ref notes,
         } => run_resume(
             &root,
             &config,
             goal_id,
             fix.as_deref(),
+            notes,
             prepend.as_deref(),
             &output,
         ),
@@ -168,6 +177,7 @@ fn run_resume(
     config: &verifier_loop::store::Config,
     goal_id: &str,
     fix: Option<&str>,
+    notes: &[String],
     prepend: Option<&str>,
     output: &Output,
 ) -> Outcome {
@@ -184,6 +194,11 @@ fn run_resume(
         Ok(r) => r,
         Err(e) => return emit_error(output, "resume", Some(goal_id), None, &format!("RESUME failed: {e}")),
     };
+    // Append goal-scoped notes (append-only, never mutates goal.json). The goal lock
+    // already acquired above protects the notes file from concurrent RESUME races.
+    if let Err(e) = verifier_loop::goal::append_notes(root, goal_id, notes) {
+        return emit_error(output, "resume", Some(goal_id), Some(round), &format!("append notes failed: {e}"));
+    }
     run_round(
         root,
         config,
@@ -597,6 +612,30 @@ fn run_round(
     };
     tracing::debug!(fields = ?record.goal_text.len(), "goal loaded");
 
+    // Effective goal text for the verifier prompt = the immutable goalText FOLLOWED BY each
+    // goal-scoped note (append-only `--notes`) on its own line. The on-disk goal.json /
+    // signature.json stay byte-identical (notes are metadata, never a hash input); only the
+    // rendered prompt sees this concatenation. Fail-open: a notes-read error is ignored
+    // (the round proceeds with the bare goalText rather than blocking a verdict).
+    let effective_goal_text: String = match verifier_loop::goal::load_notes(root, goal_id) {
+        Ok(notes) => {
+            if notes.is_empty() {
+                record.goal_text.clone()
+            } else {
+                let mut s = String::with_capacity(
+                    record.goal_text.len() + notes.iter().map(|n| n.len() + 1).sum::<usize>(),
+                );
+                s.push_str(&record.goal_text);
+                for note in &notes {
+                    s.push('\n');
+                    s.push_str(note);
+                }
+                s
+            }
+        }
+        Err(_) => record.goal_text.clone(),
+    };
+
     // Frozen artifact snapshot (§9): captured once per round from cwd. Fails closed if cwd
     // is not a git work tree (V* must never receive a silently empty snapshot). The
     // fileEditTimes block is capped to Config.file_edit_times_max_chars (D1).
@@ -644,7 +683,7 @@ fn run_round(
             verifier_id: &vid,
             round,
             prev_round: prev_round_of(round, kind),
-            goal_text: &record.goal_text,
+            goal_text: &effective_goal_text,
             context: context_capped.as_deref(),
             fix_notes,
             prev_notes: prev_notes.as_deref(),
@@ -1138,6 +1177,34 @@ fn resolve_home() -> Result<PathBuf, String> {
     match std::env::var_os("HOME") {
         Some(h) => Ok(PathBuf::from(h).join(DEFAULT_HOME_DIR)),
         None => Err(format!("{ENV_HOME} is unset and $HOME is not available")),
+    }
+}
+
+/// Resolve the goal text for `NEW`: either the inline positional `goal` or the contents of
+/// `--init-prompt-file`. Fail-closed when neither is supplied, both are supplied, or the file
+/// cannot be read. Trims a single trailing newline (common `echo` artifact) while preserving
+/// interior newlines.
+fn resolve_goal_text(
+    goal: Option<&str>,
+    init_prompt_file: Option<&str>,
+) -> Result<String, String> {
+    match (goal, init_prompt_file) {
+        (Some(_), Some(_)) => Err(
+            "use either a positional goal OR --init-prompt-file, not both".to_string(),
+        ),
+        (Some(g), None) => Ok(g.to_string()),
+        (None, Some(path)) => {
+            let resolved = Path::new(path);
+            let contents = std::fs::read_to_string(resolved).map_err(|e| {
+                format!("--init-prompt-file '{}' could not be read: {e}", resolved.display())
+            })?;
+            // Trim exactly one trailing newline (common file-ending convention) without
+            // stripping other whitespace that may be part of the goal text.
+            Ok(contents.strip_suffix('\n').map(str::to_string).unwrap_or(contents))
+        }
+        (None, None) => Err(
+            "a goal is required: provide either a positional goal OR --init-prompt-file".to_string(),
+        ),
     }
 }
 

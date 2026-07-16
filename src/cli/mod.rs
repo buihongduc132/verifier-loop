@@ -1,7 +1,7 @@
 //! CLI command definitions (tasks.md §10) for both binaries.
 //!
-//! * `verifier-loop` (`jewilo`):   `NEW "<goal>" [--context]`, `RESUME <goalId> [--fix "…"]`,
-//!   `RECOVER <goalId>`, `STATUS <goalId>`.
+//! * `verifier-loop` (`jewilo`):   `NEW "<goal>" [--context]` (or `NEW --init-prompt-file <path>`),
+//!   `RESUME <goalId> [--fix "…"] [--notes "…"]...`, `RECOVER <goalId>`, `STATUS <goalId>`.
 //! * `verifier-verdict` (`jewije`): `approve`, `reject --notes "…"` (defined inline in its
 //!   own bin; this module holds the `verifier-loop` shared command structs so the bin stays
 //!   a thin dispatch layer over the lib).
@@ -38,11 +38,17 @@ pub enum VerifierLoopCmd {
     /// Create a new immutable goal, spawn round 1, evaluate n/m consensus.
     #[command(name = "NEW")]
     New {
-        /// The goal text (immutable once written to goal.json).
-        goal: String,
+        /// The goal text (immutable once written to goal.json). Optional when
+        /// `--init-prompt-file` is supplied; exactly one of the two must be given.
+        goal: Option<String>,
         /// Optional context annotation recorded into goal.json.
         #[arg(long)]
         context: Option<String>,
+        /// Read the goal text from this file instead of the positional `goal` arg.
+        /// A single trailing newline is trimmed; interior newlines are preserved.
+        /// Exactly one of `goal` / `--init-prompt-file` is required.
+        #[arg(long)]
+        init_prompt_file: Option<String>,
     },
     /// Resume a goal: increment the round, append fix notes, respawn verifiers.
     #[command(name = "RESUME")]
@@ -52,6 +58,12 @@ pub enum VerifierLoopCmd {
         /// Optional fix notes appended to the new round's fix-notes.json.
         #[arg(long)]
         fix: Option<String>,
+        /// Optional goal-scoped notes appended (append-only) to goal-notes.json. Each
+        /// `--notes` value is a separate entry; the on-disk goal stays immutable and the
+        /// notes are auto-concatenated (one per line) only into the verifier prompt.
+        /// Repeatable. There is no command to strip / remove / update notes.
+        #[arg(long = "notes")]
+        notes: Vec<String>,
     },
     /// Cross-process round recovery (SHAPE-1): wait for already-emitted verdicts from the
     /// current round and re-evaluate consensus. Does NOT spawn, kill, re-render, or

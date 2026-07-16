@@ -4,7 +4,8 @@
 //!   = `SHA256(salt + goalText + createdAt)` (D5), `rounds/` dir, current round = 1.
 //! * `RESUME <id> [--fix "…"]`   → increment round, append note to
 //!   `rounds/<round>/fix-notes.json` (append-only). `goal.json` and `signature.json` are
-//!   byte-for-byte unchanged.
+//!   byte-for-byte unchanged. The optional `--notes` flag appends goal-scoped notes to
+//!   `goal-notes.json` (also append-only, also never a hash input).
 //! * Missing store / missing goal → fail closed, no hash.
 //!
 //! All core functions take the store root explicitly (parallel-safe); env-resolving
@@ -32,6 +33,11 @@ pub const STATE_FILE: &str = "state.json";
 pub const ROUNDS_DIR: &str = "rounds";
 /// Append-only fix-notes within a round (written by RESUME).
 pub const FIX_NOTES_FILE: &str = "fix-notes.json";
+/// Goal-scoped append-only notes (written by `RESUME --notes`). Each note is a separate
+/// line; the file lives alongside `goal.json` but is NEVER a signature or hash input —
+/// `goal.json` and `signature.json` stay byte-for-byte immutable. There is NO command to
+/// strip / remove / update notes; only append + load exist.
+pub const GOAL_NOTES_FILE: &str = "goal-notes.json";
 
 /// The immutable goal record written once at `NEW`.
 ///
@@ -164,6 +170,62 @@ pub fn resume(root: &Path, goal_id: &str, fix_notes: Option<&str>) -> Result<u32
     fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
 
     Ok(round)
+}
+
+/// Append each note in `notes` to the goal-scoped `goal-notes.json` (append-only across
+/// calls, never overwriting). `goal.json` and `signature.json` are NEVER touched — notes
+/// are metadata, not a signature or hash input. Fail-closed if the goal dir is missing.
+///
+/// On-disk shape: `{ "notes": ["line1", "line2", ...] }`. Each call pushes onto the
+/// existing array (creating the file if absent). An empty `notes` slice is a no-op that
+/// does NOT create the file (backward compatible: `RESUME` without `--notes` leaves no
+/// goal-notes.json behind).
+pub fn append_notes(root: &Path, goal_id: &str, notes: &[String]) -> Result<(), GoalError> {
+    if notes.is_empty() {
+        // No-op: do not create an empty goal-notes.json.
+        return Ok(());
+    }
+    let gdir = goal_dir(root, goal_id);
+    if !gdir.exists() {
+        return Err(GoalError::GoalNotFound);
+    }
+    let notes_path = gdir.join(GOAL_NOTES_FILE);
+    let mut arr: serde_json::Value = if notes_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&notes_path)?)?
+    } else {
+        serde_json::json!({ "notes": [] })
+    };
+    if let Some(arr_notes) = arr.get_mut("notes").and_then(|v| v.as_array_mut()) {
+        for note in notes {
+            arr_notes.push(serde_json::Value::String(note.clone()));
+        }
+    }
+    fs::write(&notes_path, serde_json::to_string_pretty(&arr)?)?;
+    Ok(())
+}
+
+/// Load every goal-scoped note ever appended, in insertion order. Returns an empty
+/// `Vec` (NOT an error) when no `goal-notes.json` exists. Fail-closed (`GoalNotFound`)
+/// when the goal directory itself is missing.
+pub fn load_notes(root: &Path, goal_id: &str) -> Result<Vec<String>, GoalError> {
+    let gdir = goal_dir(root, goal_id);
+    if !gdir.exists() {
+        return Err(GoalError::GoalNotFound);
+    }
+    let notes_path = gdir.join(GOAL_NOTES_FILE);
+    if !notes_path.exists() {
+        return Ok(Vec::new());
+    }
+    let arr: serde_json::Value = serde_json::from_str(&fs::read_to_string(&notes_path)?)?;
+    let mut out = Vec::new();
+    if let Some(arr_notes) = arr.get("notes").and_then(|v| v.as_array()) {
+        for v in arr_notes {
+            if let Some(s) = v.as_str() {
+                out.push(s.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Return the current round for a goal (fail closed if missing).
