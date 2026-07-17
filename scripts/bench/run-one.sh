@@ -86,7 +86,7 @@ findings_count="$(printf '%s' "$parsed" | jq -r '.findings_count')"
 
 # Try to extract the goalId from jewilo's --json output. jewilo's JSON envelope
 # carries a top-level `goalId` on NEW; fall back to null if absent / malformed.
-goal_id="$(jq -r '.goalId // empty' "$transcript_path" 2>/dev/null || true)"
+goal_id="$(grep -E '\"command\":\"(new|resume)\".*\"goalId\"' \"$transcript_path\" 2>/dev/null | tail -n1 | jq -r '.goalId // empty' 2>/dev/null || true)"
 if [ -z "$goal_id" ]; then
   goal_id_json="null"
 else
