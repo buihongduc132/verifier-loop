@@ -60,3 +60,6 @@ target
 
 # worktrees (never commit)
 .worktrees/
+
+# bench harness per-run output
+scripts/bench/runs/
