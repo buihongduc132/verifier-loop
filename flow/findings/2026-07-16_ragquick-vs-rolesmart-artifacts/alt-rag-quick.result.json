@@ -1,0 +1,13 @@
+{
+  "label": "alt-rag-quick",
+  "goal_id": "cbbff12e-d8ab-43d1-b3ea-dff104bdbba1",
+  "verdict": "REJECT",
+  "completion_hash": null,
+  "findings_count": 6,
+  "wall_clock_sec": 983.265,
+  "started_at": "2026-07-17T03:52:50Z",
+  "ended_at": "2026-07-17T04:09:13Z",
+  "transcript_path": "/home/bhd/Documents/Projects/bhd/verifier-loop/.worktrees/wt-bench-ragquick-vs-rolesmart/scripts/bench/runs/alt-rag-quick-20260717T035250Z.log",
+  "store_dir": "/home/bhd/.verifier-loop",
+  "jewilo_exit": 1
+}

@@ -1,0 +1,13 @@
+{
+  "label": "baseline-role-smart",
+  "goal_id": "c2100d1f-9dc9-4e7c-a3b9-dbf45b6853ae",
+  "verdict": "REJECT",
+  "completion_hash": null,
+  "findings_count": 5,
+  "wall_clock_sec": 618.631,
+  "started_at": "2026-07-17T03:25:15Z",
+  "ended_at": "2026-07-17T03:35:34Z",
+  "transcript_path": "/home/bhd/Documents/Projects/bhd/verifier-loop/.worktrees/wt-bench-ragquick-vs-rolesmart/scripts/bench/runs/baseline-role-smart-20260717T032515Z.log",
+  "store_dir": "/home/bhd/.verifier-loop",
+  "jewilo_exit": 1
+}
