@@ -37,12 +37,29 @@ verdict="NONE"
 completion_hash="null"
 findings_count=0
 
-# Count defect markers (D<n>, BLOCKER, MAJOR, MINOR) in a body of text.
-# Uses grep -i so case variations match; one match per line (a line with both
-# "D1 (BLOCKER)" still counts as 1 because grep -c counts matching LINES not
-# matches — which avoids double-counting a single finding that uses both forms).
-count_findings() {
-  grep -ciE 'D[0-9]+|\b(BLOCKER|MAJOR|MINOR)\b' "$1" 2>/dev/null || printf '0'
+# Count defect markers per VERDICT body, summed across verdicts.
+# Logic per verdict body:
+#   - if it uses D<number> markers (D1, D2, ...): count those (each D<n> = 1 finding,
+#     so 'D1 (BLOCKER)' counts as 1, not 2).
+#   - else (no D markers): fall back to counting bare severity keywords
+#     (BLOCKER / MAJOR / MINOR).
+# This avoids (a) the line-count bug where multiple D-markers on one line
+# undercount, and (b) double-counting 'D1 (BLOCKER)' as both a D and a severity.
+# Input: a file path containing one verdict body per line (the caller pipes in
+# jq -r '.rejection.rejectNotes[].[1]').
+count_findings_total() {
+  python3 - "$1" <<'PY'
+import re, sys
+total = 0
+with open(sys.argv[1]) as f:
+    for line in f:
+        d = re.findall(r'D[0-9]+', line)
+        if d:
+            total += len(d)
+        else:
+            total += len(re.findall(r'\b(BLOCKER|MAJOR|MINOR)\b', line))
+print(total)
+PY
 }
 
 # --- jewilo --json output (authoritative when present) -------------------
@@ -62,7 +79,10 @@ if [ -n "$jewilo_line" ]; then
       case "${notes_count:-0}" in ''|*[!0-9]*) notes_count=0 ;; esac
       if [ "$notes_count" -gt 0 ]; then
         verdict="REJECT"
-        fc_tmp="$(printf '%s' "$notes_blob" | count_findings /dev/stdin || printf '0')"
+        # Write notes_blob to a temp file so count_findings_total can read it.
+        nb_tmp="$(mktemp)"; printf '%s\n' "$notes_blob" >"$nb_tmp"
+        fc_tmp="$(count_findings_total "$nb_tmp" || printf '0')"
+        rm -f "$nb_tmp"
         case "$fc_tmp" in ''|*[!0-9]*) fc_tmp=0 ;; esac
         findings_count="$fc_tmp"
       else

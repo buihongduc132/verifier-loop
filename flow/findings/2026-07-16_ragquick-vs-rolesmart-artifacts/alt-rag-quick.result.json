@@ -3,7 +3,7 @@
   "goal_id": "a09dc501-b4d9-4fcc-b23e-5e99b85bb8ee",
   "verdict": "REJECT",
   "completion_hash": null,
-  "findings_count": 2,
+  "findings_count": 5,
   "wall_clock_sec": 1731.349,
   "started_at": "2026-07-17T04:46:59Z",
   "ended_at": "2026-07-17T05:15:50Z",

@@ -34,11 +34,10 @@ a fixed LiteLLM would be modestly larger. This does NOT invalidate the verdict-c
 comparison (both configs give the verifier full bash/filesystem access, which is all the
 OpenSpec task needs).
 
-**Model identity was verified at the session level** (a prior run accidentally used
-role-smart for the "alt" due to a config-edit mistake; this was caught by the verifier-loop
-on this very harness and corrected). The reported alt numbers below come from sessions whose
-JSONL records contain `"modelId":"rag-quick"` (see artifacts/alt-rag-quick.log spawn timestamps
-vs `~/.pi-bench-ragquick/sessions/`).
+**Model identity was verified at the session level.** An intermediate run (v2) accidentally
+used `role-smart` for the "alt" due to a config-edit mistake; the verifier-loop on this very
+harness caught it (D1-D3 BLOCKER "FABRICATED BENCHMARK") and it was discarded. The reported
+alt numbers come from sessions whose JSONL records contain `"modelId":"rag-quick"`.
 
 ## Target task
 
@@ -55,8 +54,7 @@ the change is **mostly implemented** but has **2 real spec divergences**:
 | S3 | `--change non-existent` throws `Change 'non-existent' not found` | impl appends `. Available changes:\n  feat-x` suffix | REAL DEFECT (minor — suffix is arguably helpful) |
 | S1, S3-missing, S5 | text mode / "missing --change" / `instructions` unaffected | all match exactly | OK |
 
-So the *correct* verdict is **REJECT** with findings on S2 + S3. (Any verifier that APPROVES
-this is rubber-stamping; any that REJECTS on S2 + S3 is correct.)
+So the *correct* verdict is **REJECT** with findings on S2 + S3.
 
 ## Raw results
 
@@ -65,12 +63,18 @@ this is rubber-stamping; any that REJECTS on S2 + S3 is correct.)
 | wall-clock (s) | **618.63** | **1731.35** | **+1112.72 (alt is +179.8% / ~2.8× slower)** |
 | verdict | REJECT | REJECT | AGREE |
 | consensus | 2/2 REJECT | 2/2 REJECT | AGREE |
-| findings_count (parser) | 5 | 2 | −3 |
+| findings_count (parser) | **4** | **5** | **+1 (alt surfaced more)** |
 | goal_id | `c2100d1f-9dc9-4e7c-a3b9-dbf45b6853ae` | `a09dc501-b4d9-4fcc-b23e-5e99b85bb8ee` | — |
 | jewilo exit | 1 (REJECT) | 1 (REJECT) | same |
 | v1 turnsUsed / nudgeAttempts | 1 / 0 | 3 / 2 | alt needs more |
 | v2 turnsUsed / nudgeAttempts | 1 / 0 | **8 / 7** | alt v2 struggled badly |
 | compaction observed | no | no | — |
+
+**findings_count methodology** (corrected after verifier caught a parser bug — see Process
+Lesson below): each verdict body contributes (count of `D\d+` markers) OR, if it uses none,
+(count of bare severity keywords BLOCKER/MAJOR/MINOR); summed across both verifiers. A
+`D1 (BLOCKER)` counts as ONE finding, not two. The bats suite has a regression test for the
+multi-D-per-line case (`tests/bench/test_parse_jewilo_json.bats` test 7).
 
 Run transcripts (in `flow/findings/2026-07-16_ragquick-vs-rolesmart-artifacts/`):
 - baseline: `baseline-role-smart.{log,result.json}`
@@ -81,21 +85,28 @@ Run transcripts (in `flow/findings/2026-07-16_ragquick-vs-rolesmart-artifacts/`)
 **Verdict agreement:** YES — both models reached a 2/2 REJECT consensus. Neither
 rubber-stamped. **Both are correct** given the ground truth above.
 
+**Per-verdict finding breakdown** (from the actual rejectNotes):
+
+| | role-smart | rag-quick |
+|---|-----------|-----------|
+| v1 | D1 BLOCKER (S2 root field) + D2 MAJOR (S3 suffix) | D1 BLOCKER (S2 root field) + D2 BLOCKER (S3 suffix) |
+| v2 | BLOCKER (S2 root+pretty) + MAJOR (weakened test) | D1 BLOCKER (show cmd — **false positive**) + D2 MAJOR (S2 root+pretty) + D3 MAJOR (S3 suffix) |
+| **total findings** | **4** | **5** |
+
 **Did each catch the 2 real defects?**
 
 | Defect | role-smart | rag-quick |
 |--------|-----------|-----------|
-| S2 — extra `root` field in JSON | ✅ v1 D1 BLOCKER + v2 BLOCKER | ✅ v1 D1 BLOCKER + v2 D2 MAJOR |
-| S2 — pretty-printing vs compact | ✅ v1 D1 (rolled into root-field finding) | ✅ v2 D2 (rolled in with root field) |
-| S3 — `not found` message suffix | ✅ v1 D2 MAJOR | ✅ v1 D2 BLOCKER + v2 D3 MAJOR |
+| S2 — extra `root` field in JSON | ✅ v1 D1 + v2 BLOCKER | ✅ v1 D1 + v2 D2 |
+| S2 — pretty-printing vs compact | ✅ v1 D1 (rolled into root-field) | ✅ v2 D2 (rolled in with root field) |
+| S3 — `not found` message suffix | ✅ v1 D2 (v2 dismissed as loose spec) | ✅ v1 D2 + v2 D3 |
 
 **False positives / over-flagging:**
 - **rag-quick v2 D1**: flagged `show` command emitting "Nothing to show" vs spec's "No changes
-  found" — same false-positive pattern as the original v1 run. Defensible-but-overly-literal;
-  role-smart explicitly classified this as out-of-scope (show never routed through
-  `validateChangeExists`). One false positive out of 3 v2 findings.
+  found" — a defensible-but-overly-literal flag (show never routed through `validateChangeExists`).
+  1 false positive out of 5 findings.
 - **role-smart v2 MAJOR "weakened test"**: flagged that `artifact-workflow.test.ts` doesn't
-  assert byte-for-byte JSON shape — a real meta-finding. rag-quick did not raise this.
+  assert byte-for-byte JSON shape — a real, useful meta-finding. rag-quick did not raise this.
 
 **Missed findings:** Neither model missed S2 or S3. Both correctly identified the core
 defects by actually running the built CLI against `/tmp/v*-empty` fixture dirs.
@@ -103,9 +114,11 @@ defects by actually running the built CLI against `/tmp/v*-empty` fixture dirs.
 **Hallucinated findings:** None in either run — every cited string/line number was
 verifiable against the actual files.
 
-**Net correctness:** Tied on the core verdict. role-smart is more *thorough* (5 findings,
-including a meta-finding on the weakened test); rag-quick is more *terse* (2-3 findings,
-1 false positive).
+**Net correctness:** Tied on the core verdict. **rag-quick v3 surfaced MORE findings (5 vs 4)**
+— it split the S2 root-field + pretty-printing into separate items in v2 AND separately
+flagged the show-command divergence (false positive). role-smart was more consolidated
+(rolled S2 root + pretty into one D1) but added a useful weakened-test meta-finding.
+Both are thorough; rag-quick is slightly more granular at the cost of one false positive.
 
 ## Time-to-verdict analysis
 
@@ -123,11 +136,11 @@ including a meta-finding on the weakened test); rag-quick is more *terse* (2-3 f
 
 ## Findings-count delta
 
-`−3` (5 vs 2). This IS a meaningful quality delta:
-- role-smart surfaces S2 + S3 + the weakened-test meta-finding + splits serialization-form
-  defects into separate items. More actionable for an implementer.
-- rag-quick surfaces S2 + S3 concisely (plus 1 false positive in v2). Sufficient for an
-  APPROVE/REJECT gate but less diagnostic.
+`+1` (alt 5 vs baseline 4). This is a real, if modest, granularity difference — NOT a quality
+deficit for rag-quick. rag-quick splits defects more finely and added one false positive;
+role-smart consolidates and added a useful meta-finding. For an APPROVE/REJECT gate both are
+sufficient; for implementer-actionability diagnostics, role-smart's consolidated style is
+marginally cleaner (no false positive to triage).
 
 ## Recommendation
 
@@ -139,16 +152,14 @@ apples-to-apples data point:
 2. **role-smart is ~2.8× faster wall-clock and needs far fewer nudges** (0/0 vs 2/7). The
    nudge overhead is the dominant time cost for rag-quick, driven by the qwen-chat-template
    thinking format not terminating cleanly.
-3. **role-smart is more thorough** — surfaces 5 findings (incl. a meta-finding on the
-   weakened test) vs rag-quick's 2-3. More actionable for the implementer.
-4. **rag-quick is more terse** — sufficient for a binary APPROVE/REJECT gate but less
-   diagnostic; one false positive (show command) in this run.
-5. **Use role-smart as the verifier default** (current prod config is correct).
+3. **Finding quality is comparable** — rag-quick v3 surfaced 5 findings (more granular, 1
+   false positive); role-smart surfaced 4 (more consolidated, 1 useful meta-finding). Tied.
+4. **Use role-smart as the verifier default** (current prod config is correct).
    rag-quick is a viable fallback if role-smart is unavailable, but expect ~2.8× longer
    rounds and higher orchestrator load from nudging.
-6. **Thinking level is critical for rag-quick.** (An earlier run at `defaultThinkingLevel=medium`
+5. **Thinking level is critical for rag-quick.** (An earlier run at `defaultThinkingLevel=medium`
    was even slower/noisier; matching prod's `high` helped but did not close the gap.)
-7. **LiteLLM follow-up:** enabling `--enable-auto-tool-choice --tool-call-parser` on the
+6. **LiteLLM follow-up:** enabling `--enable-auto-tool-choice --tool-call-parser` on the
    `rag-quick` model group would let rag-quick run with the full extension set and yield a
    truly like-for-like wall-clock comparison. Filed below.
 
@@ -170,19 +181,26 @@ apples-to-apples data point:
 - **The LiteLLM `tool_choice=auto` misconfiguration on `rag-quick`** is a separate ops issue
   against the LiteLLM proxy config (`noco-mesh`), NOT a defect in rag-quick itself or in pi.
 
-## Process lesson (recorded for traceability)
+## Process lesson (recorded for traceability — the verifier-loop caught 3 errors)
 
-Two intermediate alt runs were discarded:
-- **v1** used `defaultThinkingLevel=medium` (a confound — flagged by the verifier-loop on this
-  harness as D1 MAJOR). 983s, 6 findings.
-- **v2** accidentally used `defaultModel=role-smart` due to a config-edit mistake (a `jq`
-  pipeline read from prod and only modified thinking+packages, dropping the model swap).
-  Flagged by the verifier-loop as D1-D3 BLOCKER ("FABRICATED BENCHMARK"). 307s.
-- **v3** (reported above) is the first run with verified-correct alt config
-  (`defaultModel=rag-quick` confirmed in session JSONL).
+Three intermediate alt runs were discarded; the verifier-loop on this very harness caught
+every one before any false claim shipped:
 
-The verifier-loop caught BOTH errors before any false claim shipped. This is the system
-working as designed.
+1. **v1** used `defaultThinkingLevel=medium` (a confound). Verifier R1 flagged D1 MAJOR.
+   983s, 6 findings.
+2. **v2** accidentally used `defaultModel=role-smart` due to a `jq` pipeline that read from
+   prod and only modified thinking+packages, dropping the model swap. Verifier R2 flagged
+   D1-D3 BLOCKER "FABRICATED BENCHMARK" — proved via session JSONL containing
+   `"modelId":"role-smart"`. 307s (which was actually role-smart-vs-role-smart variance).
+3. **v3 parser bug:** `findings_count` used `grep -c` (line count) which undercounted
+   multi-D-per-line verdicts, making the doc claim "role-smart more thorough (5 vs 2)" —
+   **inverted** (real counts: rag-quick 5, role-smart 4). Verifier R3 flagged D1 MAJOR.
+   Fixed by switching to per-finding counting (`D\d+` markers primary, severity fallback)
+   and adding a regression bats test.
+
+v3 (reported above) is the run with verified-correct alt config AND verified-correct parser.
+The verifier-loop catching all three is the system working as designed — strong evidence for
+keeping it as the mandatory gate.
 
 ## Follow-ups (out of scope for this benchmark)
 
@@ -215,5 +233,5 @@ bash scripts/bench/compare.sh \
 
 ## Test gate
 
-`bats tests/bench/` → **12/12 ok** (covers parse-verdict REJECT/APPROVE/NONE/empty +
-jewilo --json shape + compare delta).
+`bats tests/bench/` → **13/13 ok** (covers parse-verdict REJECT/APPROVE/NONE/empty +
+jewilo --json shape + multi-D-per-line regression + compare delta).

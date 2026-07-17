@@ -34,6 +34,20 @@ JEWILO_NULL_JSON='{"ok":false,"command":"new","goalId":"def67890-9dc9-4e7c-a3b9-
   rm -f "$t"
 }
 
+# Regression: when a verifier packs multiple D-markers onto a SINGLE line
+# (e.g. 'D1 (BLOCKER) ... D2 (MAJOR) ...'), the parser must count BOTH, not 1.
+# This was a real bug caught by the verifier-loop on the benchmark — the old
+# `grep -c` (line-count) undercounted multi-D-per-line verdicts.
+@test "parse-verdict: multiple D-markers on one line are counted separately" {
+  local packed='{"ok":false,"command":"new","goalId":"z","round":1,"status":"rejected","rejection":{"rejectNotes":[["v1","D1 (BLOCKER) - root field. D2 (MAJOR) - suffix. D3 (MINOR) - docs."],["v2","D1 (BLOCKER) - same."]],"nullVerifiers":[],"signatureFailures":[]},"error":"round 1 rejected"}'
+  local t; t="$(make_temp_file jewilo-packed "$packed")"
+  run "$(bench_script parse-verdict.sh)" "$t"
+  [ "$status" -eq 0 ]
+  # v1 = 3 D-markers on one line ; v2 = 1 D-marker. Total = 4.
+  echo "$output" | jq -e '.verdict == "REJECT" and .findings_count == 4' >/dev/null
+  rm -f "$t"
+}
+
 @test "parse-verdict: jewilo --json APPROVE extracts completion hash" {
   local t; t="$(make_temp_file jewilo-approve "$JEWILO_APPROVE_JSON")"
   run "$(bench_script parse-verdict.sh)" "$t"
