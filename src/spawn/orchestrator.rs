@@ -254,17 +254,30 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         let mut cmd;
         let fresh;
         match &prior {
-            Some(meta) if meta.turns_used < input.config.max_turn => {
-                // Reuse: resume on the prior SID.
-                let sid = meta.sid.clone().unwrap_or_default();
+            // Reuse: resume on the prior SID, but ONLY when the SID is present and
+            // non-empty. A None/empty prior SID (e.g. after a timeout that did not
+            // capture the `session` event) must NOT be substituted into `--session {sid}`
+            // — the empty substitution would yield `pi --session  --mode json`, where
+            // the shell splits the doubled space and pi parses `--mode` as the session
+            // name argument, producing the cascading "No session found matching '--mode'"
+            // failure (gh #45/#48/#56/#59/#62/#65/#66/#67/#69). Fall through to fresh.
+            Some(meta)
+                if meta.turns_used < input.config.max_turn
+                    && meta.sid.as_deref().is_some_and(|s| !s.is_empty()) =>
+            {
+                // Reuse: resume on the prior SID (gate above guarantees non-empty).
+                let sid = meta.sid.clone().expect("non-empty SID guaranteed by guard");
                 cmd = build_resume_command(input.adapter, &sid, goal_file_path);
                 fresh = false;
             }
             _ => {
-                // Fresh (exhausted, or no prior meta). Archive the prior SID if present.
+                // Fresh: exhausted, no prior meta, OR prior SID missing/empty.
+                // Archive the prior SID only when non-empty (nothing to archive otherwise).
                 if let Some(meta) = prior.as_ref() {
-                    if let Some(sid) = &meta.sid {
-                        archive_prior_sid(&prev_vdir, sid)?;
+                    if let Some(sid) = meta.sid.as_deref() {
+                        if !sid.is_empty() {
+                            archive_prior_sid(&prev_vdir, sid)?;
+                        }
                     }
                 }
                 cmd = build_spawn_command(input.adapter, goal_file_path);
