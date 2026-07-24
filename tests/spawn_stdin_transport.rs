@@ -127,6 +127,9 @@ printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$V
             config: &store::Config::load_in(root).unwrap(),
             prompt,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn round should not hard-error");
 
@@ -190,6 +193,9 @@ printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$V
             config: &store::Config::load_in(root).unwrap(),
             prompt: &prompt,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         })
         .await
     });
@@ -265,6 +271,9 @@ exit 0
             config: &store::Config::load_in(root).unwrap(),
             prompt: &prompt,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("EPIPE after ACP output must NOT hard-error the spawn round");
 
@@ -336,6 +345,9 @@ exit 1
         config: &store::Config::load_in(root).unwrap(),
         prompt,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }));
 
     // The gather barrier must complete without panicking (EPIPE is fatal-but-handled).

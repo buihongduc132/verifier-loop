@@ -40,15 +40,36 @@ const HASH_FULL_HEX_LEN: usize = 64;
 
 /// A matching (APPROVE) verdict participating in the hash input.
 ///
-/// Serialized canonically as `{"registeredAt":..,"verifierId":..}` (keys alphabetical
-/// via `BTreeMap`) inside the sorted-by-`verifierId` array.
+/// Serialized canonically as `{"phaseId":..,"registeredAt":..,"verifierId":..}`
+/// (keys alphabetical via `BTreeMap`) inside the sorted-by-`(phaseId, verifierId)` array.
+/// `phaseId` is the dynamic-pipeline sub-phase axis (LD25): two different phase orderings
+/// CANNOT produce the same hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchingVerdict {
+    /// dynamic-pipeline (LD17, LD25): sub-phase id ("1a", ...) that produced this verdict.
+    #[serde(default = "default_phase_id")]
+    pub phase_id: String,
     pub verifier_id: String,
     /// ISO-8601 timestamp the verdict was registered. Always present for a matching
     /// (APPROVE) verdict — a verdict without `registeredAt` cannot match (fail-closed).
     pub registered_at: String,
+}
+
+/// Legacy/v0 default `phaseId`. Empty string for old receipts so audit recompute stays
+/// byte-identical for pre-dynamic-pipeline goals (verifierIdVersion = 0).
+fn default_phase_id() -> String {
+    String::new()
+}
+
+impl Default for MatchingVerdict {
+    fn default() -> Self {
+        Self {
+            phase_id: default_phase_id(),
+            verifier_id: String::new(),
+            registered_at: String::new(),
+        }
+    }
 }
 
 /// The rejection surfaced to A when a round does not pass: each non-APPROVE verifier's
@@ -100,6 +121,20 @@ pub struct CompletionRecord {
     pub matching_verdicts: Vec<MatchingVerdict>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// dynamic-pipeline (LD14): which pipeline path produced this hash ("PL-D" | "PL-E").
+    /// Metadata-only — NOT a hash input (preserves hash determinism). Defaults to "PL-D"
+    /// for legacy goals.
+    #[serde(default = "default_pipeline_tag")]
+    pub pipeline: String,
+    /// dynamic-pipeline (LD25): count of PL-E cycles consumed reaching this completion.
+    /// Captures audit granularity the binary PL-D/PL-E tag loses.
+    #[serde(default)]
+    pub escalation_depth: u32,
+}
+
+/// Default `pipeline` tag for legacy receipts (LD14).
+fn default_pipeline_tag() -> String {
+    "PL-D".to_string()
 }
 
 /// Output of [`compute_hash`]: the short display hash + the full digest.
@@ -186,6 +221,7 @@ pub fn evaluate(
                     // Pinned slot: the signature MUST verify.
                     match verdict::verify_record(rec, Some(&key), goal_id, vid, round) {
                         Ok(()) => matching.push(MatchingVerdict {
+                            phase_id: String::new(),
                             verifier_id: vid.clone(),
                             registered_at: ts.to_string(),
                         }),
@@ -198,6 +234,7 @@ pub fn evaluate(
                 } else {
                     // Legacy unsigned regime: no pinned key → trust the APPROVE.
                     matching.push(MatchingVerdict {
+                        phase_id: String::new(),
                         verifier_id: vid.clone(),
                         registered_at: ts.to_string(),
                     });
@@ -233,8 +270,14 @@ pub fn evaluate(
         // is expected to supply all m slots; here we simply ensure no false pass.
     }
 
-    // Sort matching by verifier_id ascending (canonical hash input order).
-    matching.sort_by(|a, b| a.verifier_id.cmp(&b.verifier_id));
+    // Sort matching by (phase_id, verifier_id) ascending (canonical hash input order).
+    // dynamic-pipeline (LD25): phase_id is a primary sort key so two different phase
+    // orderings CANNOT produce the same hash.
+    matching.sort_by(|a, b| {
+        a.phase_id
+            .cmp(&b.phase_id)
+            .then(a.verifier_id.cmp(&b.verifier_id))
+    });
 
     let approve_count = matching.len() as u32;
     let passed = approve_count >= n && (verdicts.len() as u32) >= m;
@@ -274,12 +317,23 @@ fn signature_failure_reason(err: &verdict::VerdictError) -> String {
 /// `matching` is assumed already sorted by the caller (or re-sorted here defensively).
 fn canonical_matching_json(matching: &[MatchingVerdict]) -> String {
     let mut sorted: Vec<&MatchingVerdict> = matching.iter().collect();
-    sorted.sort_by(|a, b| a.verifier_id.cmp(&b.verifier_id));
+    // LD25: sort by (phase_id, verifier_id) so two different phase orderings CANNOT
+    // produce the same hash. This MUST match the sort in `evaluate` (line 277).
+    sorted.sort_by(|a, b| {
+        a.phase_id
+            .cmp(&b.phase_id)
+            .then(a.verifier_id.cmp(&b.verifier_id))
+    });
 
     let arr: Vec<serde_json::Value> = sorted
         .iter()
         .map(|m| {
             let mut map = BTreeMap::new();
+            // LD25: phaseId IS a hash input — fail-closed phase binding.
+            map.insert(
+                "phaseId".to_string(),
+                serde_json::Value::String(m.phase_id.clone()),
+            );
             map.insert(
                 "registeredAt".to_string(),
                 serde_json::Value::String(m.registered_at.clone()),
@@ -396,6 +450,8 @@ pub fn write_completion(
         matched_at: matched_at_iso.to_string(),
         matching_verdicts: result.matching_verdicts.clone(),
         trace_id: trace_id.map(str::to_string),
+        pipeline: default_pipeline_tag(),
+        escalation_depth: 0,
     };
 
     let target = gdir.join(COMPLETION_FILE);
@@ -425,6 +481,7 @@ mod tests {
 
     fn mv(vid: &str, ts: &str) -> MatchingVerdict {
         MatchingVerdict {
+            phase_id: String::new(),
             verifier_id: vid.into(),
             registered_at: ts.into(),
         }

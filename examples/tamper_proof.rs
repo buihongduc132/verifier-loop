@@ -69,6 +69,8 @@ fn main() -> ExitCode {
         let v = verdict::read_verdict(&root, &goal_id, &vid, round).unwrap();
         if v.status == VerdictStatus::Approve {
             matching.push(MatchingVerdict {
+
+                phase_id: String::new(),
                 verifier_id: vid.clone(),
                 registered_at: v.registered_at.clone().unwrap_or_default(),
             });

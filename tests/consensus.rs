@@ -71,15 +71,23 @@ fn pre_create_null(root: &Path, goal_id: &str, vid: &str, round: u32) {
 }
 
 /// Independent canonical-JSON of matching verdicts (mirrors the spec): an array of
-/// objects `{"registeredAt":..,"verifierId":..}` sorted by verifierId, keys alphabetical
-/// (via BTreeMap), no whitespace. This is the audit-side recompute, NOT the impl.
+/// objects `{"phaseId":..,"registeredAt":..,"verifierId":..}` sorted by
+/// (phaseId, verifierId), keys alphabetical (via BTreeMap), no whitespace. This is the
+/// audit-side recompute, NOT the impl. Updated for dynamic-pipeline (LD25): phaseId is
+/// now a hash input.
 fn canonical_matching_json(matching: &[consensus::MatchingVerdict]) -> String {
     let mut sorted: Vec<&consensus::MatchingVerdict> = matching.iter().collect();
-    sorted.sort_by(|a, b| a.verifier_id.cmp(&b.verifier_id));
+    // LD25: sort by (phaseId, verifierId).
+    sorted.sort_by(|a, b| {
+        a.phase_id
+            .cmp(&b.phase_id)
+            .then(a.verifier_id.cmp(&b.verifier_id))
+    });
     let arr: Vec<Value> = sorted
         .iter()
         .map(|m| {
             let mut map = BTreeMap::new();
+            map.insert("phaseId".to_string(), json!(m.phase_id));
             map.insert("registeredAt".to_string(), json!(m.registered_at));
             map.insert("verifierId".to_string(), json!(m.verifier_id));
             serde_json::to_value(&map).unwrap()
@@ -269,10 +277,14 @@ fn matching_verdicts_sorted_by_verifier_id() {
 fn compute_hash_formula_matches_spec_recompute() {
     let matching = vec![
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v1".into(),
             registered_at: "2026-07-03T10:00:00Z".into(),
         },
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v2".into(),
             registered_at: "2026-07-03T10:01:00Z".into(),
         },
@@ -309,6 +321,8 @@ fn compute_hash_formula_matches_spec_recompute() {
 #[test]
 fn compute_hash_deterministic_identical_inputs() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
@@ -327,6 +341,8 @@ fn compute_hash_deterministic_identical_inputs() {
 
     // Stable regardless of the order matching was assembled (sorting is impl's job).
     let matching_rev = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
@@ -345,6 +361,8 @@ fn compute_hash_deterministic_identical_inputs() {
 #[test]
 fn compute_hash_short_form_is_mmddyy_dash_8hex() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
@@ -369,6 +387,8 @@ fn compute_hash_short_form_is_mmddyy_dash_8hex() {
 #[test]
 fn compute_hash_full_digest_is_64_lowercase_hex() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
@@ -387,6 +407,8 @@ fn compute_hash_mmddyy_tracks_matched_at_not_created_at() {
     // Same inputs except matchedAt differs across two runs: short hash prefix (mmddyy)
     // must change, full digest must also change.
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
@@ -417,6 +439,8 @@ fn tamper_goal_text_invalidates_both_short_and_full_digest() {
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
 
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
@@ -476,6 +500,8 @@ fn tamper_verdict_notes_invalidates_full_digest() {
     // Hash from the registered APPROVE verdict.
     let v = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: v.registered_at.clone().unwrap(),
     }];
@@ -505,6 +531,8 @@ fn tamper_verdict_notes_invalidates_full_digest() {
 
     let v2 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
     let matching2 = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: v2.registered_at.clone().unwrap(),
     }];
@@ -646,10 +674,14 @@ fn audit_recompute_matches_stored_hash() {
     let vb = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
     let audit_matching = vec![
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v1".into(),
             registered_at: va.registered_at.unwrap(),
         },
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v2".into(),
             registered_at: vb.registered_at.unwrap(),
         },
@@ -1071,10 +1103,14 @@ fn compute_hash_differs_when_receipt_head_differs() {
     // Identical matching verdicts + matched_at, but different heads.
     let matching = vec![
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v1".into(),
             registered_at: SIGNED_TS.into(),
         },
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v2".into(),
             registered_at: SIGNED_TS.into(),
         },
@@ -1109,6 +1145,8 @@ fn compute_hash_differs_when_receipt_head_differs() {
 #[test]
 fn compute_hash_same_when_receipt_head_same() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: SIGNED_TS.into(),
     }];
@@ -1144,6 +1182,8 @@ fn compute_hash_empty_receipt_head_for_fresh_goal() {
     );
 
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: SIGNED_TS.into(),
     }];
@@ -1191,10 +1231,14 @@ fn closed_loop_hash_includes_receipt_head() {
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
     let matching = vec![
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v1".into(),
             registered_at: SIGNED_TS.into(),
         },
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v2".into(),
             registered_at: SIGNED_TS.into(),
         },

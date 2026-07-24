@@ -65,6 +65,8 @@ fn completion_hash_byte_identical_with_different_trace_id() {
     use verifier_loop::consensus::{compute_hash, MatchingVerdict};
 
     let matching = vec![MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-12T10:00:00Z".into(),
     }];

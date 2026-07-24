@@ -449,6 +449,8 @@ fn hash_recomputes_and_tamper_breaks_it() {
         .unwrap()
         .iter()
         .map(|v| verifier_loop::consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: v["verifierId"].as_str().unwrap().to_string(),
             registered_at: v["registeredAt"].as_str().unwrap().to_string(),
         })

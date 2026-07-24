@@ -63,3 +63,4 @@ target
 
 # bench harness per-run output
 scripts/bench/runs/
+.pi-subagents/
