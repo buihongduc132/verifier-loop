@@ -133,6 +133,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("resume spawn succeeds");
 
@@ -218,6 +221,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("resume spawn succeeds");
 
@@ -294,6 +300,9 @@ EOF
         config: &cfg,
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }))
     .unwrap();
     // Round 3 (reuse: prior turnsUsed still recorded; SID captured last round).
@@ -305,6 +314,9 @@ EOF
         config: &cfg,
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }))
     .unwrap();
 
@@ -406,6 +418,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("resume spawn succeeds even with null prior sid");
 
@@ -483,6 +498,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("resume spawn succeeds even with empty prior sid");
 

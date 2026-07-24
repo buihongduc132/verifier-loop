@@ -175,6 +175,7 @@ fn config_camel_case_round_trips_verifier_prompt_file_and_min_goal_chars() {
         file_edit_times_max_chars: 8_000,
         context_max_chars: 20_000,
         prompt_budget_bytes: 50_000,
+        ..store::Config::default()
     };
     let j = serde_json::to_string(&cfg).unwrap();
     // camelCase keys must appear verbatim on disk (the on-disk contract).

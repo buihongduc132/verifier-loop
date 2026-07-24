@@ -118,6 +118,9 @@ fn spawn_input<'a>(
         config,
         prompt: "INITIAL PROMPT BODY",
         adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }
 }
 

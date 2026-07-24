@@ -158,6 +158,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn round should not hard-error");
 
@@ -263,6 +266,9 @@ exit 3
             config: &store::Config::load_in(root).unwrap(),
             prompt,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("gather must not panic on a non-zero child exit");
 
@@ -360,6 +366,9 @@ EOF
         config: &store::Config::load_in(root).unwrap(),
         prompt: &prompt,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }));
 
     // (a) The spawn MUST succeed (no E2BIG / "Argument list too long").

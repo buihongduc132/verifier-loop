@@ -106,6 +106,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn round succeeds");
 
@@ -172,6 +175,9 @@ ACP
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }))
     .expect("spawn succeeds");
 
@@ -227,6 +233,9 @@ printf '%s\n' '{{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}}' > "
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }))
     .expect("spawn succeeds");
     let elapsed = start.elapsed();
@@ -275,6 +284,9 @@ sleep 30
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn round still returns (timeout is not a hard error)");
 
@@ -329,6 +341,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn succeeds");
 
@@ -440,6 +455,9 @@ EOF
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }))
     .expect("spawn round succeeds");
 
@@ -494,6 +512,9 @@ EOF
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     }))
     .expect("spawn succeeds");
 
@@ -649,6 +670,8 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
         .expect("matchingVerdicts array")
         .iter()
         .map(|v| consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: v["verifierId"].as_str().unwrap().to_string(),
             registered_at: v["registeredAt"].as_str().unwrap().to_string(),
         })
@@ -688,6 +711,11 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
             .iter()
             .map(|m| {
                 let mut map = std::collections::BTreeMap::new();
+                // dynamic-pipeline (LD25): phaseId IS a hash input now.
+                map.insert(
+                    "phaseId",
+                    serde_json::Value::String(m.phase_id.clone()),
+                );
                 map.insert(
                     "registeredAt",
                     serde_json::Value::String(m.registered_at.clone()),
@@ -799,6 +827,9 @@ EOF
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn succeeds");
 
@@ -852,6 +883,9 @@ exit 1
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn round still returns (crash is not a hard error)");
 
@@ -941,6 +975,9 @@ exit 1
             config: &store::Config::load_in(root).unwrap(),
             prompt: PROMPT,
             adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
         }))
         .expect("spawn round returns");
 

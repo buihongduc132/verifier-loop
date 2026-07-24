@@ -1,0 +1,1 @@
+{"decision_id":"a609b050-bfad-49ce-b590-ee5f525a3057","decision":"deny","source":"opa","command":"git stash pop","rule_ids":["block-git-stash-mutations"],"evaluated_at":"2026-07-24T02:12:54.612Z"}

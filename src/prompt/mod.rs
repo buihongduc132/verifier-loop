@@ -557,11 +557,37 @@ pub fn write_initial_prompt(
 /// Returns an empty string when there are no prior REJECTs (the caller treats empty as a
 /// no-op in [`append_prior_reject_notes`]).
 pub fn collect_prior_reject_notes(root: &Path, goal_id: &str, current_round: u32) -> String {
+    // dynamic-pipeline (OT10/LD18 fix): walk phaseId-ordered history WITHIN
+    // current_round, not just round < current_round. Within one invocation all
+    // sub-phases share current_round, so the old `round < current_round` filter
+    // excluded them — meaning a Confirm-phase verifier never saw the Gate-phase
+    // REJECT notes from the SAME invocation.
+    //
+    // New layout: rounds/<round>/<phaseId>/<vid>/verdict.json
+    //   * round < current_round: include ALL phaseIds (prior invocation).
+    //   * round == current_round: include only phaseIds < current phase (lexical).
+    //   * round > current_round: exclude.
+    // For legacy v0 goals (no phaseId dirs), the old flat layout still works.
+    collect_prior_reject_notes_for_phase(root, goal_id, current_round, None)
+}
+
+/// Phase-aware variant: also restricts WITHIN current_round to phaseIds lexically
+/// less than `current_phase` (so a Confirm verifier sees Gate REJECTs from the same
+/// invocation, but a Gate verifier does not see its own invocation's later phases).
+///
+/// `current_phase = None` means "no phase restriction" (legacy single-phase goals).
+pub fn collect_prior_reject_notes_for_phase(
+    root: &Path,
+    goal_id: &str,
+    current_round: u32,
+    current_phase: Option<&str>,
+) -> String {
     use crate::verdict::{self, VerdictStatus};
     use std::collections::BTreeSet;
 
     let rounds_root = crate::goal::goal_dir(root, goal_id).join(crate::goal::ROUNDS_DIR);
-    let mut entries: Vec<(u32, String, String)> = Vec::new();
+    // (round, phaseId, vid, notes) — deterministic sort key.
+    let mut entries: Vec<(u32, String, String, String)> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
 
     let Ok(round_dirs) = fs::read_dir(&rounds_root) else {
@@ -573,24 +599,88 @@ pub fn collect_prior_reject_notes(root: &Path, goal_id: &str, current_round: u32
         let Ok(round) = name_str.parse::<u32>() else {
             continue;
         };
-        if round >= current_round {
-            continue; // exclude the current (and any future) round
+        if round > current_round {
+            continue;
         }
-        // Each round dir contains per-verifier slot dirs (v1, v2, ...).
-        let Ok(slot_dirs) = fs::read_dir(entry.path()) else {
+        let same_round = round == current_round;
+        // Each round dir now contains phaseId dirs (1a, 1b, ...). Legacy v0 goals
+        // have flat vid dirs directly under the round (no phaseId axis).
+        let Ok(child_dirs) = fs::read_dir(entry.path()) else {
             continue;
         };
-        for slot in slot_dirs.flatten() {
-            let vid = slot.file_name();
-            let Some(vid_str) = vid.to_str() else {
+        // Detect layout: peek first child; if it parses as u32 it's a legacy vid
+        // index OR a phaseId. phaseIds are letter-suffixed ("1a"), legacy vids
+        // are "v1"-style. We try the phaseId layout first; if the child dir itself
+        // contains verdict.json, it's the legacy flat layout.
+        let children: Vec<_> = child_dirs.flatten().collect();
+        for child in &children {
+            let child_name = child.file_name();
+            let Some(child_str) = child_name.to_str() else { continue };
+            let child_path = child.path();
+            // Legacy flat layout: rounds/<round>/<vid>/verdict.json
+            if child_path.join(verdict::VERDICT_FILE).exists() {
+                if same_round {
+                    continue; // current-round legacy slot not yet "prior"
+                }
+                if let Ok(rec) = verdict::read_verdict(root, goal_id, child_str, round) {
+                    if rec.status == VerdictStatus::Reject {
+                        if let Some(notes) = rec.notes.as_deref() {
+                            let notes = notes.trim();
+                            if !notes.is_empty() && seen.insert(notes.to_string()) {
+                                entries.push((
+                                    round,
+                                    String::new(), // legacy: no phaseId
+                                    child_str.to_string(),
+                                    notes.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            // dynamic-pipeline layout: rounds/<round>/<phaseId>/<vid>/verdict.json
+            // child_str is a phaseId like "1a".
+            if same_round {
+                if let Some(cp) = current_phase {
+                    if child_str >= cp {
+                        // Skip the current + later phases within the same round.
+                        continue;
+                    }
+                } else {
+                    // No phase context supplied for a current-round walk → skip
+                    // (we don't know which phase is "current").
+                    continue;
+                }
+            }
+            let Ok(vid_dirs) = fs::read_dir(&child_path) else {
                 continue;
             };
-            if let Ok(rec) = verdict::read_verdict(root, goal_id, vid_str, round) {
+            for vid_entry in vid_dirs.flatten() {
+                let vid = vid_entry.file_name();
+                let Some(vid_str) = vid.to_str() else { continue };
+                // read_verdict still uses the legacy flat path; for phaseId layout
+                // we read directly from the vid dir.
+                let vpath = vid_entry.path().join(verdict::VERDICT_FILE);
+                if !vpath.exists() {
+                    continue;
+                }
+                let Ok(raw) = fs::read_to_string(&vpath) else {
+                    continue;
+                };
+                let Ok(rec) = serde_json::from_str::<verdict::VerdictRecord>(&raw) else {
+                    continue;
+                };
                 if rec.status == VerdictStatus::Reject {
                     if let Some(notes) = rec.notes.as_deref() {
                         let notes = notes.trim();
                         if !notes.is_empty() && seen.insert(notes.to_string()) {
-                            entries.push((round, vid_str.to_string(), notes.to_string()));
+                            entries.push((
+                                round,
+                                child_str.to_string(),
+                                vid_str.to_string(),
+                                notes.to_string(),
+                            ));
                         }
                     }
                 }
@@ -601,11 +691,19 @@ pub fn collect_prior_reject_notes(root: &Path, goal_id: &str, current_round: u32
     if entries.is_empty() {
         return String::new();
     }
-    // Deterministic order: by round, then verifier id.
-    entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    // Deterministic order: round, then phaseId (alphabetical), then verifier id.
+    entries.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
     let mut out = String::new();
-    for (round, vid, notes) in entries {
-        out.push_str(&format!("round {round} {vid}: {notes}\n"));
+    for (round, phase, vid, notes) in entries {
+        if phase.is_empty() {
+            out.push_str(&format!("round {round} {vid}: {notes}\n"));
+        } else {
+            out.push_str(&format!("round {round} {phase} {vid}: {notes}\n"));
+        }
     }
     out
 }

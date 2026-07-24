@@ -66,10 +66,64 @@ pub struct SignatureRecord {
 const SIG_ALGO: &str = "SHA256(salt+goalText+createdAt)";
 
 /// Per-goal state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// dynamic-pipeline extension (LD17, LD18, LD4, LD25, LD26): gains four fields.
+///   * `current_phase` — letter-suffixed sub-phase id ("1a", ...) or `None` for legacy
+///     v0 goals.
+///   * `esca_count` — consecutive Gate-pass/Confirm-reject counter (LD4).
+///   * `escalation_depth` — count of completed PL-E cycles (LD25).
+///   * `verifier_id_version` — `0` = legacy `v{i+1}`, `1` = d/s scheme (LD26).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StateRecord {
     pub current_round: u32,
+    /// dynamic-pipeline: current sub-phase id within the round (`None` for legacy v0).
+    #[serde(default)]
+    pub current_phase: Option<String>,
+    /// dynamic-pipeline: consecutive Gate-pass/Confirm-reject counter (LD4).
+    #[serde(default)]
+    pub esca_count: u32,
+    /// dynamic-pipeline: count of completed PL-E cycles (LD25).
+    #[serde(default)]
+    pub escalation_depth: u32,
+    /// dynamic-pipeline: verifier-id scheme version (0 = legacy, 1 = d/s) (LD26).
+    #[serde(default)]
+    pub verifier_id_version: u8,
+}
+
+impl Default for StateRecord {
+    fn default() -> Self {
+        Self {
+            current_round: 1,
+            current_phase: None,
+            esca_count: 0,
+            escalation_depth: 0,
+            verifier_id_version: 1, // new goals default to the d/s scheme
+        }
+    }
+}
+
+/// Env var propagated to every V* child carrying the current sub-phase id (LD17).
+/// Lets `jewije` verdict registrations tag themselves with their spawning phase.
+pub const PHASE_ENV_VAR: &str = "VERIFIER_LOOP_PHASE";
+
+/// Compute the slot directory for one verifier in one sub-phase (dynamic-pipeline LD17).
+///
+/// `<root>/goals/<goalId>/rounds/<round>/<phaseId>/<vid>/`
+///
+/// For legacy v0 goals, pass a sentinel `phase_id` (e.g. `"0"`).
+pub fn slot_dir(
+    root: impl AsRef<Path>,
+    goal_id: &str,
+    round: u32,
+    phase_id: &str,
+    vid: &str,
+) -> PathBuf {
+    goal_dir(root.as_ref(), goal_id)
+        .join(ROUNDS_DIR)
+        .join(round.to_string())
+        .join(phase_id)
+        .join(vid)
 }
 
 /// Compute the directory for a goal.
@@ -126,7 +180,7 @@ pub fn new(root: &Path, goal_text: &str, context: Option<&str>) -> Result<String
     )?;
 
     // Write state.json (current round = 1).
-    let state = StateRecord { current_round: 1 };
+    let state = StateRecord::default();
     fs::write(gdir.join(STATE_FILE), serde_json::to_string_pretty(&state)?)?;
 
     Ok(goal_id)
@@ -145,7 +199,7 @@ pub fn resume(root: &Path, goal_id: &str, fix_notes: Option<&str>) -> Result<u32
     let mut state: StateRecord = if state_path.exists() {
         serde_json::from_str(&fs::read_to_string(&state_path)?)?
     } else {
-        StateRecord { current_round: 1 }
+        StateRecord::default()
     };
     state.current_round = state.current_round.saturating_add(1);
     let round = state.current_round;

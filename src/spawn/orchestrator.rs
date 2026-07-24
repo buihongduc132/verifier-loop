@@ -111,6 +111,15 @@ pub struct SpawnInput<'a> {
     pub config: &'a store::Config,
     pub prompt: &'a str,
     pub adapter: &'a acp::Adapter,
+    /// dynamic-pipeline: override verifier count (defaults to config.m). Used per-phase
+    /// to spawn confirmCount (Confirm) or floor/ceil(m/2) (Mixed) verifiers.
+    pub verifier_count: Option<usize>,
+    /// dynamic-pipeline: override verifier id prefix (defaults to "v"). "d" for dump
+    /// phases, "s" for smart phases (LD16).
+    pub id_prefix: Option<&'a str>,
+    /// dynamic-pipeline: starting index for verifier ids (defaults to 0). Monotonic
+    /// continuation so Mixed dump starts at m+1 (LD26).
+    pub id_offset: usize,
 }
 
 /// A completed verifier run (after the gather barrier).
@@ -481,8 +490,11 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
     // it is held in the plan / children vec so the tempfile lives until the gather
     // barrier reaps the child (design D3 — unlink after the child has opened the file).
     let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>)> = Vec::new();
-    for i in 0..input.config.m as usize {
-        let vid = verifier_id(i);
+    let count = input.verifier_count.unwrap_or(input.config.m as usize);
+    let prefix = input.id_prefix.unwrap_or("v");
+    let offset = input.id_offset;
+    for i in 0..count {
+        let vid = format!("{}{}", prefix, offset + i + 1);
         let vdir = rounds_dir.join(&vid);
         fs::create_dir_all(&vdir)?;
         pre_create_verifier_dir(&vdir);
@@ -565,8 +577,11 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
     let trace_id = crate::observe::ensure_goal_trace_id(input.root, input.goal_id).ok();
 
     let mut plan: Vec<(String, Command, PathBuf, Option<TempPromptFile>)> = Vec::new();
-    for i in 0..input.config.m as usize {
-        let vid = verifier_id(i);
+    let count = input.verifier_count.unwrap_or(input.config.m as usize);
+    let prefix = input.id_prefix.unwrap_or("v");
+    let offset = input.id_offset;
+    for i in 0..count {
+        let vid = format!("{}{}", prefix, offset + i + 1);
         let vdir = rounds_dir.join(&vid);
         fs::create_dir_all(&vdir)?;
 

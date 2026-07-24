@@ -8,6 +8,7 @@
 //! Implementation lives in [`orchestrator`]; this module re-exports the public surface.
 
 mod orchestrator;
+mod ids;
 mod tempfile;
 
 pub use orchestrator::{
@@ -16,3 +17,7 @@ pub use orchestrator::{
     STDERR_CAP_BYTES, STDERR_FILE, VERDICT_FILE,
 };
 pub use tempfile::{sweep_stale_tempfiles, TempPromptFile, SWEEP_MIN_AGE_SECS};
+pub use ids::{
+    role_from_verifier_id, verifier_id, verifier_id_legacy, verifier_id_role,
+    verifier_ids_for_phase, verifier_ids_for_phase_role,
+};

@@ -33,6 +33,7 @@ pub mod goal;
 pub mod health;
 pub mod observe;
 pub mod prompt;
+pub mod pipeline;
 pub mod receipt;
 pub mod round_recover;
 pub mod spawn;

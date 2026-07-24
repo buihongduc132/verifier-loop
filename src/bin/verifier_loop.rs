@@ -537,6 +537,394 @@ impl RoundKind {
     }
 }
 
+/// Detect whether the dynamic pipeline should activate for this config.
+/// True when dumpAdapter OR smartAdapter is explicitly set (the user opted into
+/// the dynamic pipeline). Legacy configs with only `backend` → false (legacy path).
+fn is_dynamic_config(config: &verifier_loop::store::Config) -> bool {
+    config.dump_adapter.is_some() || config.smart_adapter.is_some()
+}
+
+/// dynamic-pipeline T8: run a full PL-D or PL-E pipeline in one invocation.
+///
+/// Picks the pipeline based on esca state (LD4), then loops over phases:
+/// spawn → gather → evaluate per phase, short-circuiting on reject (LD13).
+/// Each phase spawns with role-prefixed ids (d1.. for dump, s1.. for smart) so
+/// verdicts never collide across phases within the same round.
+///
+/// On full pass: computes the hash over the UNION of all matching verdicts across
+/// all phases, writes completion.json with `pipeline` + `escalationDepth` metadata,
+/// and updates esca state in state.json.
+///
+/// On any phase reject: updates esca state (LD4 rules) and exits non-zero with the
+/// `<phases>/<m>` output format showing which phases approved.
+fn run_dynamic_round(
+    root: &Path,
+    config: &verifier_loop::store::Config,
+    goal_id: &str,
+    round: u32,
+    fix_notes: Option<&str>,
+    kind: RoundKind,
+    prepend: Option<&str>,
+    output: &Output,
+) -> Outcome {
+    use verifier_loop::pipeline::{self, esca, PhaseRole};
+
+    let command = kind.command();
+    let fail = |msg: String| -> Outcome {
+        emit_error(output, command, Some(goal_id), Some(round), &msg)
+    };
+    let trace_id = verifier_loop::observe::ensure_goal_trace_id(root, goal_id).ok();
+
+    // Cooldown check (same as legacy).
+    if health::in_cooldown(root, Utc::now()) {
+        let fb = health::fallback_hash();
+        eprintln!("cooldown: returning fallback hash {fb}");
+        let env = envelope(command, true)
+            .with_goal(goal_id)
+            .with_round(round)
+            .with_status("cooldown-fallback")
+            .with_hash(&fb);
+        print_success(output, env, &fb);
+        return Outcome::Success;
+    }
+
+    let record = match verifier_loop::goal::load(root, goal_id) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("goal load: {e}")),
+    };
+
+    // Read esca state from state.json.
+    let gdir = verifier_loop::goal::goal_dir(root, goal_id);
+    let state_path = gdir.join(verifier_loop::goal::STATE_FILE);
+    let mut state: verifier_loop::goal::StateRecord = if state_path.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap_or_default())
+            .unwrap_or_default()
+    } else {
+        verifier_loop::goal::StateRecord::default()
+    };
+
+    // Pick pipeline.
+    let use_escalation = esca::should_run_escalation(
+        config,
+        esca::EscaState::new(state.esca_count, state.escalation_depth),
+    );
+    let phases = if use_escalation {
+        pipeline::escalation_pipeline(config)
+    } else {
+        pipeline::default_pipeline(config)
+    };
+    let pipeline_tag = if use_escalation { "PL-E" } else { "PL-D" };
+
+    let _ = verifier_loop::observe::append_trace_event(
+        root, goal_id, "info", "jewilo.pipeline.start",
+        serde_json::json!({ "pipeline": pipeline_tag, "round": round, "phases": phases.len() }),
+    );
+
+    // Snapshot + prompt render (shared across phases — same frozen diff).
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("cwd: {e}")),
+    };
+    let snapshot = match verifier_loop::prompt::capture_snapshot_with(
+        &cwd, config.git_diff_max_chars, config.file_edit_times_max_chars,
+    ) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("snapshot capture failed: {e}")),
+    };
+    let context_capped: Option<String> = record
+        .context
+        .as_deref()
+        .map(|c| verifier_loop::prompt::cap_context(c, config.context_max_chars).0);
+    let effective_goal_text = match verifier_loop::goal::load_notes(root, goal_id) {
+        Ok(notes) if !notes.is_empty() => {
+            let mut s = record.goal_text.clone();
+            for n in &notes { s.push('\n'); s.push_str(n); }
+            s
+        }
+        _ => record.goal_text.clone(),
+    };
+
+    let dump_adapter_name = config.resolve_dump_adapter();
+    let smart_adapter_name = config.resolve_smart_adapter();
+    let dump_adapter = match verifier_loop::acp::adapter_for(&dump_adapter_name) {
+        Ok(a) => a,
+        Err(_) => match resolve_adapter_from(&dump_adapter_name) {
+            Ok(a) => a,
+            Err(msg) => return fail(msg),
+        }
+    };
+    let smart_adapter = match verifier_loop::acp::adapter_for(&smart_adapter_name) {
+        Ok(a) => a,
+        Err(_) => match resolve_adapter_from(&smart_adapter_name) {
+            Ok(a) => a,
+            Err(msg) => return fail(msg),
+        }
+    };
+
+    // Run phases sequentially.
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => return fail(format!("runtime: {e}")),
+    };
+
+    let mut all_matching: Vec<verifier_loop::consensus::MatchingVerdict> = Vec::new();
+    let mut phase_approve_counts: Vec<u32> = Vec::new();
+    let mut rejected = false;
+    let mut rejection_msg = String::new();
+    // Track id offsets for monotonic continuation (LD26).
+    let mut dump_offset: usize = 0;
+    let mut smart_offset: usize = 0;
+
+    for phase in &phases {
+        let phase_id = phase.id.as_str();
+        let phase_role = phase.role;
+
+        // Render the prompt for this phase (same content, but collect prior notes
+        // including earlier phases of THIS invocation via the phaseId walk).
+        let prior_notes = verifier_loop::prompt::collect_prior_reject_notes_for_phase(
+            root, goal_id, round, Some(phase_id),
+        );
+        // Use a simple v1 verifier id for the prompt render (identity is conveyed via env).
+        let vars = verifier_loop::prompt::PromptVars {
+            goal_id, verifier_id: "v1", round,
+            prev_round: prev_round_of(round, kind),
+            goal_text: &effective_goal_text,
+            context: context_capped.as_deref(), fix_notes,
+            prev_notes: None,
+            cwd: &snapshot.cwd, git_status: &snapshot.git_status,
+            file_edit_times: &snapshot.file_edit_times,
+            git_diff: &snapshot.git_diff,
+            git_diff_max_chars: snapshot.git_diff_max_chars,
+            truncated: snapshot.truncated,
+        };
+        let rendered = match (kind, prepend.is_some()) {
+            (RoundKind::New, false) => verifier_loop::prompt::render(None, &vars),
+            (RoundKind::New, true) => verifier_loop::prompt::render(
+                Some(verifier_loop::prompt::default_template_no_policy()), &vars),
+            (RoundKind::Resume, false) => verifier_loop::prompt::render_resume(None, &vars),
+            (RoundKind::Resume, true) => verifier_loop::prompt::render_resume(
+                Some(verifier_loop::prompt::default_resume_template_no_policy()), &vars),
+        };
+        let rendered = match rendered {
+            Ok(r) => r,
+            Err(e) => return fail(format!("prompt render failed: {e}")),
+        };
+        let rendered = verifier_loop::prompt::prepend_custom(rendered, prepend);
+        let rendered = verifier_loop::prompt::append_prior_reject_notes(&rendered, &prior_notes);
+
+        // Spawn: dump slots then smart slots (two batches if Mixed).
+        let mut phase_verdicts: Vec<(String, verifier_loop::verdict::VerdictRecord)> = Vec::new();
+
+        if phase.dump_count > 0 {
+            let input = verifier_loop::spawn::SpawnInput {
+                root, goal_id, round, config, prompt: &rendered, adapter: &dump_adapter,
+                verifier_count: Some(phase.dump_count as usize),
+                id_prefix: Some("d"),
+                id_offset: dump_offset,
+            };
+            let runs = match rt.block_on(async {
+                match kind {
+                    RoundKind::New => verifier_loop::spawn::spawn_round(input).await,
+                    RoundKind::Resume => verifier_loop::spawn::spawn_resume(input).await,
+                }
+            }) {
+                Ok(r) => r,
+                Err(e) => return fail(format!("dump spawn failed: {e}")),
+            };
+            dump_offset += phase.dump_count as usize;
+            for run in &runs {
+                let rec = match verifier_loop::verdict::read_verdict(root, goal_id, &run.verifier_id, round) {
+                    Ok(r) => r,
+                    Err(e) => return fail(format!("verdict read {}: {e}", run.verifier_id)),
+                };
+                phase_verdicts.push((run.verifier_id.clone(), rec));
+            }
+        }
+        if phase.smart_count > 0 {
+            let input = verifier_loop::spawn::SpawnInput {
+                root, goal_id, round, config, prompt: &rendered, adapter: &smart_adapter,
+                verifier_count: Some(phase.smart_count as usize),
+                id_prefix: Some("s"),
+                id_offset: smart_offset,
+            };
+            let runs = match rt.block_on(async {
+                match kind {
+                    RoundKind::New => verifier_loop::spawn::spawn_round(input).await,
+                    RoundKind::Resume => verifier_loop::spawn::spawn_resume(input).await,
+                }
+            }) {
+                Ok(r) => r,
+                Err(e) => return fail(format!("smart spawn failed: {e}")),
+            };
+            smart_offset += phase.smart_count as usize;
+            for run in &runs {
+                let rec = match verifier_loop::verdict::read_verdict(root, goal_id, &run.verifier_id, round) {
+                    Ok(r) => r,
+                    Err(e) => return fail(format!("verdict read {}: {e}", run.verifier_id)),
+                };
+                phase_verdicts.push((run.verifier_id.clone(), rec));
+            }
+        }
+
+        // Evaluate this phase.
+        let result = verifier_loop::consensus::evaluate(
+            root, goal_id, round, &phase_verdicts, phase.threshold,
+            phase.dump_count + phase.smart_count,
+        );
+        phase_approve_counts.push(result.approve_count);
+
+        if !result.passed {
+            rejected = true;
+            rejection_msg = format_rejection(&result.rejection);
+            break;
+        }
+        // Stamp matching verdicts with this phase's id for the hash.
+        for mv in &result.matching_verdicts {
+            let mut mv = mv.clone();
+            mv.phase_id = phase_id.to_string();
+            all_matching.push(mv);
+        }
+    }
+
+    // Build output format: <phaseApproves>+.../m
+    let output_fmt = format!(
+        "{}/{}",
+        phase_approve_counts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("+"),
+        config.m
+    );
+
+    // Update esca state.
+    let outcome = if rejected {
+        if use_escalation {
+            // Determine which phase rejected for the outcome enum.
+            if phase_approve_counts.len() == 1 {
+                esca::InvocationOutcome::PlEMixedReject
+            } else {
+                esca::InvocationOutcome::PlEFinalReject
+            }
+        } else {
+            if phase_approve_counts.len() == 1 {
+                esca::InvocationOutcome::PlDGateReject
+            } else {
+                esca::InvocationOutcome::PlDConfirmReject
+            }
+        }
+    } else if use_escalation {
+        esca::InvocationOutcome::PlEApprove
+    } else {
+        esca::InvocationOutcome::PlDApprove
+    };
+    let esca_state = esca::EscaState::new(state.esca_count, state.escalation_depth);
+    let new_esca = esca::apply_outcome(config, esca_state, outcome);
+    state.esca_count = new_esca.esca_count;
+    state.escalation_depth = new_esca.escalation_depth;
+    let _ = std::fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+
+    if rejected {
+        let _ = verifier_loop::observe::append_trace_event(
+            root, goal_id, "warn", "jewilo.pipeline.rejected",
+            serde_json::json!({ "pipeline": pipeline_tag, "output": output_fmt, "rejection": rejection_msg }),
+        );
+        eprintln!("pipeline {pipeline_tag} did not reach {output_fmt} consensus");
+        eprintln!("  {rejection_msg}");
+        let env = envelope(command, true)
+            .with_goal(goal_id).with_round(round)
+            .with_status("rejected");
+        if matches!(output, Output::Human) {
+            println!("{output_fmt}");
+        }
+        return Outcome::Failure;
+    }
+
+    // All phases passed → compute hash over union of matching verdicts.
+    let salt = match verifier_loop::store::salt_in(root) {
+        Ok(s) => s,
+        Err(e) => return fail(format!("salt: {e}")),
+    };
+    let sig_record: verifier_loop::goal::SignatureRecord = {
+        let raw = match std::fs::read_to_string(gdir.join(verifier_loop::goal::SIGNATURE_FILE)) {
+            Ok(s) => s,
+            Err(e) => return fail(format!("signature read: {e}")),
+        };
+        match serde_json::from_str(&raw) {
+            Ok(r) => r,
+            Err(e) => return fail(format!("signature parse: {e}")),
+        }
+    };
+    let matched_at = Utc::now().to_rfc3339();
+    let receipt_head = verifier_loop::receipt::read_receipt_head(root, goal_id);
+    let hash = verifier_loop::consensus::compute_hash(
+        &salt, goal_id, &sig_record.signature, round, &all_matching, &matched_at, &receipt_head,
+    );
+
+    // Write completion with pipeline metadata.
+    if let Err(e) = verifier_loop::consensus::write_completion(
+        root, goal_id,
+        &verifier_loop::consensus::ConsensusResult {
+            passed: true, approve_count: all_matching.len() as u32,
+            n: config.n, m: config.m,
+            matching_verdicts: all_matching.clone(),
+            rejection: Default::default(),
+        },
+        round, &hash, &matched_at,
+        verifier_loop::observe::ensure_goal_trace_id(root, goal_id).ok().as_deref(),
+    ) {
+        return fail(format!("completion write: {e}"));
+    }
+
+    // Patch completion.json with pipeline + escalationDepth.
+    let comp_path = gdir.join(verifier_loop::consensus::COMPLETION_FILE);
+    if let Ok(raw) = std::fs::read_to_string(&comp_path) {
+        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("pipeline".into(), serde_json::json!(pipeline_tag));
+                obj.insert("escalationDepth".into(), serde_json::json!(state.escalation_depth));
+            }
+            let _ = std::fs::write(&comp_path, serde_json::to_string_pretty(&v).unwrap_or_default());
+        }
+    }
+
+    let _ = verifier_loop::observe::append_trace_event(
+        root, goal_id, "info", "jewilo.pipeline.passed",
+        serde_json::json!({ "pipeline": pipeline_tag, "output": output_fmt, "hash": hash.short_hash() }),
+    );
+
+    let env = envelope(command, true)
+        .with_goal(goal_id).with_round(round)
+        .with_status("consensus-pass");
+    print_success(output, env, hash.short_hash());
+        eprintln!("pipeline {pipeline_tag} {output_fmt} → APPROVE {}", hash.short_hash());
+    Outcome::Success
+}
+
+/// Resolve an adapter from env override (stub/custom command). Extracted from
+/// resolve_adapter so dynamic_round can resolve dump + smart independently.
+fn resolve_adapter_from(name: &str) -> Result<verifier_loop::acp::Adapter, String> {
+    if let Ok(a) = verifier_loop::acp::adapter_for(name) {
+        return Ok(a);
+    }
+    let spawn_cmd = std::env::var("VERIFIER_LOOP_BACKEND_CMD")
+        .or_else(|_| std::env::var("VERIFIER_LOOP_SPAWN_CMD"))
+        .map_err(|_| format!("unknown backend '{name}'"))?;
+    let resume_cmd = std::env::var("VERIFIER_LOOP_RESUME_CMD").unwrap_or_else(|_| spawn_cmd.clone());
+    Ok(verifier_loop::acp::Adapter::custom(spawn_cmd, resume_cmd))
+}
+
+/// Format a Rejection into a human-readable string.
+fn format_rejection(rej: &verifier_loop::consensus::Rejection) -> String {
+    let mut parts = Vec::new();
+    for (vid, notes) in &rej.reject_notes {
+        parts.push(format!("{vid} REJECT: {notes}"));
+    }
+    for vid in &rej.null_verifiers {
+        parts.push(format!("{vid}: did not register a verdict"));
+    }
+    for (vid, reason) in &rej.signature_failures {
+        parts.push(format!("{vid}: signature failure — {reason}"));
+    }
+    parts.join("\n  ")
+}
+
 /// Shared round driver: snapshot → render → spawn → gather → evaluate → hash/reject.
 fn run_round(
     root: &Path,
@@ -548,6 +936,12 @@ fn run_round(
     prepend: Option<&str>,
     output: &Output,
 ) -> Outcome {
+    // dynamic-pipeline T8: dispatch to the pipeline executor when dynamic config is
+    // active (dumpAdapter/smartAdapter set). Legacy configs fall through to the
+    // single-phase path below.
+    if is_dynamic_config(config) {
+        return run_dynamic_round(root, config, goal_id, round, fix_notes, kind, prepend, output);
+    }
     let command = kind.command();
     let fail = |msg: String| -> Outcome {
         emit_error(output, command, Some(goal_id), Some(round), &msg)
@@ -761,6 +1155,9 @@ fn run_round(
         config,
         prompt: &prompt,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
     };
     let runs = match rt.block_on(async {
         let _spawn_span = tracing::info_span!("jewilo.spawn", m = config.m).entered();
