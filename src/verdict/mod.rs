@@ -536,7 +536,7 @@ pub fn register_signed_approve(root: &Path, goal_id: &str, verifier_id: &str, ro
         round,
         phase_id,
         secret,
-    )?;;
+    )?;
     write_first_verdict(root, goal_id, verifier_id, round, phase_id, &record)?;
     // Hash-chained receipt append (receipt-log spec): every successful signed write
     // extends the per-goal chain. Fail-closed if the receipt append itself fails —
@@ -568,7 +568,7 @@ pub fn register_signed_reject(root: &Path, goal_id: &str, verifier_id: &str, rou
         round,
         phase_id,
         secret,
-    )?;;
+    )?;
     write_first_verdict(root, goal_id, verifier_id, round, phase_id, &record)?;
     append_receipt_for_signed_write(
         root,
