@@ -69,6 +69,10 @@ fn append_trace_event_appends_not_truncates() {
 
 #[test]
 fn append_trace_event_with_trace_id_records_it() {
+    // Env-isolation: VERIFIER_LOOP_TRACE_ID may leak from a parent jewilo process.
+    // This test asserts the traceId comes from the persisted trace-id file, NOT
+    // from the env, so we must explicitly clear the env var.
+    unsafe { std::env::remove_var("VERIFIER_LOOP_TRACE_ID"); }
     let store = tempdir().unwrap();
     let goal = "g-tid";
     observe::append_trace_event(store.path(), goal, "info", "e", serde_json::json!({})).unwrap();

@@ -48,6 +48,8 @@ const INHERITED_JEWILO_ENV: &[&str] = &[
     // Trace id is receipt-log metadata; scrubbing it keeps the receipt byte-identity
     // test deterministic across invocations.
     "VERIFIER_LOOP_TRACE_ID",
+    // Phase id leaks from parent jewilo processes running the dynamic-pipeline path.
+    "VERIFIER_LOOP_PHASE",
 ];
 
 /// Build a hermetic `verifier-verdict` Command: resolves the cargo binary AND scrubs

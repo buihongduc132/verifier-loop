@@ -44,6 +44,8 @@ const INHERITED_JEWILO_ENV: &[&str] = &[
     "VERIFIER_LOOP_GOAL_ID",
     "VERIFIER_LOOP_VERIFIER_ID",
     "VERIFIER_LOOP_ROUND",
+    "VERIFIER_LOOP_PHASE",
+    "VERIFIER_LOOP_TRACE_ID",
 ];
 
 /// Build a hermetic `verifier-verdict` Command: resolves the cargo binary AND scrubs
