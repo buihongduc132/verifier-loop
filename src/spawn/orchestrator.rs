@@ -1206,9 +1206,10 @@ fn identity_env_pairs<'a>(
     if let Some(tid) = trace_id {
         pairs.push((crate::observe::ENV_TRACE_ID, tid.into()));
     }
-    if let Some(pid) = phase_id {
-        pairs.push((crate::goal::PHASE_ENV_VAR, pid.into()));
-    }
+    // Always set VERIFIER_LOOP_PHASE explicitly (empty when None) so a leaked
+    // value from a parent process cannot cause jewije to use phaseId-nested
+    // paths when the orchestrator used flat layout (or vice versa).
+    pairs.push((crate::goal::PHASE_ENV_VAR, phase_id.unwrap_or("").into()));
     pairs
 }
 
