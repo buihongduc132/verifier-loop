@@ -1,0 +1,440 @@
+# Open threads — dynamic-round-pipeline explore (2026-07-20)
+#
+# Threads raised during explore that are NOT yet resolved by a user-locked decision.
+# Each traces where raised + current status.
+#
+# Turn file map:
+#   turn1 = 2026-07-20-turn1-initial-proposal.md
+#   turn2 = 2026-07-20-turn2-reframe-dump-smart.md
+#   turn3 = 2026-07-20-turn3-dynamic-generic.md
+#   turn4 = 2026-07-20-turn4-rename-esca.md
+#   turn5 = 2026-07-21-turn5-ot7-collapsed.md
+#
+# Updated 2026-07-20 (findings-resolve-threads):
+#   OT1, OT2 → resolved (superseded by existing user-locked LD4)
+#   OT3, OT4, OT5, OT8 → auto-decided (LD13, LD14, LD15, LD16)
+#   OT7 → resolved (superseded by user-locked LD2; user re-collapsed into ROUND)
+#   OT6 → ESCALATED to user (intent question; user said "not yet")
+#
+# Updated 2026-07-21 (step 20 gotcha-coverage):
+#   OT9-OT22 → 14 composite threads from 4 reviewer sub-agents
+#   56 gotchas total (2×Rank5, 12×Rank4, 19×Rank3, 11×Rank2, 1×Rank1)
+#
+# Updated 2026-07-21 (findings-resolve-threads step 30):
+#   OT9-OT22 → ALL RESOLVED (auto-decided as LD17-LD30)
+#   OT6 → still open (intent question; user must say "yes capture as proposal")
+#   0 blocking-open threads remain. Design fully specified.
+
+status: 'ongoing   # 1 thread open (OT6 — intent question, user deferred "not yet"); 14 gotcha threads
+  resolved'
+threads:
+- id: OT1
+  topic: Drop "Final" sub-phase after Mixed (redundant)?
+  raised_in: turn2
+  status: resolved
+  resolution: superseded by LD4 — user explicitly locked "THEN it still have to have another 'smart' one
+    if 2/2 passed (even with 1 smart 1 dump)". Final is REQUIRED, not droppable. Assistant's drop-Final
+    suggestion overruled.
+  resolved_in: findings-resolve-threads
+  notes: 'Assistant argued Final is redundant because Mixed already contains 1S that voted.
+
+    Adding Final = "smart reviews smart''s review", diminishing returns. Suggested
+
+    dropping Final so DS mode = Mixed 2/2 → APPROVE directly. User did not confirm.
+
+    '
+- id: OT2
+  topic: Auto-escalation (esca counter) vs config-flag mode switching?
+  raised_in: turn2
+  status: resolved
+  resolution: superseded by LD4 — user locked the 2-consecutive-dumpPass-smartReject auto-escalation rule.
+    Auto-escalation via esca counter IS the design. The "config-flag mode" alternative assistant proposed
+    is rejected.
+  resolved_in: findings-resolve-threads
+  notes: 'Assistant suggested making mode a config flag (`"mode": "DD"|"DS"`) instead of
+
+    auto-escalating on 2× consecutive dumpPass-smartReject. Argument: avoids
+
+    cross-RESUME state, symmetric behavior per goal. User''s LD4 specifies the
+
+    auto-escalation rule, so this is in tension — needs resolution. Possible
+
+    compromise: `autoEscalate: true|false` config flag (LD4 behavior when true).
+
+    '
+- id: OT3
+  topic: Confirm/Mixed REJECT → hard reject, or trigger RESUME N+1?
+  raised_in: turn1
+  status: resolved
+  resolution: auto-decided per [LD13] — hard reject for that invocation; A then RESUME N+1.
+  resolved_in: findings-resolve-threads
+  notes: 'Open question from assistant''s initial design questions (#1 veto semantics).
+
+    Affects whether expensive can deadlock a correct goal. Never resolved by user.
+
+    '
+- id: OT4
+  topic: completion.json audit field (mode/pipeline) for receipt completeness?
+  raised_in: turn1
+  status: resolved
+  resolution: auto-decided per [LD14] — add a `pipeline` field (values "PL-D" or "PL-E") as metadata (non-hash
+    input).
+  resolved_in: findings-resolve-threads
+  notes: 'Assistant raised receipt completeness in turn1 (#5). Refined in turn3 to
+
+    `pipeline: "PL-D"|"PL-E"` field. User did not explicitly confirm but did not
+
+    object. Likely safe to include; confirm at proposal time.
+
+    '
+- id: OT5
+  topic: m=1 edge case — disable escalation?
+  raised_in: turn3
+  status: resolved
+  resolution: auto-decided per [LD15] — escaT ignored when m<2; pipeline stays PL-D.
+  resolved_in: findings-resolve-threads
+  notes: 'At m=1, Mixed degenerates (floor(1/2)=0D, ceil(1/2)=1S) → Mixed ≡ Confirm.
+
+    Assistant suggested: require m ≥ 2 for escalation; ignore escaT when m < 2.
+
+    User did not confirm.
+
+    '
+- id: OT6
+  topic: Capture design as OpenSpec proposal?
+  raised_in: turn2
+  status: open
+  resolution_required_from: user
+  reason: 'ESCALATED — not a design decision, a process/intent question. Auto-deciding would
+
+    fabricate user intent (whether to turn explore into a change). Must ask user.
+
+    '
+  notes: 'Assistant offered in turns 2, 3, 4. User has not yet said yes/no. Findings
+
+    persisted before proposal creation.
+
+    '
+- id: OT7
+  topic: Smart visibility — sees dump APPROVE notes, or verifies blind?
+  raised_in: turn1
+  status: resolved
+  resolution: 'superseded by LD2 — user re-collapsed: "each of them is the ROUND, and EACH round will
+    always see the PREVIOUS one". Smart phase IS an ordinary round (LD2), and ordinary rounds already
+    receive prior-round verdict notes via prompt::collect_prior_reject_notes (src/bin/verifier_loop.rs::run_round,
+    ~line 370). So smart automatically sees dump phase''s notes. No new mechanic, no design fork. The
+    reviewer-of-dump vs independent-committee framing was over-engineering — there is only ONE model:
+    rounds chain notes, period.'
+  resolved_in: turn5
+  notes: 'Open question from assistant''s initial design questions (#2 visibility).
+
+    Two threat models: reviewer-of-cheap (smart sees dump notes) vs independent
+
+    committee (blind). Never resolved by user — until turn5, when user pointed out
+
+    LD2 already answers it (smart = round, rounds see prior round, end of story).
+
+    '
+- id: OT8
+  topic: Tamper slot naming for escalation verifiers (v3 vs c1 namespace)?
+  raised_in: turn1
+  status: resolved
+  resolution: auto-decided per [LD16] — role-prefixed verifierIds (d1,d2,… for dump; s1,s2,… for smart).
+  resolved_in: findings-resolve-threads
+  notes: 'Open question from assistant''s initial design questions (#7 tamper).
+
+    Escalation verifier needs pinned pubkey (add-verifier-tamper-hardening).
+
+    Slot naming: extend v1/v2 → v3, or new namespace c1/s1? Never resolved.
+
+    '
+- id: OT9
+  topic: Phase dimension missing from slot path — RECOVER/STATUS/prompt/hash all break
+  raised_in: turn2a
+  status: resolved
+  source: gotcha-coverage
+  severity: 4
+  gotchas:
+  - G-LD3-2
+  - G5.1
+  - G5.4
+  - G7.1
+  - G7.2
+  notes: 'Composite of 5 gotchas across batches 1+2. The slot path rounds/<round>/<vid>/
+
+    has no phase dimension. RECOVER/STATUS assume uniform m slots named v1..vm
+
+    (breaks under d/s + Mixed). Prompt note-collection collides by round. Hash has
+
+    no phase binding. Single highest-leverage fix: add rounds/<round>/<phase>/<vid>/
+
+    + VERIFIER_LOOP_PHASE env + currentPhase in state.json.'
+  resolution: auto-decided per [LD17] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT10
+  topic: Round type u32 vs letter suffix — LD3 naming breaks hash/paths/signatures/env
+  raised_in: turn2a
+  status: resolved
+  source: gotcha-coverage
+  severity: 4
+  gotchas:
+  - G-LD3-1
+  - G-LD2-1
+  - G4-1
+  - G4-2
+  notes: 'Composite of 4 gotchas across batches 1+4. LD3''s letter-suffix naming (1a,1b,1c)
+
+    is NOT cosmetic — round is a load-bearing u32 in hash input, verdict paths,
+
+    signatures, env vars. Additionally, collect_prior_reject_notes parses dirs as u32
+
+    (1a fails silently) and filters round >= current_round (same invocation = same
+
+    current_round). INVALIDATES Turn 5 conclusion that "smart automatically gets dump
+
+    notes, no new mechanic." A note-passing mechanism IS required for within-invocation
+
+    sub-phases. Must decide: keep u32 + separate phase axis, or widen to String.'
+  resolution: auto-decided per [LD18] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT11
+  topic: 'Config schema: deny_unknown_fields + legacy backend vs dual-adapter fields'
+  raised_in: turn2a
+  status: resolved
+  source: gotcha-coverage
+  severity: 4
+  gotchas:
+  - G-LD11-1
+  - G8.1
+  - G8.4
+  notes: 'Composite of 3 gotchas across batches 1+2. Config uses deny_unknown_fields (closed
+
+    key set). Adding dumpAdapter/smartAdapter/confirmCount/escaT must coexist with
+
+    legacy backend field (relationship unspecified). Goal.json snapshots config at NEW —
+
+    snapshot may carry a shape the running binary no longer understands. Pipeline fields
+
+    may or may not be snapshotted (LD8 says "global" but existing pattern snapshots).'
+  resolution: auto-decided per [LD19] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT12
+  topic: SpawnInput carries single adapter — Mixed phase needs per-slot adapter selection
+  raised_in: turn2a
+  status: resolved
+  source: gotcha-coverage
+  severity: 4
+  gotchas:
+  - G-LD11-2
+  notes: 'SpawnInput.adapter is a single borrow. spawn_round/spawn_resume called once per
+
+    round with one adapter for all m slots. Mixed phase has BOTH dump AND smart adapters
+
+    within same spawn call — not expressible without either calling spawn twice or
+
+    extending SpawnInput to adapters:Vec<Adapter>. Must reconcile 3 adapter config
+
+    surfaces: legacy backend, per-slot verifiers[].adapter, proposed dumpAdapter/smartAdapter.'
+  resolution: auto-decided per [LD20] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT13
+  topic: esca counter lifecycle gaps — oscillation, time-bomb, undefined streak, escaT=0
+  raised_in: turn2b
+  status: resolved
+  source: gotcha-coverage
+  severity: 4
+  gotchas:
+  - G4.1
+  - G2
+  - G4.4
+  - G8.3
+  notes: 'Composite of 4 gotchas across batches 2+3. (1) PL-D↔PL-E oscillation loop — no
+
+    cap on total escalation cycles, goal can loop forever. (2) esca time-bomb on m
+
+    bump — esca accumulates while m<2 (ignored but not frozen), bumping m to ≥2
+
+    silently triggers immediate escalation from stale counter. (3) "2 consecutive"
+
+    never defined across phase transitions/RESUMEs. (4) escaT=0 semantics undefined
+
+    (esca >= 0 always true → always-escalate, opposite of "disable").'
+  resolution: auto-decided per [LD21] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT14
+  topic: Mixed unanimity vs threshold n — smart-alone can pass when n < ceil(m/2)
+  raised_in: turn2b
+  status: resolved
+  source: gotcha-coverage
+  severity: 4
+  gotchas:
+  - G4.2
+  - G4.3
+  - G3
+  notes: 'Composite of 3 gotchas across batches 2+3. LD4 says "Mixed unanimous pass" but
+
+    turn3 derives Mixed threshold = n (not unanimity). For n < ceil(m/2), smart alone
+
+    passes Mixed without dump approval — defeats Mixed''s intent. For odd m, dump is
+
+    mathematically unnecessary (advisory-only). Must either lock Mixed threshold = m
+
+    (true unanimity), add dual-threshold (≥1 dump AND ≥1 smart), or document the
+
+    asymmetry.'
+  resolution: auto-decided per [LD22] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT15
+  topic: m not frozen at NEW — receipt non-determinism under config mutation
+  raised_in: turn3a
+  status: resolved
+  source: gotcha-coverage
+  severity: 3
+  gotchas:
+  - G4-batch3
+  - G8.5
+  notes: 'LD9 says Mixed derived from m, LD8 says config is global (mutable). Neither says
+
+    whether m is snapshotted at NEW or re-read each invocation. If re-read, audit
+
+    recompute of old receipt using current config yields different composition → hash
+
+    mismatch. If snapshotted, must explicitly say so. Also: editing escaT mid-goal
+
+    changes escalation threshold — non-monotonic comparison.'
+  resolution: auto-decided per [LD23] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT16
+  topic: GoalLock held for entire multi-phase pipeline — up to 4× verifierTimeoutSec
+  raised_in: turn2b
+  status: resolved
+  source: gotcha-coverage
+  severity: 3
+  gotchas:
+  - G-LD2-2
+  - G5.2
+  notes: 'GoalLock held across all phases in one invocation. Worst case = 4 phases × 1800s
+
+    = 2h exclusive lock. Blocks RECOVER/STATUS probing. Also: cooldown fan-in — dump
+
+    crash in Gate burns cooldown budget, blocks Confirm even if smart backend healthy.
+
+    Mitigation: release/reacquire lock between phases, or document the hold duration.'
+  resolution: auto-decided per [LD24] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT17
+  topic: Hash phase binding — sub-phase identity lost, receipt spanning unverified
+  raised_in: turn2b
+  status: resolved
+  source: gotcha-coverage
+  severity: 3
+  gotchas:
+  - G7.2
+  - G7.3
+  - G7.4
+  - G4-4
+  notes: 'Hash input includes String(roundNumber) but not sub-phase. Two different sub-phase
+
+    orderings yielding same matching-verdict set produce identical hashes. Also:
+
+    receiptHead binding depends on receipt log spanning all sub-phases (assumed not
+
+    verified). Pipeline field PL-D/PL-E doesn''t capture escalation depth. matching_verdicts
+
+    field semantics shift (single-phase → multi-phase) without schema version.'
+  resolution: auto-decided per [LD25] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT18
+  topic: verifierId counter scope + migration — d/s collisions, v→d/s upgrade path
+  raised_in: turn3a
+  status: resolved
+  source: gotcha-coverage
+  severity: 4
+  gotchas:
+  - G1-batch3
+  - G6-batch3
+  - G7-batch3
+  notes: 'LD16 d/s counter scope undefined — per-phase-restart causes d1 collision between
+
+    Gate and Mixed, s1 between Confirm and Final. Breaks "Unique" claim + pubkey
+
+    pinning. Also: role-prefix couples hash to role naming (tension with LD11 rot-proof).
+
+    Migration of existing v-namespace goals unaddressed — in-flight goals with v1/v2
+
+    become orphaned on binary upgrade.'
+  resolution: auto-decided per [LD26] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT19
+  topic: 'Output format: denominator redefinition, phase composition invisible, reject ambiguity'
+  raised_in: turn2b
+  status: resolved
+  source: gotcha-coverage
+  severity: 3
+  gotchas:
+  - G6.1
+  - G6.2
+  - G6.3
+  - G9
+  notes: 'LD6 denominator = n but existing jewilo uses m. Silent contract break. For n<m,
+
+    output sum > denominator (e.g. "4/2" = 200%). Reject-path output ambiguous without
+
+    knowing n. Phase composition (roles/adapters/m) not encoded in output string.
+
+    No machine-readable output mode for scripts.'
+  resolution: auto-decided per [LD27] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT20
+  topic: n>m impossible config + n=0 vacuous pass — no validation
+  raised_in: turn3a
+  status: resolved
+  source: gotcha-coverage
+  severity: 3
+  gotchas:
+  - G5-batch3
+  - G8-batch3
+  - G10
+  - G12
+  notes: 'n>m creates perpetual-REJECT loop (Gate needs more approvals than verifiers).
+
+    n=0 creates vacuous-pass Gate. m=0 produces empty pipeline. No config validation
+
+    for any of these. All degenerate configs silently accepted.'
+  resolution: auto-decided per [LD28] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT21
+  topic: LD1 D/S capability assumption hidden — escalation logic presupposes S ≥ D
+  raised_in: turn2a
+  status: resolved
+  source: gotcha-coverage
+  severity: 2
+  gotchas:
+  - G-LD1-1
+  notes: 'LD1 strips cheap/expensive but keeps dump/smart names implying capability hierarchy.
+
+    Once cost is off the table, what observable property distinguishes D from S?
+
+    LD4''s escalation predicate (dumpPass ∧ smartReject) presupposes S ≥ D in detection
+
+    power. LD1''s wording hides that presupposition.'
+  resolution: auto-decided per [LD29] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30
+- id: OT22
+  topic: esca/escaT naming — typo-prone pair, breaks camelCase convention
+  raised_in: turn2a
+  status: resolved
+  source: gotcha-coverage
+  severity: 2
+  gotchas:
+  - G-LD12-1
+  - G-LD12-2
+  notes: 'esca/escaT differ by one trailing char — typo is silent logic bug. escaT breaks
+
+    existing camelCase config convention (maxTurn, gitDiffMaxChars, verifierTimeoutSec
+
+    all use full words). Existing config fields follow strict camelCase; escaT reads
+
+    as typo.'
+  resolution: auto-decided per [LD30] (findings-resolve-threads step 30)
+  resolved_in: findings-resolve-threads-step30

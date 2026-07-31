@@ -1,0 +1,40 @@
+# Lefthook config — picked up automatically via the global
+# core.hooksPath lefthook bridge delegator. No per-clone install needed.
+#
+# Docs: https://lefthook.dev/configuration/
+#
+# Jobs here run on every `git commit`. Bypass sparingly: `git commit --no-verify`.
+
+pre-commit:
+  parallel: true
+  commands:
+    # Bare-minimum pi boot probe. Proves the pi binary itself boots and answers
+    # a trivial prompt with EVERYTHING optional disabled (extensions, skills,
+    # prompt templates, context files, tools, network, session storage). Catches
+    # a broken pi core before a commit ships that depends on pi (this repo
+    # spawns pi as a verifier backend — if pi cannot answer, every verifier run
+    # is broken). Tunables: SMOKE_PI_MODEL, SMOKE_PI_TIMEOUT.
+    pi-smoke:
+      name: pi bare-minimum smoke
+      tags: smoke pi
+      run: ./scripts/smoke-pi.sh
+      fail_text: |
+        pi smoke probe FAILED — pi could not answer a trivial "say HI" prompt
+        with the bare-minimum config (no extensions/skills/templates/context/tools,
+        offline, no-session). Do NOT bypass with --no-verify unless you are
+        intentionally committing a known-broken pi state.
+        Diagnose:
+          SMOKE_PI_MODEL=<fast-model> SMOKE_PI_TIMEOUT=120 ./scripts/smoke-pi.sh
+        Common causes: bad model routing, missing/rotated provider apiKey,
+        corrupted ~/.pi/agent config that even -ne/-np/-ns/-nc cannot survive.
+
+    # Rust test suite (the repo's own correctness gate). Excludes the known-flaky
+    # stderr-bound test (shell-child pipe EOF race, PR #19; tracking separately).
+    cargo-test:
+      name: cargo test
+      tags: rust test
+      glob: "*.rs"
+      run: cargo test -- --skip chatty_stderr_is_bounded_to_cap
+      fail_text: |
+        cargo test FAILED. Do not bypass with --no-verify unless you are staging
+        work-in-progress and have acknowledged the failing test in the commit message.
