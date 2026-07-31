@@ -567,7 +567,7 @@ fn run_dynamic_round(
     prepend: Option<&str>,
     output: &Output,
 ) -> Outcome {
-    use verifier_loop::pipeline::{self, esca, PhaseRole};
+    use verifier_loop::pipeline::{self, esca};
 
     let command = kind.command();
     let fail = |msg: String| -> Outcome {
@@ -677,7 +677,7 @@ fn run_dynamic_round(
 
     for phase in &phases {
         let phase_id = phase.id.as_str();
-        let phase_role = phase.role;
+        let _phase_role = phase.role;
 
         // Render the prompt for this phase (same content, but collect prior notes
         // including earlier phases of THIS invocation via the phaseId walk).
