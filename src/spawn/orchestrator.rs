@@ -36,12 +36,6 @@ use crate::spawn::tempfile::TempPromptFile;
 use crate::store;
 use crate::verdict;
 
-/// Subdirectory name for a verifier id under a round directory.
-/// Verifier ids are `v1`, `v2`, … `v{m}` (spec: "v1, v2, ...").
-fn verifier_id(idx: usize) -> String {
-    format!("v{}", idx + 1)
-}
-
 /// `verdict.json` written at spawn time — pre-created as `{status:null}` (D9).
 pub const VERDICT_FILE: &str = "verdict.json";
 /// `meta.json` written at spawn time — `{sid, turnsUsed}` (spec).
@@ -1247,8 +1241,10 @@ mod tests {
 
     #[test]
     fn verifier_ids_are_one_indexed_v_prefix() {
-        assert_eq!(verifier_id(0), "v1");
-        assert_eq!(verifier_id(2), "v3");
+        // The canonical id builders live in spawn::ids; this asserts the legacy
+        // one-indexed v-prefix shape that orchestrator still relies on for slot paths.
+        assert_eq!(crate::spawn::ids::verifier_id_legacy(0), "v1");
+        assert_eq!(crate::spawn::ids::verifier_id_legacy(2), "v3");
     }
 
     #[test]

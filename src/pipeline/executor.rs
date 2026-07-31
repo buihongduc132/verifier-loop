@@ -69,7 +69,7 @@ pub struct PipelineResult {
 /// async runtime + prompt rendering.
 pub fn run_pipeline(
     _config: &Config,
-    phases: &[Phase],
+    _phases: &[Phase],
     _phase_executor: impl Fn(&Phase) -> PhaseResult,
 ) -> PipelineResult {
     // The actual executor is in bin/verifier_loop.rs because it needs access to the

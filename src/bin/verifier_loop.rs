@@ -573,7 +573,7 @@ fn run_dynamic_round(
     let fail = |msg: String| -> Outcome {
         emit_error(output, command, Some(goal_id), Some(round), &msg)
     };
-    let trace_id = verifier_loop::observe::ensure_goal_trace_id(root, goal_id).ok();
+    let _trace_id = verifier_loop::observe::ensure_goal_trace_id(root, goal_id).ok();
 
     // Cooldown check (same as legacy).
     if health::in_cooldown(root, Utc::now()) {
@@ -827,7 +827,7 @@ fn run_dynamic_round(
         );
         eprintln!("pipeline {pipeline_tag} did not reach {output_fmt} consensus");
         eprintln!("  {rejection_msg}");
-        let env = envelope(command, true)
+        let _env = envelope(command, true)
             .with_goal(goal_id).with_round(round)
             .with_status("rejected");
         if matches!(output, Output::Human) {
