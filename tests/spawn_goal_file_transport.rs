@@ -161,6 +161,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn round should not hard-error");
 
@@ -269,6 +270,7 @@ exit 3
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("gather must not panic on a non-zero child exit");
 
@@ -369,6 +371,7 @@ EOF
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }));
 
     // (a) The spawn MUST succeed (no E2BIG / "Argument list too long").

@@ -45,7 +45,6 @@ Both binaries (`jewilo`, `jewije`) support a global `--json` flag emitting one s
 camelCase envelope object on stdout (machine-readable contract; default output unchanged) —
 see `## JSON output mode (--json)` in [`README.md`](README.md) and
 [`flow/usecases/programmatic-json-output.md`](flow/usecases/programmatic-json-output.md).
-
 ## Observability / tracing (add-otel-observability)
 
 The full `jewilo`/`jewije` lifecycle is observable via structured tracing:

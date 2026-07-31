@@ -134,13 +134,19 @@ pub struct VerifierPubkeyFile {
 /// Compute the on-disk slot directory for a verifier (the dir that holds both
 /// `verdict.json` and `verifier-pubkey.json`).
 ///
-/// `<root>/goals/<goalId>/rounds/<round>/<verifierId>/`
-/// (matches the spawn layer's directory layout — `rounds/<round>/<vid>`).
-pub fn verdict_path(root: &Path, goal_id: &str, verifier_id: &str, round: u32) -> PathBuf {
-    goal::goal_dir(root, goal_id)
+/// `<root>/goals/<goalId>/rounds/<round>[/<phaseId>]/<verifierId>/`
+///
+/// When `phase_id` is `Some`, the path includes the phaseId axis (dynamic-pipeline LD17):
+/// `rounds/<round>/<phaseId>/<vid>/`. When `None`, the legacy flat layout is used:
+/// `rounds/<round>/<vid>/`.
+pub fn verdict_path(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>) -> PathBuf {
+    let mut p = goal::goal_dir(root, goal_id)
         .join(goal::ROUNDS_DIR)
-        .join(round.to_string())
-        .join(verifier_id)
+        .join(round.to_string());
+    if let Some(pid) = phase_id {
+        p = p.join(pid);
+    }
+    p.join(verifier_id)
 }
 
 /// Compute the on-disk slot directory that holds a verifier's pinned pubkey file.
@@ -148,21 +154,16 @@ pub fn verdict_path(root: &Path, goal_id: &str, verifier_id: &str, round: u32) -
 /// Identical layout to `verdict_path` (same per-verifier slot dir); callers append
 /// `PUBKEY_FILE` to reach the file itself. Returns the directory so it can also be
 /// `create_dir_all`'d before writing.
-pub fn pubkey_path(root: &Path, goal_id: &str, verifier_id: &str, round: u32) -> PathBuf {
+pub fn pubkey_path(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>) -> PathBuf {
     // Same slot dir as the verdict — both files live side-by-side per verifier-identity spec.
-    verdict_path(root, goal_id, verifier_id, round)
+    verdict_path(root, goal_id, verifier_id, round, phase_id)
 }
 
 /// Read a verdict slot. A missing file or a malformed/null record resolves to a `Null`
 /// status (fail-closed: never silently promoted). A genuine I/O or parse error of an
 /// existing, non-null file is surfaced as `Err`.
-pub fn read_verdict(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-) -> Result<VerdictRecord, VerdictError> {
-    let path = verdict_path(root, goal_id, verifier_id, round).join(VERDICT_FILE);
+pub fn read_verdict(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>) -> Result<VerdictRecord, VerdictError> {
+    let path = verdict_path(root, goal_id, verifier_id, round, phase_id).join(VERDICT_FILE);
     if !path.exists() {
         return Ok(VerdictRecord {
             status: VerdictStatus::Null,
@@ -204,15 +205,10 @@ pub fn read_verdict(
 /// Directory fsync is best-effort: on some filesystems (e.g. network FS, certain
 /// overlay mounts) it is a no-op. This is a single-host deterrent + detection layer
 /// (see THREAT-MODEL.md §a), NOT a power-loss durability guarantee.
-pub fn mint_and_pin_pubkey(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-) -> Result<crypto::SigningKey, VerdictError> {
+pub fn mint_and_pin_pubkey(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>) -> Result<crypto::SigningKey, VerdictError> {
     ensure_goal_dir(root, goal_id)?;
 
-    let slot = pubkey_path(root, goal_id, verifier_id, round);
+    let slot = pubkey_path(root, goal_id, verifier_id, round, phase_id);
     fs::create_dir_all(&slot)?;
     let target = slot.join(PUBKEY_FILE);
 
@@ -346,13 +342,8 @@ pub fn mint_and_pin_pubkey(
 /// minted before this file was written). The caller injects an empty secret in that
 /// case, and any harvested verdict will fail consensus signature verification
 /// (fail-closed: never silently trusted).
-pub fn read_verifier_secret(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-) -> Result<Option<String>, VerdictError> {
-    let target = pubkey_path(root, goal_id, verifier_id, round).join(SECRET_FILE);
+pub fn read_verifier_secret(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>) -> Result<Option<String>, VerdictError> {
+    let target = pubkey_path(root, goal_id, verifier_id, round, phase_id).join(SECRET_FILE);
     // Use fs::metadata (NOT Path::exists()): exists() maps ANY metadata error
     // (permission denied, broken symlink) to `false`, which would silently yield
     // Ok(None) → an empty secret injected → unsigned verdict. Only a genuine
@@ -452,13 +443,8 @@ fn write_secret_mode_0600(target: &Path, secret_hex: &str) -> Result<(), Verdict
 /// Returns `Ok(None)` when no pubkey has been pinned (caller treats the slot as
 /// unauthenticated). Returns `Ok(Some(key))` for a well-formed pin file. A present but
 /// malformed file surfaces as `Err` (fail closed rather than silently trusting).
-pub fn read_pinned_pubkey(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-) -> Result<Option<crypto::VerifyingKey>, VerdictError> {
-    let target = pubkey_path(root, goal_id, verifier_id, round).join(PUBKEY_FILE);
+pub fn read_pinned_pubkey(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>) -> Result<Option<crypto::VerifyingKey>, VerdictError> {
+    let target = pubkey_path(root, goal_id, verifier_id, round, phase_id).join(PUBKEY_FILE);
     if !target.exists() {
         return Ok(None);
     }
@@ -539,14 +525,7 @@ pub fn verify_record(
 ///      `Unauthenticated`.
 ///   3. Otherwise: sign the canonical record bytes and write atomically
 ///      (first-write-wins; an existing non-null verdict yields `AlreadyFinal`).
-pub fn register_signed_approve(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-    notes: Option<&str>,
-    secret: &crypto::SigningKey,
-) -> Result<(), VerdictError> {
+pub fn register_signed_approve(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>, notes: Option<&str>, secret: &crypto::SigningKey) -> Result<(), VerdictError> {
     let normalized = normalize_optional_notes(notes);
     let record = build_signed_record(
         VerdictStatus::Approve,
@@ -555,9 +534,10 @@ pub fn register_signed_approve(
         goal_id,
         verifier_id,
         round,
+        phase_id,
         secret,
-    )?;
-    write_first_verdict(root, goal_id, verifier_id, round, &record)?;
+    )?;;
+    write_first_verdict(root, goal_id, verifier_id, round, phase_id, &record)?;
     // Hash-chained receipt append (receipt-log spec): every successful signed write
     // extends the per-goal chain. Fail-closed if the receipt append itself fails —
     // a missing chain entry means the completion-hash inputs would be incomplete.
@@ -574,14 +554,7 @@ pub fn register_signed_approve(
 
 /// Register a SIGNED REJECT verdict with notes (atomic first-write-wins). Empty notes
 /// are refused with `NotesRequired` exactly like the unsigned path.
-pub fn register_signed_reject(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-    notes: &str,
-    secret: &crypto::SigningKey,
-) -> Result<(), VerdictError> {
+pub fn register_signed_reject(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>, notes: &str, secret: &crypto::SigningKey) -> Result<(), VerdictError> {
     let trimmed = notes.trim();
     if trimmed.is_empty() {
         return Err(VerdictError::NotesRequired);
@@ -593,9 +566,10 @@ pub fn register_signed_reject(
         goal_id,
         verifier_id,
         round,
+        phase_id,
         secret,
-    )?;
-    write_first_verdict(root, goal_id, verifier_id, round, &record)?;
+    )?;;
+    write_first_verdict(root, goal_id, verifier_id, round, phase_id, &record)?;
     append_receipt_for_signed_write(
         root,
         goal_id,
@@ -618,10 +592,11 @@ fn build_signed_record(
     goal_id: &str,
     verifier_id: &str,
     round: u32,
+    phase_id: Option<&str>,
     secret: &crypto::SigningKey,
 ) -> Result<VerdictRecord, VerdictError> {
     // (1) Trust anchor: the pinned verifying key must exist for this slot.
-    let pinned_vk = read_pinned_pubkey(root, goal_id, verifier_id, round)?.ok_or_else(|| {
+    let pinned_vk = read_pinned_pubkey(root, goal_id, verifier_id, round, phase_id)?.ok_or_else(|| {
         VerdictError::Unauthenticated("no pinned verifier pubkey for this slot".to_string())
     })?;
 
@@ -682,13 +657,7 @@ fn append_receipt_for_signed_write(
 ///
 /// Legacy path retained for slots that are not in the signed regime (no pinned pubkey
 /// and no secret supplied). Signed registration goes through `register_signed_approve`.
-pub fn register_approve(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-    notes: Option<&str>,
-) -> Result<(), VerdictError> {
+pub fn register_approve(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>, notes: Option<&str>) -> Result<(), VerdictError> {
     let record = VerdictRecord {
         status: VerdictStatus::Approve,
         notes: normalize_optional_notes(notes).map(str::to_string),
@@ -696,7 +665,7 @@ pub fn register_approve(
         signature: None,
         pubkey_id: None,
     };
-    write_first_verdict(root, goal_id, verifier_id, round, &record)
+    write_first_verdict(root, goal_id, verifier_id, round, phase_id, &record)
 }
 
 /// Normalize optional notes for an APPROVE verdict (design D2).
@@ -711,13 +680,7 @@ fn normalize_optional_notes(notes: Option<&str>) -> Option<&str> {
 }
 
 /// Register a REJECT verdict with notes (atomic first-write-wins). Empty notes are refused.
-pub fn register_reject(
-    root: &Path,
-    goal_id: &str,
-    verifier_id: &str,
-    round: u32,
-    notes: &str,
-) -> Result<(), VerdictError> {
+pub fn register_reject(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>, notes: &str) -> Result<(), VerdictError> {
     let trimmed = notes.trim();
     if trimmed.is_empty() {
         return Err(VerdictError::NotesRequired);
@@ -729,7 +692,7 @@ pub fn register_reject(
         signature: None,
         pubkey_id: None,
     };
-    write_first_verdict(root, goal_id, verifier_id, round, &record)
+    write_first_verdict(root, goal_id, verifier_id, round, phase_id, &record)
 }
 
 /// Atomically write a verdict as the first real verdict for the slot.
@@ -743,19 +706,20 @@ fn write_first_verdict(
     goal_id: &str,
     verifier_id: &str,
     round: u32,
+    phase_id: Option<&str>,
     record: &VerdictRecord,
 ) -> Result<(), VerdictError> {
     // Ensure the goal directory exists (the slot may not have been pre-created if a
     // verdict CLI is invoked out-of-band). Fail closed if the store root is unusable.
     ensure_goal_dir(root, goal_id)?;
 
-    let vdir = verdict_path(root, goal_id, verifier_id, round);
+    let vdir = verdict_path(root, goal_id, verifier_id, round, phase_id);
     fs::create_dir_all(&vdir)?;
     let target = vdir.join(VERDICT_FILE);
 
     // First-write-wins: if a real verdict already exists, refuse.
     if target.exists() {
-        let existing = read_verdict(root, goal_id, verifier_id, round)?;
+        let existing = read_verdict(root, goal_id, verifier_id, round, phase_id)?;
         if existing.status != VerdictStatus::Null {
             return Err(VerdictError::AlreadyFinal);
         }
@@ -886,7 +850,7 @@ mod tests {
 
     #[test]
     fn verdict_path_layout_matches_spawn_layer() {
-        let p = verdict_path(Path::new("/tmp/r"), "g1", "v2", 3);
+        let p = verdict_path(Path::new("/tmp/r"), "g1", "v2", 3, None);
         assert_eq!(p, Path::new("/tmp/r/goals/g1/rounds/3/v2"));
     }
 
@@ -907,8 +871,8 @@ mod tests {
         let root = dir.path();
         let goal_id = seed_store(root);
 
-        let sk1 = mint_and_pin_pubkey(root, &goal_id, "v1", 1).expect("first mint");
-        let slot = verdict_path(root, &goal_id, "v1", 1);
+        let sk1 = mint_and_pin_pubkey(root, &goal_id, "v1", 1, None).expect("first mint");
+        let slot = verdict_path(root, &goal_id, "v1", 1, None);
         assert!(
             slot.join(PUBKEY_FILE).exists(),
             "pubkey pin must exist after mint"
@@ -919,7 +883,7 @@ mod tests {
         );
 
         // The persisted secret must round-trip back.
-        let persisted = read_verifier_secret(root, &goal_id, "v1", 1)
+        let persisted = read_verifier_secret(root, &goal_id, "v1", 1, None)
             .expect("read secret")
             .expect("secret present");
         assert_eq!(persisted, crypto::signing_key_to_hex(&sk1));
@@ -936,14 +900,14 @@ mod tests {
         let root = dir.path();
         let goal_id = seed_store(root);
 
-        let slot = verdict_path(root, &goal_id, "v1", 1);
+        let slot = verdict_path(root, &goal_id, "v1", 1, None);
         fs::create_dir_all(&slot).unwrap();
         fs::write(slot.join(format!("{PUBKEY_FILE}.tmp")), "stray").unwrap();
 
-        let sk = mint_and_pin_pubkey(root, &goal_id, "v1", 1).expect("retry after stray tmp");
+        let sk = mint_and_pin_pubkey(root, &goal_id, "v1", 1, None).expect("retry after stray tmp");
         assert!(slot.join(PUBKEY_FILE).exists());
         assert!(slot.join(SECRET_FILE).exists());
-        let persisted = read_verifier_secret(root, &goal_id, "v1", 1)
+        let persisted = read_verifier_secret(root, &goal_id, "v1", 1, None)
             .unwrap()
             .expect("secret present after retry");
         // The persisted secret MUST match the freshly minted keypair (not a stale one).
@@ -953,7 +917,7 @@ mod tests {
         //     immutability invariant holds). The persisted secret is left untouched.
         let first_secret = fs::read_to_string(slot.join(SECRET_FILE)).unwrap();
         assert!(matches!(
-            mint_and_pin_pubkey(root, &goal_id, "v1", 1),
+            mint_and_pin_pubkey(root, &goal_id, "v1", 1, None),
             Err(VerdictError::AlreadyPinned)
         ));
         let after = fs::read_to_string(slot.join(SECRET_FILE)).unwrap();
@@ -973,8 +937,8 @@ mod tests {
         let root = dir.path();
         let goal_id = seed_store(root);
 
-        let slot = verdict_path(root, &goal_id, "v1", 1);
-        let _sk = mint_and_pin_pubkey(root, &goal_id, "v1", 1).expect("mint");
+        let slot = verdict_path(root, &goal_id, "v1", 1, None);
+        let _sk = mint_and_pin_pubkey(root, &goal_id, "v1", 1, None).expect("mint");
         assert!(slot.join(PUBKEY_FILE).exists());
         assert!(slot.join(SECRET_FILE).exists());
 
@@ -1013,13 +977,13 @@ mod tests {
         let goal_id = seed_store(root);
 
         // No secret file at all → Ok(None).
-        assert_eq!(read_verifier_secret(root, &goal_id, "v1", 1).unwrap(), None);
+        assert_eq!(read_verifier_secret(root, &goal_id, "v1", 1, None).unwrap(), None);
 
         // A zero-byte secret → Ok(None) (trimmed-empty).
-        let slot = verdict_path(root, &goal_id, "v1", 1);
+        let slot = verdict_path(root, &goal_id, "v1", 1, None);
         fs::create_dir_all(&slot).unwrap();
         fs::write(slot.join(SECRET_FILE), "   ").unwrap();
-        assert_eq!(read_verifier_secret(root, &goal_id, "v1", 1).unwrap(), None);
+        assert_eq!(read_verifier_secret(root, &goal_id, "v1", 1, None).unwrap(), None);
     }
 
     #[cfg(unix)]
@@ -1035,7 +999,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let goal_id = seed_store(root);
-        let slot = verdict_path(root, &goal_id, "v1", 1);
+        let slot = verdict_path(root, &goal_id, "v1", 1, None);
         fs::create_dir_all(&slot).unwrap();
         let secret = slot.join(SECRET_FILE);
         fs::write(&secret, "deadbeef").unwrap();
@@ -1044,7 +1008,7 @@ mod tests {
         // Strip all perms. Under root this is a no-op for access checks.
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let res = read_verifier_secret(root, &goal_id, "v1", 1);
+        let res = read_verifier_secret(root, &goal_id, "v1", 1, None);
         // Restore perms BEFORE asserting so a panic does not leak a 0000 file.
         let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(secret_perms));
 

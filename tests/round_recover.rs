@@ -59,9 +59,9 @@ fn seed_null_slot(root: &Path, goal_id: &str, round: u32, vid: &str) {
 /// a verifier process does via jewije. This produces a verdict that passes the signature
 /// gate in consensus::evaluate.
 fn signed_approve(root: &Path, goal_id: &str, round: u32, vid: &str) -> verdict::VerdictRecord {
-    let sk = verdict::mint_and_pin_pubkey(root, goal_id, vid, round).unwrap();
-    verdict::register_signed_approve(root, goal_id, vid, round, None, &sk).unwrap();
-    verdict::read_verdict(root, goal_id, vid, round).unwrap_or(verdict::VerdictRecord {
+    let sk = verdict::mint_and_pin_pubkey(root, goal_id, vid, round, None).unwrap();
+    verdict::register_signed_approve(root, goal_id, vid, round, None, None, &sk).unwrap();
+    verdict::read_verdict(root, goal_id, vid, round, None).unwrap_or(verdict::VerdictRecord {
         status: verdict::VerdictStatus::Null,
         notes: None,
         registered_at: None,
@@ -78,9 +78,9 @@ fn signed_reject(
     vid: &str,
     notes: &str,
 ) -> verdict::VerdictRecord {
-    let sk = verdict::mint_and_pin_pubkey(root, goal_id, vid, round).unwrap();
-    verdict::register_signed_reject(root, goal_id, vid, round, notes, &sk).unwrap();
-    verdict::read_verdict(root, goal_id, vid, round).unwrap_or(verdict::VerdictRecord {
+    let sk = verdict::mint_and_pin_pubkey(root, goal_id, vid, round, None).unwrap();
+    verdict::register_signed_reject(root, goal_id, vid, round, None, notes, &sk).unwrap();
+    verdict::read_verdict(root, goal_id, vid, round, None).unwrap_or(verdict::VerdictRecord {
         status: verdict::VerdictStatus::Null,
         notes: None,
         registered_at: None,
@@ -151,8 +151,8 @@ fn status_needs_done_state_consensus_pass_when_completion_exists() {
     signed_approve(dir.path(), &goal_id, round, "v2");
 
     // Drive consensus to pass so completion.json is written (reuse the real path).
-    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", round).unwrap();
-    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", round).unwrap();
+    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", round, None).unwrap();
+    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", round, None).unwrap();
     let verdicts = vec![("v1".to_string(), v1), ("v2".to_string(), v2)];
     let result = consensus::evaluate(dir.path(), &goal_id, round, &verdicts, 2, 2);
     assert!(result.passed);
@@ -286,7 +286,7 @@ fn recover_harvests_verdict_that_becomes_non_null_mid_poll() {
     signed_approve(dir.path(), &goal_id, round, "v1");
     // v2 starts null (orphan still running). We pre-mint its key so the background
     // writer can sign under the pinned pubkey exactly like a real verifier.
-    let sk_v2 = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v2", round).unwrap();
+    let sk_v2 = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v2", round, None).unwrap();
     seed_null_slot(dir.path(), &goal_id, round, "v2");
 
     // Simulate the orphan writing its signed APPROVE shortly after recover starts.
@@ -294,7 +294,7 @@ fn recover_harvests_verdict_that_becomes_non_null_mid_poll() {
     let gid = goal_id.clone();
     let writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));
-        let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, &sk_v2);
+        let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, None, &sk_v2);
     });
 
     let outcome =
@@ -377,14 +377,14 @@ fn recover_does_not_spawn_or_re_render() {
     let (dir, goal_id) = fresh_goal();
     let round = 1u32;
     signed_approve(dir.path(), &goal_id, round, "v1");
-    let sk_v2 = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v2", round).unwrap();
+    let sk_v2 = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v2", round, None).unwrap();
     seed_null_slot(dir.path(), &goal_id, round, "v2");
 
     let root = dir.path().to_path_buf();
     let gid = goal_id.clone();
     let writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));
-        let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, &sk_v2);
+        let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, None, &sk_v2);
     });
 
     let _ = round_recover::recover(dir.path(), &goal_id, &cfg(), Duration::from_secs(5)).unwrap();

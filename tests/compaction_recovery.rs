@@ -121,6 +121,7 @@ fn spawn_input<'a>(
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }
 }
 

@@ -205,7 +205,7 @@ pub fn evaluate(
                 };
 
                 // Signature gate: bind the APPROVE to the slot's pinned pubkey.
-                let pinned = match verdict::read_pinned_pubkey(root, goal_id, vid, round) {
+                let pinned = match verdict::read_pinned_pubkey(root, goal_id, vid, round, None) {
                     Ok(opt) => opt,
                     // Malformed pin → cannot trust the slot; fail closed.
                     Err(_) => {
@@ -249,7 +249,7 @@ pub fn evaluate(
                 // signature failure, not silently pass as a benign reject.
                 // Only check when a pinned key exists (legacy unsigned regime is
                 // exempt — there is no signature to verify).
-                if let Ok(Some(key)) = verdict::read_pinned_pubkey(root, goal_id, vid, round) {
+                if let Ok(Some(key)) = verdict::read_pinned_pubkey(root, goal_id, vid, round, None) {
                     if let Err(err) = verdict::verify_record(rec, Some(&key), goal_id, vid, round) {
                         rejection
                             .signature_failures

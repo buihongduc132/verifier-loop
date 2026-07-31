@@ -114,6 +114,9 @@ pub struct SpawnInput<'a> {
     /// dynamic-pipeline: starting index for verifier ids (defaults to 0). Monotonic
     /// continuation so Mixed dump starts at m+1 (LD26).
     pub id_offset: usize,
+    /// dynamic-pipeline (LD17): phaseId axis for slot paths. `Some("1a")` creates
+    /// `rounds/<round>/1a/<vid>/`; `None` falls back to legacy flat `rounds/<round>/<vid>/`.
+    pub phase_id: Option<&'a str>,
 }
 
 /// A completed verifier run (after the gather barrier).
@@ -184,8 +187,8 @@ fn write_meta(vdir: &Path, meta: &VerifierMeta) -> Result<(), SpawnError> {
 /// Read the current verdict status for a verifier slot. Returns `true` iff the slot has
 /// a non-null verdict (APPROVE or REJECT). Used by the nudge/recovery loop to decide
 /// whether to stop.
-fn slot_has_verdict(root: &Path, goal_id: &str, verifier_id: &str, round: u32) -> bool {
-    match verdict::read_verdict(root, goal_id, verifier_id, round) {
+fn slot_has_verdict(root: &Path, goal_id: &str, verifier_id: &str, round: u32, phase_id: Option<&str>) -> bool {
+    match verdict::read_verdict(root, goal_id, verifier_id, round, phase_id) {
         Ok(rec) => rec.status != verdict::VerdictStatus::Null,
         Err(_) => false,
     }
@@ -240,7 +243,7 @@ async fn spawn_nudge_child(
     // Ok(None) on a legacy unsigned slot → inject empty string (fail-closed: any
     // harvested verdict will fail consensus signature verification).
     let secret_hex =
-        verdict::read_verifier_secret(input.root, input.goal_id, verifier_id, input.round)?;
+        verdict::read_verifier_secret(input.root, input.goal_id, verifier_id, input.round, input.phase_id)?;
     // Resolve the goal trace id for the nudge child too (add-otel-observability D2):
     // a nudge/recovery resume is a NEW process and cannot inherit the initial
     // spawn env, so it must read the persisted trace-id (same as the persisted
@@ -254,6 +257,7 @@ async fn spawn_nudge_child(
         input.root,
         secret_hex.as_deref().unwrap_or(""),
         trace_id.as_deref(),
+        input.phase_id,
     );
     inject_verifier_verdict_bin(&mut cmd);
     cmd.stdin(stdin_config)
@@ -471,7 +475,13 @@ fn checkpoint_meta(
 /// returns only after every process has either completed or timed out (gather barrier).
 pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, SpawnError> {
     let rounds_dir = round_dir(input.root, input.goal_id, input.round);
-    fs::create_dir_all(&rounds_dir)?;
+    // When phase_id is Some, slot dirs nest under rounds/<round>/<phaseId>/<vid>/.
+    // When None, legacy flat layout rounds/<round>/<vid>/.
+    let slot_base = match input.phase_id {
+        Some(pid) => rounds_dir.join(pid),
+        None => rounds_dir.clone(),
+    };
+    fs::create_dir_all(&slot_base)?;
 
     // Resolve the per-goal trace id ONCE (add-otel-observability D1/D2): mint-or-read
     // <store>/goals/<goalId>/trace-id, then propagate to every V* child env so the
@@ -489,7 +499,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
     let offset = input.id_offset;
     for i in 0..count {
         let vid = format!("{}{}", prefix, offset + i + 1);
-        let vdir = rounds_dir.join(&vid);
+        let vdir = slot_base.join(&vid);
         fs::create_dir_all(&vdir)?;
         pre_create_verifier_dir(&vdir);
 
@@ -503,7 +513,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
         let goal_file_path = goal_file_guard.as_ref().map(|g| g.path());
 
         let mut cmd = build_spawn_command(input.adapter, goal_file_path);
-        let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round)?;
+        let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round, input.phase_id)?;
         inject_identity_env(
             &mut cmd,
             input.goal_id,
@@ -512,6 +522,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
             input.root,
             &secret_hex,
             trace_id.as_deref(),
+            input.phase_id,
         );
         inject_verifier_verdict_bin(&mut cmd);
         plan.push((vid, cmd, vdir, goal_file_guard));
@@ -564,7 +575,13 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
     );
     let prev_round = input.round.saturating_sub(1);
     let rounds_dir = round_dir(input.root, input.goal_id, input.round);
-    fs::create_dir_all(&rounds_dir)?;
+    // When phase_id is Some, slot dirs nest under rounds/<round>/<phaseId>/<vid>/.
+    // When None, legacy flat layout rounds/<round>/<vid>/.
+    let slot_base = match input.phase_id {
+        Some(pid) => rounds_dir.join(pid),
+        None => rounds_dir.clone(),
+    };
+    fs::create_dir_all(&slot_base)?;
 
     // Resolve the per-goal trace id once (add-otel-observability D1/D2): reuses the
     // value persisted at NEW time, so RESUME joins the same trace as NEW. Fail-open.
@@ -576,7 +593,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
     let offset = input.id_offset;
     for i in 0..count {
         let vid = format!("{}{}", prefix, offset + i + 1);
-        let vdir = rounds_dir.join(&vid);
+        let vdir = slot_base.join(&vid);
         fs::create_dir_all(&vdir)?;
 
         let prev_vdir = round_dir(input.root, input.goal_id, prev_round).join(&vid);
@@ -634,7 +651,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
         };
         pre_create_verifier_dir_with_turns(&vdir, baseline_turns);
 
-        let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round)?;
+        let secret_hex = mint_verifier_secret(input.root, input.goal_id, &vid, input.round, input.phase_id)?;
         inject_identity_env(
             &mut cmd,
             input.goal_id,
@@ -643,6 +660,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
             input.root,
             &secret_hex,
             trace_id.as_deref(),
+            input.phase_id,
         );
         inject_verifier_verdict_bin(&mut cmd);
         plan.push((vid, cmd, vdir, goal_file_guard));
@@ -845,7 +863,7 @@ async fn gather(
                 let mut nudge_agent_end_seen = agent_end_seen;
                 let mut nudge_sid = sid;
 
-                if !fail_closed && enable_nudge && !slot_has_verdict(input.root, input.goal_id, &vid, input.round) {
+                if !fail_closed && enable_nudge && !slot_has_verdict(input.root, input.goal_id, &vid, input.round, input.phase_id) {
                     loop {
                         let (turns_used, active_sid) = slot_meta(&vdir);
                         if turns_used >= input.config.max_turn {
@@ -918,7 +936,7 @@ async fn gather(
                         any_compaction = any_compaction || nudge.compaction_observed;
                         nudge_agent_end_seen = nudge_agent_end_seen || nudge.agent_end_seen;
 
-                        if slot_has_verdict(input.root, input.goal_id, &vid, input.round) {
+                        if slot_has_verdict(input.root, input.goal_id, &vid, input.round, input.phase_id) {
                             break;
                         }
                     }
@@ -1157,8 +1175,9 @@ fn mint_verifier_secret(
     goal_id: &str,
     verifier_id: &str,
     round: u32,
+    phase_id: Option<&str>,
 ) -> Result<String, SpawnError> {
-    let sk = verdict::mint_and_pin_pubkey(root, goal_id, verifier_id, round)?;
+    let sk = verdict::mint_and_pin_pubkey(root, goal_id, verifier_id, round, phase_id)?;
     Ok(crypto::signing_key_to_hex(&sk))
 }
 
@@ -1175,6 +1194,7 @@ fn identity_env_pairs<'a>(
     root: &'a Path,
     secret_hex: &'a str,
     trace_id: Option<&'a str>,
+    phase_id: Option<&'a str>,
 ) -> Vec<(&'static str, std::ffi::OsString)> {
     let mut pairs = vec![
         (ENV_GOAL_ID, goal_id.into()),
@@ -1185,6 +1205,9 @@ fn identity_env_pairs<'a>(
     ];
     if let Some(tid) = trace_id {
         pairs.push((crate::observe::ENV_TRACE_ID, tid.into()));
+    }
+    if let Some(pid) = phase_id {
+        pairs.push((crate::goal::PHASE_ENV_VAR, pid.into()));
     }
     pairs
 }
@@ -1199,8 +1222,9 @@ fn inject_identity_env(
     root: &Path,
     secret_hex: &str,
     trace_id: Option<&str>,
+    phase_id: Option<&str>,
 ) {
-    for (k, v) in identity_env_pairs(goal_id, verifier_id, round, root, secret_hex, trace_id) {
+    for (k, v) in identity_env_pairs(goal_id, verifier_id, round, root, secret_hex, trace_id, phase_id) {
         cmd.env(k, v);
     }
 }
@@ -1339,7 +1363,7 @@ mod tests {
     #[test]
     fn identity_env_pairs_propagate_store_root() {
         let root = Path::new("/tmp/vl-home");
-        let pairs = identity_env_pairs("g1", "v1", 2, root, "deadbeef", None);
+        let pairs = identity_env_pairs("g1", "v1", 2, root, "deadbeef", None, None);
         let home = pairs.iter().find(|(k, _)| *k == ENV_HOME);
         assert!(home.is_some(), "VERIFIER_LOOP_HOME must be injected");
         assert_eq!(

@@ -109,6 +109,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn round succeeds");
 
@@ -178,6 +179,7 @@ ACP
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn succeeds");
 
@@ -236,6 +238,7 @@ printf '%s\n' '{{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}}' > "
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn succeeds");
     let elapsed = start.elapsed();
@@ -287,6 +290,7 @@ sleep 30
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn round still returns (timeout is not a hard error)");
 
@@ -344,6 +348,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn succeeds");
 
@@ -458,6 +463,7 @@ EOF
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn round succeeds");
 
@@ -515,6 +521,7 @@ EOF
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn succeeds");
 
@@ -558,12 +565,12 @@ fn closed_loop_produces_signed_verdicts() {
 
     for vid in ["v1", "v2"] {
         // (a) pinned pubkey present.
-        let pinned = verdict::read_pinned_pubkey(home, &goal_id, vid, 1)
+        let pinned = verdict::read_pinned_pubkey(home, &goal_id, vid, 1, None)
             .expect("pinned pubkey reads")
             .expect("pubkey was pinned at spawn");
 
         // (b) verdict.json is signed.
-        let rec = verdict::read_verdict(home, &goal_id, vid, 1).expect("verdict reads");
+        let rec = verdict::read_verdict(home, &goal_id, vid, 1, None).expect("verdict reads");
         assert_eq!(rec.status, verdict::VerdictStatus::Approve, "{vid} APPROVE");
         let sig = rec.signature.as_ref().expect("{vid} signature present");
         assert_eq!(
@@ -768,7 +775,7 @@ fn stub_approve_receives_secret_env() {
     // The verdict must be SIGNED — which only happens if VERIFIER_LOOP_VERIFIER_SECRET
     // reached jewije via the stub. An unsigned APPROVE (or a null verdict) means the
     // secret was never injected/forwarded.
-    let rec = verdict::read_verdict(home, &goal_id, "v1", 1).expect("verdict reads");
+    let rec = verdict::read_verdict(home, &goal_id, "v1", 1, None).expect("verdict reads");
     assert_eq!(rec.status, verdict::VerdictStatus::Approve);
     assert!(
         rec.signature.is_some(),
@@ -830,6 +837,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn succeeds");
 
@@ -886,6 +894,7 @@ exit 1
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn round still returns (crash is not a hard error)");
 
@@ -978,6 +987,7 @@ exit 1
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn round returns");
 

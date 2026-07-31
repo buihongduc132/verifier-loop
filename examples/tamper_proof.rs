@@ -66,7 +66,7 @@ fn main() -> ExitCode {
         if !entry.path().is_dir() || !vid.starts_with('v') {
             continue;
         }
-        let v = verdict::read_verdict(&root, &goal_id, &vid, round).unwrap();
+        let v = verdict::read_verdict(&root, &goal_id, &vid, round, None).unwrap();
         if v.status == VerdictStatus::Approve {
             matching.push(MatchingVerdict {
 
@@ -120,14 +120,14 @@ fn main() -> ExitCode {
     // each APPROVE verdict's `registeredAt`. Editing a verdict on disk (e.g. back-dating
     // its registeredAt, the classic verdict-tamper vector) therefore changes the
     // recomputed hash — proving verdict tampering is fail-closed detectable.
-    let v1_path = verdict::verdict_path(&root, &goal_id, "v1", round).join(verdict::VERDICT_FILE);
+    let v1_path = verdict::verdict_path(&root, &goal_id, "v1", round, None).join(verdict::VERDICT_FILE);
     let v1_raw = std::fs::read_to_string(&v1_path).unwrap();
     let mut vr: VerdictRecord = serde_json::from_str(&v1_raw).unwrap();
     let original_registered_at = vr.registered_at.clone().unwrap_or_default();
     vr.registered_at = Some("1999-01-01T00:00:00Z".to_string());
     std::fs::write(&v1_path, serde_json::to_string_pretty(&vr).unwrap()).unwrap();
 
-    let v1_tampered = verdict::read_verdict(&root, &goal_id, "v1", round).unwrap();
+    let v1_tampered = verdict::read_verdict(&root, &goal_id, "v1", round, None).unwrap();
     let mut matching_b = matching.clone();
     if let Some(slot) = matching_b.iter_mut().find(|m| m.verifier_id == "v1") {
         slot.registered_at = v1_tampered.registered_at.clone().unwrap_or_default();

@@ -49,7 +49,7 @@ fn main() {
     // verdict drops out of the matching set -> different (or no) hash.
     let mut verdicts = Vec::new();
     for vid in ["v1", "v2"] {
-        if let Ok(rec) = verdict::read_verdict(root, &gid, vid, round) {
+        if let Ok(rec) = verdict::read_verdict(root, &gid, vid, round, None) {
             verdicts.push((vid.to_string(), rec));
         }
     }

@@ -261,11 +261,11 @@ fn recover_harvests_signed_verdict_written_mid_poll() {
     let goal_id = verifier_loop::goal::new(home, "ship the thing", None).unwrap();
     let round = 1u32;
     // v1 already approved (signed, pinned) — like an orphan that already finished.
-    let sk_v1 = verdict::mint_and_pin_pubkey(home, &goal_id, "v1", round).unwrap();
-    verdict::register_signed_approve(home, &goal_id, "v1", round, None, &sk_v1).unwrap();
+    let sk_v1 = verdict::mint_and_pin_pubkey(home, &goal_id, "v1", round, None).unwrap();
+    verdict::register_signed_approve(home, &goal_id, "v1", round, None, None, &sk_v1).unwrap();
     // v2 slot: pre-create null verdict + meta (orphan "still running"). We pre-mint v2's
     // key now (spawn would have) so the simulated orphan can sign under the pinned key.
-    let sk_v2 = verdict::mint_and_pin_pubkey(home, &goal_id, "v2", round).unwrap();
+    let sk_v2 = verdict::mint_and_pin_pubkey(home, &goal_id, "v2", round, None).unwrap();
     let v2_dir = goal::goal_dir(home, &goal_id)
         .join(goal::ROUNDS_DIR)
         .join(round.to_string())
@@ -280,7 +280,7 @@ fn recover_harvests_signed_verdict_written_mid_poll() {
     let gid = goal_id.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
-        let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, &sk_v2);
+        let _ = verdict::register_signed_approve(&root, &gid, "v2", round, None, None, &sk_v2);
     });
 
     // RECOVER must harvest v2's verdict and print a short hash. cwd is irrelevant for

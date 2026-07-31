@@ -64,14 +64,14 @@ fn fresh_goal_with_null_verdict(round: u32) -> (tempfile::TempDir, String) {
     let goal_id = goal::new(dir.path(), "build it", None).unwrap();
 
     // Simulate the spawn layer: pre-create rounds/<round>/v1/verdict.json {status:null}.
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     (dir, goal_id)
 }
 
 fn read_status(root: &Path, goal_id: &str, vid: &str, round: u32) -> Value {
-    let rec = verdict::read_verdict(root, goal_id, vid, round).unwrap();
+    let rec = verdict::read_verdict(root, goal_id, vid, round, None).unwrap();
     let v: Value = serde_json::from_str(&serde_json::to_string(&rec.status).unwrap()).unwrap();
     v
 }
@@ -84,9 +84,9 @@ fn read_status(root: &Path, goal_id: &str, vid: &str, round: u32) -> Value {
 fn approve_writes_verdict_with_status_and_registered_at() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
 
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(
         read_status(dir.path(), &goal_id, "v1", 1),
         Value::String(APPROVE.into())
@@ -122,9 +122,9 @@ fn cli_approve_prints_verdict_registered_and_exits_zero() {
 fn reject_with_notes_writes_verdict_with_notes() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_reject(dir.path(), &goal_id, "v1", 1, "issue 1: missing test").unwrap();
+    verdict::register_reject(dir.path(), &goal_id, "v1", 1, None, "issue 1: missing test").unwrap();
 
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(
         read_status(dir.path(), &goal_id, "v1", 1),
         Value::String(REJECT.into())
@@ -136,7 +136,7 @@ fn reject_with_notes_writes_verdict_with_notes() {
 fn register_reject_without_notes_is_refused_and_writes_nothing() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    let err = verdict::register_reject(dir.path(), &goal_id, "v1", 1, "").unwrap_err();
+    let err = verdict::register_reject(dir.path(), &goal_id, "v1", 1, None, "").unwrap_err();
     assert!(
         matches!(err, verdict::VerdictError::NotesRequired),
         "empty notes must yield NotesRequired, got {err:?}"
@@ -198,8 +198,8 @@ fn cli_reject_with_notes_prints_verdict_registered_and_exits_zero() {
 fn second_verdict_attempt_is_rejected_and_stored_unchanged() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
-    let err = verdict::register_reject(dir.path(), &goal_id, "v1", 1, "too late").unwrap_err();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
+    let err = verdict::register_reject(dir.path(), &goal_id, "v1", 1, None, "too late").unwrap_err();
     assert!(
         matches!(err, verdict::VerdictError::AlreadyFinal),
         "second verdict must be AlreadyFinal, got {err:?}"
@@ -252,7 +252,7 @@ fn forgotten_verdict_stays_null_and_round_fails() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
     // A verifier that never calls verifier-verdict leaves status:null.
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(
         serde_json::to_value(rec.status).unwrap(),
         Value::Null,
@@ -288,7 +288,7 @@ fn verdict_writes_to_env_derived_slot_regardless_of_args() {
         .success();
 
     // Written to the env-derived slot (goals/<goal_id>/rounds/1/v1/verdict.json).
-    let vpath = verdict::verdict_path(dir.path(), &goal_id, "v1", 1);
+    let vpath = verdict::verdict_path(dir.path(), &goal_id, "v1", 1, None);
     let raw: Value =
         serde_json::from_str(&fs::read_to_string(vpath.join(verdict::VERDICT_FILE)).unwrap())
             .unwrap();
@@ -391,7 +391,7 @@ fn cli_with_home_unset_falls_back_to_dot_verifier_loop() {
     let default_root = home.path().join(".verifier-loop");
     fs::create_dir_all(&default_root).unwrap();
     let goal_id = goal::new(&default_root, "build it", None).unwrap();
-    let vdir = verdict::verdict_path(&default_root, &goal_id, "v1", 1);
+    let vdir = verdict::verdict_path(&default_root, &goal_id, "v1", 1, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
 
@@ -423,8 +423,8 @@ fn cli_with_home_unset_falls_back_to_dot_verifier_loop() {
 fn first_write_wins_is_atomic_across_two_approves() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
-    let err = verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap_err();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
+    let err = verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap_err();
     assert!(matches!(err, verdict::VerdictError::AlreadyFinal));
 }
 
@@ -452,11 +452,11 @@ fn fresh_goal_for_pubkey() -> (tempfile::TempDir, String) {
 fn mint_and_pin_pubkey_writes_file_before_returning() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
 
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1)
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .expect("mint_and_pin_pubkey must succeed on a fresh slot");
 
     // File MUST exist at the pinned location.
-    let file = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join("verifier-pubkey.json");
+    let file = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1, None).join("verifier-pubkey.json");
     assert!(file.exists(), "pinned pubkey file must exist at {file:?}");
 
     // On-disk schema: {pubkey: <64 hex>, mintedAt: <iso>}.
@@ -491,8 +491,8 @@ fn mint_and_pin_pubkey_writes_file_before_returning() {
 fn mint_and_pin_pubkey_second_call_on_same_slot_fails() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
 
-    let _first = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
-    let second = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1);
+    let _first = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let second = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None);
 
     let err = second.expect_err("second mint on the same slot must fail closed (immutable)");
     let msg = format!("{err}").to_lowercase();
@@ -506,11 +506,11 @@ fn mint_and_pin_pubkey_second_call_on_same_slot_fails() {
 fn mint_and_pin_pubkey_distinct_keys_across_verifiers() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
 
-    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
-    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v2", 1).unwrap();
+    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v2", 1, None).unwrap();
 
     let read = |vid: &str| -> String {
-        let file = verdict::pubkey_path(dir.path(), &goal_id, vid, 1).join("verifier-pubkey.json");
+        let file = verdict::pubkey_path(dir.path(), &goal_id, vid, 1, None).join("verifier-pubkey.json");
         let raw: VerifierPubkeyFile =
             serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
         raw.pubkey
@@ -528,7 +528,7 @@ fn mint_and_pin_pubkey_distinct_keys_across_verifiers() {
 fn read_pinned_pubkey_returns_none_when_absent() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
 
-    let result = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let result = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .expect("read on a slot without a pinned pubkey must be Ok(None), not an error");
     assert!(
         result.is_none(),
@@ -540,10 +540,10 @@ fn read_pinned_pubkey_returns_none_when_absent() {
 fn read_pinned_pubkey_returns_some_when_present() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
 
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let expected_hex = crypto::verifying_key_to_hex(&sk.verifying_key());
 
-    let key = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let key = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .expect("read on a minted slot must be Ok")
         .expect("minted slot must read back Some(key)");
 
@@ -634,7 +634,7 @@ fn null_placeholder_has_no_signature_fields() {
 #[test]
 fn verify_record_accepts_genuine_signature() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let vk = sk.verifying_key();
 
     let iso = "2026-07-04T12:00:00+00:00";
@@ -647,7 +647,7 @@ fn verify_record_accepts_genuine_signature() {
 #[test]
 fn verify_record_rejects_edited_status() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let vk = sk.verifying_key();
 
     let iso = "2026-07-04T12:00:00+00:00";
@@ -667,7 +667,7 @@ fn verify_record_rejects_edited_status() {
 #[test]
 fn verify_record_rejects_edited_notes() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let vk = sk.verifying_key();
 
     let iso = "2026-07-04T12:00:00+00:00";
@@ -687,7 +687,7 @@ fn verify_record_rejects_edited_notes() {
 #[test]
 fn verify_record_rejects_edited_registered_at() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let vk = sk.verifying_key();
 
     let iso = "2026-07-04T12:00:00+00:00";
@@ -707,7 +707,7 @@ fn verify_record_rejects_edited_registered_at() {
 #[test]
 fn verify_record_rejects_identity_mismatch() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let vk = sk.verifying_key();
 
     let iso = "2026-07-04T12:00:00+00:00";
@@ -726,7 +726,7 @@ fn verify_record_rejects_identity_mismatch() {
 #[test]
 fn verify_record_wrong_pubkey_when_pinned_missing() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
 
     let iso = "2026-07-04T12:00:00+00:00";
     let rec = signed_approve_record(&sk, &goal_id, "v1", 1, iso);
@@ -744,7 +744,7 @@ fn verify_record_wrong_pubkey_when_pinned_missing() {
 #[test]
 fn verify_record_wrong_pubkey_when_pubkey_id_mismatch() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk_a = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk_a = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let vk_a = sk_a.verifying_key();
 
     // A different keypair whose pubkeyId is NOT vk_a's.
@@ -768,7 +768,7 @@ fn verify_record_wrong_pubkey_when_pubkey_id_mismatch() {
 #[test]
 fn verify_record_untrusted_for_null_status() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let vk = sk.verifying_key();
 
     // A null-status record, even with a signature attached, is non-matching by spec.
@@ -815,12 +815,12 @@ fn fresh_goal_with_pinned_v1(round: u32) -> (tempfile::TempDir, String, String) 
     let goal_id = goal::new(dir.path(), "build it", None).unwrap();
 
     // Pre-create the null verdict placeholder (mirrors the spawn layer).
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
 
     // Pin a real pubkey and capture the signing key hex.
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", round)
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", round, None)
         .expect("mint_and_pin_pubkey must succeed on a fresh slot");
     let secret_hex = crypto::signing_key_to_hex(&sk);
     (dir, goal_id, secret_hex)
@@ -828,7 +828,7 @@ fn fresh_goal_with_pinned_v1(round: u32) -> (tempfile::TempDir, String, String) 
 
 /// A verdict slot file path under a temp store.
 fn slot_verdict_file(root: &Path, goal_id: &str, vid: &str, round: u32) -> PathBuf {
-    verdict::verdict_path(root, goal_id, vid, round).join(verdict::VERDICT_FILE)
+    verdict::verdict_path(root, goal_id, vid, round, None).join(verdict::VERDICT_FILE)
 }
 
 use std::path::PathBuf;
@@ -862,7 +862,7 @@ fn jewije_approve_without_secret_fails_closed() {
     );
 
     // The slot must remain null — no verdict written.
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(
         rec.status,
         verdict::VerdictStatus::Null,
@@ -920,7 +920,7 @@ fn jewije_approve_with_wrong_secret_fails_closed() {
     );
 
     // Slot must be unchanged (still null placeholder, no APPROVE written).
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(
         rec.status,
         verdict::VerdictStatus::Null,
@@ -977,10 +977,10 @@ fn jewije_approve_with_correct_secret_writes_signed_verdict() {
     );
 
     // The written record MUST verify against the slot's pinned pubkey.
-    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .expect("read pinned pubkey")
         .expect("pinned pubkey must be present after fresh_goal_with_pinned_v1");
-    let record = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let record = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     verdict::verify_record(&record, Some(&pinned_vk), &goal_id, "v1", 1)
         .expect("the written verdict must verify against the pinned verifying key");
 }
@@ -1026,10 +1026,10 @@ fn jewije_reject_with_correct_secret_writes_signed_verdict_with_notes() {
     );
 
     // Signature must verify against the pinned pubkey.
-    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .unwrap()
         .expect("pinned pubkey present");
-    let record = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let record = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     verdict::verify_record(&record, Some(&pinned_vk), &goal_id, "v1", 1)
         .expect("signed REJECT must verify against the pinned verifying key");
 }
@@ -1055,7 +1055,7 @@ fn jewije_reject_without_notes_fails() {
         .failure();
 
     // Slot stays null.
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(
         rec.status,
         verdict::VerdictStatus::Null,
@@ -1129,11 +1129,11 @@ fn jewije_approve_on_slot_without_pinned_pubkey_fails_closed() {
     // Build a fresh goal + null slot WITHOUT minting a pinned pubkey.
     let dir = tempfile::tempdir().unwrap();
     let goal_id = goal::new(dir.path(), "build it", None).unwrap();
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", 1);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", 1, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     assert!(
-        !verdict::pubkey_path(dir.path(), &goal_id, "v1", 1)
+        !verdict::pubkey_path(dir.path(), &goal_id, "v1", 1, None)
             .join(verdict::PUBKEY_FILE)
             .exists(),
         "test precondition: no pinned pubkey for this slot"
@@ -1162,7 +1162,7 @@ fn jewije_approve_on_slot_without_pinned_pubkey_fails_closed() {
     );
 
     // The slot stays null.
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(
         rec.status,
         verdict::VerdictStatus::Null,
@@ -1183,7 +1183,7 @@ fn jewije_approve_on_slot_without_pinned_pubkey_fails_closed() {
 /// assert the ABSENCE of the `notes` key, which `read_verdict`'s `Option<String>` would
 /// erase). Used by the no-notes regression guards below.
 fn read_raw_verdict_json(root: &Path, goal_id: &str, vid: &str, round: u32) -> Value {
-    let path = verdict::verdict_path(root, goal_id, vid, round).join(verdict::VERDICT_FILE);
+    let path = verdict::verdict_path(root, goal_id, vid, round, None).join(verdict::VERDICT_FILE);
     let raw = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("verdict file {path:?} unreadable: {e}"));
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("verdict file malformed: {e}"))
@@ -1198,16 +1198,10 @@ fn register_approve_with_notes_stores_them_on_the_record() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
     // NEW signature: 5th arg = notes. Old code: 4 args -> compile error.
-    verdict::register_approve(
-        dir.path(),
-        &goal_id,
-        "v1",
-        1,
-        Some("all DoD items verified"),
-    )
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, Some("all DoD items verified"))
     .expect("approve-with-notes must succeed on a null slot");
 
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(rec.status, verdict::VerdictStatus::Approve);
     assert_eq!(
         rec.notes.as_deref(),
@@ -1229,7 +1223,7 @@ fn register_approve_with_notes_stores_them_on_the_record() {
 fn register_approve_with_none_omits_notes_key_from_disk() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
 
     assert_eq!(
         read_status(dir.path(), &goal_id, "v1", 1),
@@ -1259,10 +1253,10 @@ fn register_approve_with_none_omits_notes_key_from_disk() {
 fn register_approve_with_whitespace_only_notes_normalizes_to_none() {
     let (dir, goal_id) = fresh_goal_with_null_verdict(1);
 
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, Some("   \n\t  "))
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, Some("   \n\t  "))
         .expect("whitespace-only notes must be accepted and normalized to None");
 
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(rec.status, verdict::VerdictStatus::Approve);
     assert!(
         rec.notes.is_none(),
@@ -1293,17 +1287,10 @@ fn register_signed_approve_with_notes_signature_verifies() {
 
     // NEW signature: (root, goal_id, vid, round, notes: Option<&str>, secret).
     // Current code has no `notes` param -> compile error -> RED.
-    verdict::register_signed_approve(
-        dir.path(),
-        &goal_id,
-        "v1",
-        1,
-        Some("signed evidence: tests green + clippy clean"),
-        &sk,
-    )
+    verdict::register_signed_approve(dir.path(), &goal_id, "v1", 1, None, Some("signed evidence: tests green + clippy clean"), &sk)
     .expect("signed approve with notes must succeed against the pinned pubkey");
 
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(rec.status, verdict::VerdictStatus::Approve);
     assert_eq!(
         rec.notes.as_deref(),
@@ -1321,7 +1308,7 @@ fn register_signed_approve_with_notes_signature_verifies() {
 
     // Signature MUST verify against the pinned pubkey over canonical bytes that include
     // the notes (crypto::canonical_record_bytes already binds notes).
-    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .unwrap()
         .expect("pinned pubkey must be present");
     verdict::verify_record(&rec, Some(&pinned_vk), &goal_id, "v1", 1)
@@ -1339,22 +1326,15 @@ fn tampered_notes_on_signed_approve_invalidate_signature() {
     let (dir, goal_id, secret_hex) = fresh_goal_with_pinned_v1(1);
     let sk = crypto::signing_key_from_hex(&secret_hex).expect("secret hex must decode");
 
-    verdict::register_signed_approve(
-        dir.path(),
-        &goal_id,
-        "v1",
-        1,
-        Some("original signed evidence"),
-        &sk,
-    )
+    verdict::register_signed_approve(dir.path(), &goal_id, "v1", 1, None, Some("original signed evidence"), &sk)
     .unwrap();
 
     // Load, tamper with the notes on disk, and re-verify. The canonical bytes for the
     // tampered record no longer match the bytes that were signed -> BadSignature.
-    let mut rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let mut rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     rec.notes = Some("FORGED notes inserted by an attacker".to_string());
 
-    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .unwrap()
         .expect("pinned pubkey must be present");
     let err = verdict::verify_record(&rec, Some(&pinned_vk), &goal_id, "v1", 1)
@@ -1376,9 +1356,9 @@ fn register_signed_approve_with_none_notes_omits_notes_key() {
     let (dir, goal_id, secret_hex) = fresh_goal_with_pinned_v1(1);
     let sk = crypto::signing_key_from_hex(&secret_hex).expect("secret hex must decode");
 
-    verdict::register_signed_approve(dir.path(), &goal_id, "v1", 1, None, &sk).unwrap();
+    verdict::register_signed_approve(dir.path(), &goal_id, "v1", 1, None, None, &sk).unwrap();
 
-    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let rec = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     assert_eq!(rec.status, verdict::VerdictStatus::Approve);
     assert!(rec.notes.is_none(), "no notes on None-path signed approve");
 
@@ -1390,7 +1370,7 @@ fn register_signed_approve_with_none_notes_omits_notes_key() {
     );
 
     // And the signature must still verify.
-    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .unwrap()
         .expect("pinned pubkey present");
     verdict::verify_record(&rec, Some(&pinned_vk), &goal_id, "v1", 1)
@@ -1410,12 +1390,12 @@ fn verifier_secret_hex_persisted_with_mode_0600() {
     use std::os::unix::fs::PermissionsExt;
     let (dir, goal_id) = fresh_goal_for_pubkey();
 
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1)
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .expect("mint succeeds on a fresh slot");
 
     // The secret hex file MUST exist alongside the pinned pubkey.
     let secret_file =
-        verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join(verdict::SECRET_FILE);
+        verdict::pubkey_path(dir.path(), &goal_id, "v1", 1, None).join(verdict::SECRET_FILE);
     assert!(
         secret_file.exists(),
         "secret hex file must exist at {secret_file:?}"
@@ -1440,7 +1420,7 @@ fn verifier_secret_hex_persisted_with_mode_0600() {
     );
 
     // The persisted secret's pubkey MUST match the pinned verifying key.
-    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1)
+    let pinned_vk = verdict::read_pinned_pubkey(dir.path(), &goal_id, "v1", 1, None)
         .unwrap()
         .expect("pinned pubkey present");
     assert_eq!(
@@ -1456,12 +1436,12 @@ fn read_verifier_secret_returns_none_for_legacy_slot() {
     // the secret) must report Ok(None) — the caller injects an empty secret and any
     // harvested verdict fails consensus signature verification (fail-closed).
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let secret_file =
-        verdict::pubkey_path(dir.path(), &goal_id, "v1", 1).join(verdict::SECRET_FILE);
+        verdict::pubkey_path(dir.path(), &goal_id, "v1", 1, None).join(verdict::SECRET_FILE);
     fs::remove_file(&secret_file).unwrap();
 
-    let read = verdict::read_verifier_secret(dir.path(), &goal_id, "v1", 1)
+    let read = verdict::read_verifier_secret(dir.path(), &goal_id, "v1", 1, None)
         .expect("read on a missing file is Ok(None), not Err");
     assert!(read.is_none(), "missing secret file must yield Ok(None)");
 }
@@ -1469,9 +1449,9 @@ fn read_verifier_secret_returns_none_for_legacy_slot() {
 #[test]
 fn read_verifier_secret_returns_minted_hex() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
 
-    let read = verdict::read_verifier_secret(dir.path(), &goal_id, "v1", 1)
+    let read = verdict::read_verifier_secret(dir.path(), &goal_id, "v1", 1, None)
         .expect("read on a present secret file is Ok")
         .expect("minted secret file must yield Some");
     assert_eq!(read, crypto::signing_key_to_hex(&sk));
@@ -1485,7 +1465,7 @@ fn mint_and_pin_does_not_overwrite_existing_secret() {
     let (dir, goal_id) = fresh_goal_for_pubkey();
 
     // Pre-place a sentinel secret + pubkey so the slot looks already-pinned.
-    let slot = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1);
+    let slot = verdict::pubkey_path(dir.path(), &goal_id, "v1", 1, None);
     fs::create_dir_all(&slot).unwrap();
     fs::write(
         slot.join(verdict::PUBKEY_FILE),
@@ -1495,7 +1475,7 @@ fn mint_and_pin_does_not_overwrite_existing_secret() {
     fs::write(slot.join(verdict::SECRET_FILE), "sentinel").unwrap();
 
     // mint must fail (pubkey already pinned) and must NOT have overwritten the secret.
-    let err = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1);
+    let err = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None);
     assert!(
         err.is_err(),
         "mint on a pinned slot must fail (AlreadyPinned)"

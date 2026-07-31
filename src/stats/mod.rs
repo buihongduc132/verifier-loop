@@ -126,7 +126,7 @@ fn collect_rounds(
         let mut verdicts: Vec<Value> = Vec::new();
         for i in 0..m as usize {
             let vid = format!("v{}", i + 1);
-            let rec = verdict::read_verdict(root, goal_id, &vid, r).unwrap_or(VerdictRecord {
+            let rec = verdict::read_verdict(root, goal_id, &vid, r, None).unwrap_or(VerdictRecord {
                 status: VerdictStatus::Null,
                 notes: None,
                 registered_at: None,
@@ -171,7 +171,7 @@ fn collect_round_verdicts(root: &Path, goal_id: &str, round: u32, m: u32) -> Vec
     let mut out = Vec::new();
     for i in 0..m as usize {
         let vid = format!("v{}", i + 1);
-        let rec = verdict::read_verdict(root, goal_id, &vid, round).unwrap_or(VerdictRecord {
+        let rec = verdict::read_verdict(root, goal_id, &vid, round, None).unwrap_or(VerdictRecord {
             status: VerdictStatus::Null,
             notes: None,
             registered_at: None,

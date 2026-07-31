@@ -65,7 +65,7 @@ fn null_verdict() -> verdict::VerdictRecord {
 
 /// Pre-create the spawn-time null placeholder verdict for a verifier slot.
 fn pre_create_null(root: &Path, goal_id: &str, vid: &str, round: u32) {
-    let vdir = verdict::verdict_path(root, goal_id, vid, round);
+    let vdir = verdict::verdict_path(root, goal_id, vid, round, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
 }
@@ -491,14 +491,14 @@ fn tamper_goal_text_invalidates_both_short_and_full_digest() {
 fn tamper_verdict_notes_invalidates_full_digest() {
     let (dir, goal_id) = fresh_goal("goal");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
 
     let salt = store::salt_in(dir.path()).unwrap();
     let record = goal::load(dir.path(), &goal_id).unwrap();
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
 
     // Hash from the registered APPROVE verdict.
-    let v = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let v = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let matching = vec![consensus::MatchingVerdict {
 
         phase_id: String::new(),
@@ -524,12 +524,12 @@ fn tamper_verdict_notes_invalidates_full_digest() {
         pubkey_id: None,
     };
     fs::write(
-        verdict::verdict_path(dir.path(), &goal_id, "v1", 1).join(verdict::VERDICT_FILE),
+        verdict::verdict_path(dir.path(), &goal_id, "v1", 1, None).join(verdict::VERDICT_FILE),
         serde_json::to_string_pretty(&tampered).unwrap(),
     )
     .unwrap();
 
-    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let matching2 = vec![consensus::MatchingVerdict {
 
         phase_id: String::new(),
@@ -562,12 +562,12 @@ fn write_completion_writes_record_on_success() {
     let (dir, goal_id) = fresh_goal("goal");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
     pre_create_null(dir.path(), &goal_id, "v2", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
-    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None, None).unwrap();
 
     let cfg = store::Config::load_in(dir.path()).unwrap(); // defaults n=2,m=2
-    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
+    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1, None).unwrap();
     let verdicts = vec![("v1".to_string(), v1), ("v2".to_string(), v2)];
     let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, cfg.n, cfg.m);
     assert!(r.passed);
@@ -640,12 +640,12 @@ fn audit_recompute_matches_stored_hash() {
     let (dir, goal_id) = fresh_goal("build the thing");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
     pre_create_null(dir.path(), &goal_id, "v2", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None).unwrap();
-    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None, None).unwrap();
 
     let cfg = store::Config::load_in(dir.path()).unwrap();
-    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
+    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1, None).unwrap();
     let verdicts = vec![("v1".to_string(), v1), ("v2".to_string(), v2)];
     let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, cfg.n, cfg.m);
     assert!(r.passed);
@@ -670,8 +670,8 @@ fn audit_recompute_matches_stored_hash() {
     assert_eq!(salt2, salt, "salt stable");
     let rec2 = goal::load(dir.path(), &goal_id).unwrap();
     let sig2 = goal::compute_signature(&salt2, &rec2.goal_text, &rec2.created_at);
-    let va = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    let vb = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
+    let va = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let vb = verdict::read_verdict(dir.path(), &goal_id, "v2", 1, None).unwrap();
     let audit_matching = vec![
         consensus::MatchingVerdict {
 
@@ -761,8 +761,8 @@ const SIGNED_TS: &str = "2026-07-04T09:00:00Z";
 /// verifying key, `register_signed_approve` signs the canonical record bytes with the
 /// matching secret and writes the verdict (+ appends a receipt entry).
 fn mint_pin_and_signed_approve(root: &Path, goal_id: &str, vid: &str, round: u32) {
-    let secret = verdict::mint_and_pin_pubkey(root, goal_id, vid, round).unwrap();
-    verdict::register_signed_approve(root, goal_id, vid, round, None, &secret).unwrap();
+    let secret = verdict::mint_and_pin_pubkey(root, goal_id, vid, round, None).unwrap();
+    verdict::register_signed_approve(root, goal_id, vid, round, None, None, &secret).unwrap();
 }
 
 /// Build + atomically write a verdict signed by `secret`, declaring `claim_pubkey_id`.
@@ -795,7 +795,7 @@ fn write_signed_verdict_with_key(
         signature: Some(hex::encode(&sig)),
         pubkey_id: Some(claim_pubkey_id.to_string()),
     };
-    let vdir = verdict::verdict_path(root, goal_id, vid, round);
+    let vdir = verdict::verdict_path(root, goal_id, vid, round, None);
     fs::create_dir_all(&vdir).unwrap();
     let target = vdir.join(verdict::VERDICT_FILE);
     let tmp = vdir.join(format!("{}.tmp", verdict::VERDICT_FILE));
@@ -813,7 +813,7 @@ fn tamper_verdict_field(
     field: &str,
     value: Value,
 ) {
-    let path = verdict::verdict_path(root, goal_id, vid, round).join(verdict::VERDICT_FILE);
+    let path = verdict::verdict_path(root, goal_id, vid, round, None).join(verdict::VERDICT_FILE);
     let raw = fs::read_to_string(&path).unwrap();
     let mut v: Value = serde_json::from_str(&raw).unwrap();
     v[field] = value;
@@ -830,7 +830,7 @@ fn read_all_verdicts(
 ) -> Vec<(String, verdict::VerdictRecord)> {
     vids.iter()
         .map(|vid| {
-            let rec = verdict::read_verdict(root, goal_id, vid, round).unwrap();
+            let rec = verdict::read_verdict(root, goal_id, vid, round, None).unwrap();
             (vid.to_string(), rec)
         })
         .collect()
@@ -985,7 +985,7 @@ fn evaluate_rejects_in_flight_registered_at_edit() {
 fn evaluate_rejects_verdict_signed_by_non_pinned_key() {
     let (dir, goal_id) = fresh_goal("ship the feature");
     // Pin K1 for v1, then sign v1's APPROVE with an unrelated K2 and CLAIM K2's id.
-    let _pinned_secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let _pinned_secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let kp2 = crypto::generate_keypair();
     let wrong_id = crypto::pubkey_id(&kp2.verifying);
     write_signed_verdict_with_key(
@@ -1033,7 +1033,7 @@ fn evaluate_rejects_unsigned_approve() {
     let (dir, goal_id) = fresh_goal("ship the feature");
     // Pin a pubkey for v1 (so the slot IS in the signed regime) but write an UNSIGNED
     // APPROVE — simulating a pre-change or tampered record.
-    let _secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let _secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let unsigned = verdict::VerdictRecord {
         status: verdict::VerdictStatus::Approve,
         notes: None,
@@ -1041,7 +1041,7 @@ fn evaluate_rejects_unsigned_approve() {
         signature: None,
         pubkey_id: None,
     };
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", 1);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", 1, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(
         vdir.join(verdict::VERDICT_FILE),

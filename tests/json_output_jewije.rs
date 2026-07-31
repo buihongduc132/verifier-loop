@@ -68,7 +68,7 @@ fn fresh_goal_with_null_verdict(round: u32) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let goal_id = goal::new(dir.path(), "build it", None).unwrap();
 
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     (dir, goal_id)
@@ -81,11 +81,11 @@ fn fresh_goal_with_pinned_v1(round: u32) -> (tempfile::TempDir, String, String) 
     let dir = tempfile::tempdir().unwrap();
     let goal_id = goal::new(dir.path(), "build it", None).unwrap();
 
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
 
-    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", round)
+    let sk = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", round, None)
         .expect("mint_and_pin_pubkey must succeed on a fresh slot");
     let secret_hex = crypto::signing_key_to_hex(&sk);
     (dir, goal_id, secret_hex)
@@ -323,7 +323,7 @@ fn receipt_log_byte_identical_with_and_without_json() {
     // Goal A: drive approve WITH --json.
     let dir_a = tempfile::tempdir().unwrap();
     let goal_a = goal::new(dir_a.path(), "build it", None).unwrap();
-    let slot_a = verdict::verdict_path(dir_a.path(), &goal_a, "v1", 1);
+    let slot_a = verdict::verdict_path(dir_a.path(), &goal_a, "v1", 1, None);
     fs::create_dir_all(&slot_a).unwrap();
     fs::write(slot_a.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     fs::write(slot_a.join(verdict::PUBKEY_FILE), pinned_json.clone()).unwrap();
@@ -344,7 +344,7 @@ fn receipt_log_byte_identical_with_and_without_json() {
     // Goal B: drive approve WITHOUT --json, on an equivalent slot.
     let dir_b = tempfile::tempdir().unwrap();
     let goal_b = goal::new(dir_b.path(), "build it", None).unwrap();
-    let slot_b = verdict::verdict_path(dir_b.path(), &goal_b, "v1", 1);
+    let slot_b = verdict::verdict_path(dir_b.path(), &goal_b, "v1", 1, None);
     fs::create_dir_all(&slot_b).unwrap();
     fs::write(slot_b.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     fs::write(slot_b.join(verdict::PUBKEY_FILE), pinned_json).unwrap();

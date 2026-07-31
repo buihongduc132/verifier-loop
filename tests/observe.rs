@@ -134,6 +134,14 @@ fn trace_id_from_env_returns_value_when_set() {
     // in parallel with other env-dependent tests via cargo's default thread
     // model per-test; we scope the var tightly.
     // We test the read helper directly.
+    //
+    // Env-isolation: VERIFIER_LOOP_TRACE_ID may leak from a parent jewilo process
+    // (the running goal sets it so child V* sessions join the same trace). The test
+    // must be deterministic regardless of parent env, so explicitly remove the var
+    // before asserting the "unset returns None" branch.
+    unsafe {
+        std::env::remove_var("VERIFIER_LOOP_TRACE_ID");
+    }
     let id = observe::trace_id_from_env();
     // Without env set, returns None.
     assert!(

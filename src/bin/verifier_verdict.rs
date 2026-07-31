@@ -203,21 +203,22 @@ fn run(cli: &Cli) -> Result<(), String> {
     // secret is required. Pinned + no secret, or secret + no pin, are both
     // Unauthenticated (fail closed). Both absent → legacy unsigned path. Both present
     // (and matching) → signed path.
-    let pinned = verdict::read_pinned_pubkey(&root, &goal_id, &verifier_id, round)
+    //
+    // phase_id from VERIFIER_LOOP_PHASE env var (dynamic-pipeline LD17). The orchestrator
+    // sets this so the V* child's jewije calls write into the correct phaseId-nested slot.
+    let phase_id_owned: Option<String> = std::env::var(verifier_loop::goal::PHASE_ENV_VAR)
+        .ok()
+        .filter(|s| !s.is_empty());
+    let phase_id_ref: Option<&str> = phase_id_owned.as_deref();
+
+    let pinned = verdict::read_pinned_pubkey(&root, &goal_id, &verifier_id, round, phase_id_ref)
         .map_err(|e| e.to_string())?;
 
     let result = match (&cli.command, pinned, signing_key.as_ref()) {
         (Cmd::Approve { ref notes }, None, None) => {
-            verdict::register_approve(&root, &goal_id, &verifier_id, round, notes.as_deref())
+            verdict::register_approve(&root, &goal_id, &verifier_id, round, phase_id_ref, notes.as_deref())
         }
-        (Cmd::Approve { ref notes }, Some(_), Some(sk)) => verdict::register_signed_approve(
-            &root,
-            &goal_id,
-            &verifier_id,
-            round,
-            notes.as_deref(),
-            sk,
-        ),
+        (Cmd::Approve { ref notes }, Some(_), Some(sk)) => verdict::register_signed_approve(&root, &goal_id, &verifier_id, round, phase_id_ref, notes.as_deref(), sk),
         (Cmd::Approve { .. }, _, None) => Err(VerdictError::Unauthenticated(
             "verifier secret missing; set $VERIFIER_LOOP_VERIFIER_SECRET".to_string(),
         )),
@@ -225,10 +226,10 @@ fn run(cli: &Cli) -> Result<(), String> {
             "no pinned verifier pubkey for this slot".to_string(),
         )),
         (Cmd::Reject { ref notes }, None, None) => {
-            verdict::register_reject(&root, &goal_id, &verifier_id, round, notes)
+            verdict::register_reject(&root, &goal_id, &verifier_id, round, phase_id_ref, notes)
         }
         (Cmd::Reject { ref notes }, Some(_), Some(sk)) => {
-            verdict::register_signed_reject(&root, &goal_id, &verifier_id, round, notes, sk)
+            verdict::register_signed_reject(&root, &goal_id, &verifier_id, round, phase_id_ref, notes, sk)
         }
         (Cmd::Reject { .. }, _, None) => Err(VerdictError::Unauthenticated(
             "verifier secret missing; set $VERIFIER_LOOP_VERIFIER_SECRET".to_string(),

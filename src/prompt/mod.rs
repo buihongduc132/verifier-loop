@@ -622,7 +622,7 @@ pub fn collect_prior_reject_notes_for_phase(
                 if same_round {
                     continue; // current-round legacy slot not yet "prior"
                 }
-                if let Ok(rec) = verdict::read_verdict(root, goal_id, child_str, round) {
+                if let Ok(rec) = verdict::read_verdict(root, goal_id, child_str, round, None) {
                     if rec.status == VerdictStatus::Reject {
                         if let Some(notes) = rec.notes.as_deref() {
                             let notes = notes.trim();

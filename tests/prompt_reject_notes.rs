@@ -30,7 +30,7 @@ fn seed_goal(root: &std::path::Path, goal_text: &str) -> String {
 
 /// Write a REJECT verdict into a slot with notes.
 fn write_reject(root: &std::path::Path, goal_id: &str, vid: &str, round: u32, notes: &str) {
-    let dir = verifier_loop::verdict::verdict_path(root, goal_id, vid, round);
+    let dir = verifier_loop::verdict::verdict_path(root, goal_id, vid, round, None);
     fs::create_dir_all(&dir).unwrap();
     let rec = VerdictRecord {
         status: VerdictStatus::Reject,
@@ -111,7 +111,7 @@ fn collect_prior_reject_notes_ignores_approve_and_null() {
     let gid = seed_goal(root, "ship feature w");
 
     // v1 APPROVE (should be ignored), v2 REJECT (should be collected).
-    let v1_dir = verifier_loop::verdict::verdict_path(root, &gid, "v1", 1);
+    let v1_dir = verifier_loop::verdict::verdict_path(root, &gid, "v1", 1, None);
     fs::create_dir_all(&v1_dir).unwrap();
     let approve = VerdictRecord {
         status: VerdictStatus::Approve,

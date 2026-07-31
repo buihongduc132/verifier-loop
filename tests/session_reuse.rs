@@ -136,6 +136,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("resume spawn succeeds");
 
@@ -224,6 +225,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("resume spawn succeeds");
 
@@ -303,6 +305,7 @@ EOF
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }))
     .unwrap();
     // Round 3 (reuse: prior turnsUsed still recorded; SID captured last round).
@@ -317,6 +320,7 @@ EOF
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }))
     .unwrap();
 
@@ -421,6 +425,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("resume spawn succeeds even with null prior sid");
 
@@ -501,6 +506,7 @@ EOF
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("resume spawn succeeds even with empty prior sid");
 

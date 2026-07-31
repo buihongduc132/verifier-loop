@@ -130,6 +130,7 @@ printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$V
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("spawn round should not hard-error");
 
@@ -196,6 +197,7 @@ printf '%s\n' '{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}' > "$V
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         })
         .await
     });
@@ -274,6 +276,7 @@ exit 0
             verifier_count: None,
             id_prefix: None,
             id_offset: 0,
+        phase_id: None,
         }))
         .expect("EPIPE after ACP output must NOT hard-error the spawn round");
 
@@ -348,6 +351,7 @@ exit 1
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     }));
 
     // The gather barrier must complete without panicking (EPIPE is fatal-but-handled).

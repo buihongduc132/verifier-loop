@@ -721,6 +721,7 @@ fn run_dynamic_round(
                 verifier_count: Some(phase.dump_count as usize),
                 id_prefix: Some("d"),
                 id_offset: dump_offset,
+                phase_id: Some(phase_id),
             };
             let runs = match rt.block_on(async {
                 match kind {
@@ -733,7 +734,7 @@ fn run_dynamic_round(
             };
             dump_offset += phase.dump_count as usize;
             for run in &runs {
-                let rec = match verifier_loop::verdict::read_verdict(root, goal_id, &run.verifier_id, round) {
+                let rec = match verifier_loop::verdict::read_verdict(root, goal_id, &run.verifier_id, round, Some(phase_id)) {
                     Ok(r) => r,
                     Err(e) => return fail(format!("verdict read {}: {e}", run.verifier_id)),
                 };
@@ -746,6 +747,7 @@ fn run_dynamic_round(
                 verifier_count: Some(phase.smart_count as usize),
                 id_prefix: Some("s"),
                 id_offset: smart_offset,
+                phase_id: Some(phase_id),
             };
             let runs = match rt.block_on(async {
                 match kind {
@@ -758,7 +760,7 @@ fn run_dynamic_round(
             };
             smart_offset += phase.smart_count as usize;
             for run in &runs {
-                let rec = match verifier_loop::verdict::read_verdict(root, goal_id, &run.verifier_id, round) {
+                let rec = match verifier_loop::verdict::read_verdict(root, goal_id, &run.verifier_id, round, Some(phase_id)) {
                     Ok(r) => r,
                     Err(e) => return fail(format!("verdict read {}: {e}", run.verifier_id)),
                 };
@@ -1158,6 +1160,7 @@ fn run_round(
         verifier_count: None,
         id_prefix: None,
         id_offset: 0,
+        phase_id: None,
     };
     let runs = match rt.block_on(async {
         let _spawn_span = tracing::info_span!("jewilo.spawn", m = config.m).entered();
@@ -1184,7 +1187,7 @@ fn run_round(
     let mut verdicts: Vec<(String, verifier_loop::verdict::VerdictRecord)> = Vec::new();
     for i in 0..m {
         let vid = verifier_id(i);
-        let rec = match verdict::read_verdict(root, goal_id, &vid, round) {
+        let rec = match verdict::read_verdict(root, goal_id, &vid, round, None) {
             Ok(r) => r,
             Err(e) => return fail(format!("verdict read {vid}: {e}")),
         };
@@ -1559,7 +1562,7 @@ fn prev_round_own_notes(
     round: u32,
 ) -> Option<String> {
     let prev = round.checked_sub(1)?;
-    let rec = verdict::read_verdict(root, goal_id, verifier_id, prev).ok()?;
+    let rec = verdict::read_verdict(root, goal_id, verifier_id, prev, None).ok()?;
     match rec.status {
         VerdictStatus::Reject => rec.notes,
         _ => None,

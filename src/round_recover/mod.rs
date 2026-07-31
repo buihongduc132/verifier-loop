@@ -194,7 +194,7 @@ pub fn status(
     if slots_populated {
         for i in 0..config.m as usize {
             let vid = verifier_id(i);
-            let rec = verdict::read_verdict(root, goal_id, &vid, round).unwrap_or(VerdictRecord {
+            let rec = verdict::read_verdict(root, goal_id, &vid, round, None).unwrap_or(VerdictRecord {
                 status: VerdictStatus::Null,
                 notes: None,
                 registered_at: None,
@@ -370,7 +370,7 @@ fn read_round_verdicts(
     let mut null_slots = Vec::new();
     for i in 0..config.m as usize {
         let vid = verifier_id(i);
-        let rec = verdict::read_verdict(root, goal_id, &vid, round).unwrap_or(VerdictRecord {
+        let rec = verdict::read_verdict(root, goal_id, &vid, round, None).unwrap_or(VerdictRecord {
             status: VerdictStatus::Null,
             notes: None,
             registered_at: None,

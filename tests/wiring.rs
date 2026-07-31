@@ -89,7 +89,7 @@ const APPROVE: &str = "APPROVE";
 fn fresh_goal_with_null_v1(round: u32) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let goal_id = goal::new(dir.path(), "build it", None).unwrap();
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", round, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
     (dir, goal_id)
@@ -98,7 +98,7 @@ fn fresh_goal_with_null_v1(round: u32) -> (tempfile::TempDir, String) {
 /// Read the raw on-disk verdict JSON (preserves the exact key set so the absence of
 /// `notes` can be asserted, which `read_verdict`'s `Option<String>` would erase).
 fn raw_verdict_json(root: &Path, goal_id: &str, vid: &str, round: u32) -> Value {
-    let path = verdict::verdict_path(root, goal_id, vid, round).join(verdict::VERDICT_FILE);
+    let path = verdict::verdict_path(root, goal_id, vid, round, None).join(verdict::VERDICT_FILE);
     let raw = fs::read_to_string(&path).unwrap();
     serde_json::from_str(&raw).unwrap()
 }
