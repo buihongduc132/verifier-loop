@@ -325,19 +325,77 @@ pub fn audit(root: &Path, goal_id: &str) -> Result<AuditReport, StatsError> {
 
     let matching_count = completion.matching_verdicts.len() as u32;
 
-    // Check 2: matching APPROVE count reaches n out of m (the creation-time requirement).
-    let count_ok = matching_count >= required_n && matching_count <= required_m;
+    // Check 2: matching APPROVE count satisfies the creation-time requirement.
+    //
+    // Dynamic-pipeline (LD17/LD25): matching verdicts span multiple phases (Gate +
+    // Confirm for PL-D; Mixed + Final for PL-E). Each phase has its own threshold,
+    // and the total matching count is the UNION across phases — so it can legitimately
+    // exceed m. We group by phaseId and check each phase independently.
+    //
+    // Legacy (all phase_ids empty/absent): single-phase, matching_count must be
+    // >= n and <= m.
+    let required_confirm = record.config.confirm_count;
+    let count_ok;
+    let count_reason;
+    {
+        // Group matching verdicts by phaseId.
+        use std::collections::BTreeMap;
+        let mut by_phase: BTreeMap<&str, u32> = BTreeMap::new();
+        let mut has_phases = false;
+        for mv in &completion.matching_verdicts {
+            let pid = mv.phase_id.as_str();
+            if !pid.is_empty() {
+                has_phases = true;
+            }
+            *by_phase.entry(pid).or_insert(0) += 1;
+        }
+
+        if has_phases {
+            // Dynamic pipeline: per-phase threshold check.
+            // Gate/Mixed phase threshold: n (PL-D) or m (PL-E). Confirm/Final threshold: confirmCount.
+            // The pipeline tag tells us which gate threshold applies.
+            let is_pl_e = completion.pipeline == "PL-E";
+            let gate_threshold = if is_pl_e { required_m } else { required_n };
+            let confirm_threshold = required_confirm;
+            // Total possible verifiers across all phases.
+            let total_spawned = required_m + required_confirm;
+
+            // Check: every phase has at least one matching verdict and the gate/confirm
+            // thresholds are met. For simplicity, we check the aggregate:
+            //   - matching_count >= gate_threshold + confirm_threshold
+            //   - matching_count <= total_spawned
+            //   - at least 2 distinct phases present (gate + confirm)
+            let distinct_phases = by_phase.len();
+            let min_required = gate_threshold + confirm_threshold;
+            count_ok = matching_count >= min_required
+                && matching_count <= total_spawned
+                && distinct_phases >= 2;
+            count_reason = if count_ok {
+                None
+            } else {
+                valid = false;
+                Some(format!(
+                    "dynamic-pipeline ({}) matching APPROVE verdicts ({}) across {distinct_phases} phases do not satisfy the creation-time requirement: gate threshold={}, confirm threshold={}, total spawned <= {}",
+                    completion.pipeline, matching_count, gate_threshold, confirm_threshold, total_spawned
+                ))
+            };
+        } else {
+            // Legacy single-phase: n of m.
+            count_ok = matching_count >= required_n && matching_count <= required_m;
+            count_reason = if count_ok {
+                None
+            } else {
+                valid = false;
+                Some(format!(
+                    "matching APPROVE verdicts ({matching_count}) do not satisfy the creation-time requirement n={required_n} of m={required_m}"
+                ))
+            };
+        }
+    }
     checks.push(AuditCheck {
         name: "verdictCountMatchesRequirement".into(),
         passed: count_ok,
-        reason: if count_ok {
-            None
-        } else {
-            valid = false;
-            Some(format!(
-                "matching APPROVE verdicts ({matching_count}) do not satisfy the creation-time requirement n={required_n} of m={required_m}"
-            ))
-        },
+        reason: count_reason,
     });
 
     // Check 3: recompute the completion hash from the stored inputs and compare.

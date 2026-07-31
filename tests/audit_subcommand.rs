@@ -456,3 +456,73 @@ fn audit_uses_creation_time_config_not_current() {
         "AUDIT.requiredM must come from goal.json's creation-time snapshot (=1), NOT current config.json: {report}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 4 — AUDIT reports valid=true for dynamic-pipeline PL-D completions.
+//
+// PL-D spawns m dump verifiers (Gate) + confirmCount smart verifiers (Confirm).
+// The total matching verdicts (e.g. 4+1=5 with m=4, confirmCount=1) can exceed m.
+// AUDIT must understand multi-phase verdicts and not reject them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn audit_valid_for_dynamic_pipeline_pl_d() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+
+    // seed_workdir sets up git + stub + a legacy config. We overwrite config.json
+    // with a dynamic-pipeline config AFTER seed_workdir so the dynamic fields are
+    // active when seed_completed_goal runs NEW.
+    let stub = seed_workdir(home, 1, 1);
+    fs::write(
+        home.join("config.json"),
+        r#"{"n":1,"m":1,"maxTurn":3,"dumpAdapter":"stub","smartAdapter":"stub","confirmCount":1,"escaThreshold":2,"gitDiffMaxChars":1000,"verifierTimeoutSec":30,"minGoalChars":0}"#,
+    ).unwrap();
+
+    let (goal_id, gdir) = seed_completed_goal(home, &stub, "audit: dynamic pipeline PL-D completion");
+
+    // Verify the completion has phaseId-bearing verdicts (dynamic pipeline ran).
+    let completion = read_completion(&gdir);
+    let matching = completion["matchingVerdicts"].as_array().expect("matchingVerdicts is array");
+    assert!(
+        matching.len() > 1,
+        "PL-D must produce >1 matching verdict (gate + confirm), got {}: {completion}",
+        matching.len()
+    );
+    let has_phases = matching.iter().any(|mv| {
+        mv["phaseId"].as_str().is_some_and(|s| !s.is_empty())
+    });
+    assert!(has_phases, "PL-D matching verdicts must have non-empty phaseId: {completion}");
+
+    // Run AUDIT — must report valid=true.
+    let out = run_vl(
+        home,
+        home,
+        Path::new("/unused/stub/audit"),
+        &["AUDIT", &goal_id],
+        &[],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "AUDIT of a valid PL-D completion must exit 0. exit={:?}\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}",
+        out.status.code()
+    );
+
+    let report: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("AUDIT stdout must be valid JSON: parse {e}\n--- stdout ---\n{stdout}")
+    });
+    eprintln!("AUDIT report (PL-D dynamic pipeline):\n{report:#}");
+
+    assert_eq!(
+        report["valid"].as_bool(),
+        Some(true),
+        "AUDIT.valid must be true for a PL-D completion with multi-phase verdicts: {report}"
+    );
+    assert_eq!(
+        report["matchingVerdicts"].as_u64(),
+        Some(matching.len() as u64),
+        "AUDIT.matchingVerdicts must reflect the total across all phases: {report}"
+    );
+}
