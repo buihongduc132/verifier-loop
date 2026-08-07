@@ -49,17 +49,26 @@ pub fn adapter_for(backend: &str) -> Result<Adapter, AcpError> {
     // be literal — otherwise pi receives `"` (1 char) as the prompt instead of the full
     // multi-KB verifier prompt. build_spawn_command splits on whitespace and passes each
     // token as a separate argv entry; the {prompt} itself is a single argv entry.
+    //
+    // The pi template includes flags to make pi fast and focused for verification work:
+    //   --no-skills: no skill discovery (the verifier policy is baked into the prompt;
+    //                without this, pi wastes turns searching for skills like wear-hats/verifier)
+    //   --no-context-files: no AGENTS.md/CLAUDE.md loading (huge context reduction; the
+    //                       prompt already has goal + frozen snapshot)
+    //   --no-prompt-templates: no prompt template discovery (policy is in the prompt)
+    //   --no-extensions: no extensions (removes hook overhead; built-in tools remain)
+    //   --thinking off: fastest generation (no extended thinking; verifier needs speed)
     "pi" => Ok(Adapter {
-            spawn: r#"pi -p {prompt} --mode json"#.to_string(),
-            resume: r#"pi --session {sid} -p {prompt} --mode json"#.to_string(),
+            spawn: r#"pi --no-skills --no-context-files --no-prompt-templates --no-extensions --thinking off -p {prompt} --mode json"#.to_string(),
+            resume: r#"pi --session {sid} --no-skills --no-context-files --no-prompt-templates --no-extensions --thinking off -p {prompt} --mode json"#.to_string(),
         }),
         "hermes" => Ok(Adapter {
-            spawn: r#"hermes -p {prompt} --mode json"#.to_string(),
-            resume: r#"hermes --session {sid} -p {prompt} --mode json"#.to_string(),
+            spawn: r#"hermes -z {prompt}"#.to_string(),
+            resume: r#"hermes -z {prompt}"#.to_string(),
         }),
         "acpx" => Ok(Adapter {
-            spawn: r#"acpx -p {prompt} --mode json"#.to_string(),
-            resume: r#"acpx --session {sid} -p {prompt} --mode json"#.to_string(),
+            spawn: r#"acpx codex --format json {prompt}"#.to_string(),
+            resume: r#"acpx codex --format json {prompt}"#.to_string(),
         }),
         other => Err(AcpError::BadEventShape(format!(
             "unknown backend '{other}' (expected one of: pi, hermes, acpx, or custom)"
@@ -88,21 +97,30 @@ mod tests {
     #[test]
     fn pi_templates_match_spec() {
         let a = adapter_for("pi").unwrap();
-        assert_eq!(a.spawn, r#"pi -p {prompt} --mode json"#);
-        assert_eq!(a.resume, r#"pi --session {sid} -p {prompt} --mode json"#);
+        // The pi template includes flags to make pi fast and focused for verification
+        // work (no skill search, no AGENTS.md context, no extensions, no extended thinking).
+        // See the adapter_for comment for the rationale per flag.
+        assert!(a.spawn.starts_with("pi "), "spawn must start with pi: {}", a.spawn);
+        assert!(a.spawn.contains("-p {prompt}"), "spawn must pass prompt: {}", a.spawn);
+        assert!(a.spawn.contains("--mode json"), "spawn must use json mode: {}", a.spawn);
+        assert!(a.spawn.contains("--no-skills"), "spawn must disable skills: {}", a.spawn);
+        assert!(a.spawn.contains("--no-context-files"), "spawn must disable context files: {}", a.spawn);
+        assert!(a.spawn.contains("--thinking off"), "spawn must use thinking off: {}", a.spawn);
+        assert!(a.resume.contains("--session {sid}"), "resume must include sid: {}", a.resume);
+        assert!(a.resume.contains("--no-skills"), "resume must disable skills: {}", a.resume);
     }
 
     #[test]
     fn hermes_templates_match_spec() {
         let a = adapter_for("hermes").unwrap();
-        assert!(a.spawn.contains("hermes") && a.spawn.contains("--mode json"));
-        assert!(a.resume.contains("--session") && a.resume.contains("{sid}"));
+        assert!(a.spawn.contains("hermes") && a.spawn.contains("-z"));
+        assert!(a.resume.contains("hermes"));
     }
 
     #[test]
     fn acpx_templates_match_spec() {
         let a = adapter_for("acpx").unwrap();
-        assert!(a.spawn.contains("acpx") && a.spawn.contains("--mode json"));
+        assert!(a.spawn.contains("acpx") && a.spawn.contains("--format json"));
     }
 
     #[test]

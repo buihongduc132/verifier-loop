@@ -309,31 +309,51 @@ async fn gather(
         // orphaned grandchildren that hold the stdout pipe) once the main backend exits.
         let leader_pid = child.id();
         let drain = tokio::spawn(async move {
-            // Best-effort stderr drain so a chatty backend never blocks on a full pipe.
-            if let Some(mut p) = stderr_pipe {
-                use tokio::io::AsyncReadExt;
-                let mut sink = Vec::<u8>::new();
-                let _ = p.read_to_end(&mut sink).await;
-            }
-            let buf = match stdout_pipe {
-                Some(mut pipe) => {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    let _ = pipe.read_to_end(&mut buf).await;
-                    buf
+            // Drain stdout and stderr CONCURRENTLY. Both pipes must be read in
+            // parallel because the OS pipe buffer is only ~64KB: a chatty backend
+            // (pi emits 150KB+ of ACP events) fills the stdout buffer and blocks
+            // on write if stdout isn't drained. If we read stderr FIRST (sequential),
+            // the drain blocks on stderr read_to_end (which only reaches EOF when
+            // the child exits), while stdout accumulates unread — the child blocks
+            // on stdout write, can't exit, stderr never reaches EOF → DEADLOCK.
+            // Concurrent drain prevents this: both pipes are drained as data arrives.
+            use tokio::io::AsyncReadExt;
+
+            let stderr_fut = async {
+                if let Some(mut p) = stderr_pipe {
+                    let mut sink = Vec::<u8>::new();
+                    let _ = p.read_to_end(&mut sink).await;
                 }
-                None => Vec::new(),
             };
-            buf
+            let stdout_fut = async {
+                match stdout_pipe {
+                    Some(mut pipe) => {
+                        let mut buf = Vec::new();
+                        let _ = pipe.read_to_end(&mut buf).await;
+                        buf
+                    }
+                    None => Vec::new(),
+                }
+            };
+            let (_, stdout_buf) = tokio::join!(stderr_fut, stdout_fut);
+            stdout_buf
         });
 
         let run = tokio::select! {
             biased;
             _ = tokio::time::sleep(timeout) => {
-                // Timeout (D9): kill, reap, leave null verdict. No SID / final output.
+                // Timeout (D9): kill, reap, leave null verdict. Best-effort drain so
+                // we capture any partial SID/output + avoid leaking the drain task.
                 let _ = child.start_kill();
                 if let Some(pid) = leader_pid { kill_process_group(pid); }
                 let _ = child.wait().await;
+                let _buf = match tokio::time::timeout(
+                    Duration::from_secs(3),
+                    drain,
+                ).await {
+                    Ok(Ok(buf)) => buf,
+                    _ => Vec::new(),
+                };
                 VerifierRun { verifier_id: vid, sid: None, final_output: None, timed_out: true }
             }
             status = child.wait() => {
@@ -656,5 +676,76 @@ mod tests {
             d,
             Path::new("/tmp/x/goals/g1/rounds/2")
         );
+    }
+
+    /// Regression test for the stdout/stderr drain deadlock (2026-08-08).
+    ///
+    /// The gather() drain MUST read stdout and stderr CONCURRENTLY. The previous
+    /// implementation read stderr to EOF *first*, then stdout. Because the OS pipe
+    /// buffer is only ~64KB, a chatty backend (pi emits 150KB+ of ACP events) fills
+    /// the stdout buffer and blocks on write. With stderr still open (child running),
+    /// the drain never reaches stdout → the child blocks on stdout write → can't exit
+    /// → stderr never reaches EOF → DEADLOCK. This reproduces the "0% CPU stall"
+    /// symptom.
+    ///
+    /// This test spawns a child that writes >64KB to stdout *while keeping stderr
+    /// open*, then closes both. With concurrent drain (tokio::join) it completes in
+    /// <5s. With sequential drain it would deadlock forever.
+    #[tokio::test]
+    async fn concurrent_drain_no_deadlock_on_large_stdout() {
+        use std::process::Stdio;
+        // Script: write 256KB to stdout (4x pipe buffer), hold stderr open, then exit.
+        // If stdout isn't drained concurrently, the script blocks on stdout write.
+        let script = r#"
+            process.stdout.write('S'.repeat(256 * 1024));
+            process.stderr.write('stderr held open\n');
+            // Simulate a chatty backend that keeps stderr open until stdout is drained
+            setTimeout(() => { process.stderr.write('done\n'); }, 100);
+        "#;
+        let mut cmd = Command::new("node");
+        cmd.arg("-e")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn node");
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        // CONCURRENT drain (the fix): read stdout and stderr in parallel via join.
+        let drain = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let stderr_fut = async {
+                if let Some(mut p) = stderr_pipe {
+                    let mut sink = Vec::new();
+                    let _ = p.read_to_end(&mut sink).await;
+                }
+            };
+            let stdout_fut = async {
+                match stdout_pipe {
+                    Some(mut pipe) => {
+                        let mut buf = Vec::new();
+                        let _ = pipe.read_to_end(&mut buf).await;
+                        buf.len()
+                    }
+                    None => 0,
+                }
+            };
+            let (_, n) = tokio::join!(stderr_fut, stdout_fut);
+            n
+        });
+
+        // Must complete quickly — a deadlock would hit this timeout.
+        let result = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+        assert!(result.is_ok(), "child must exit promptly (no deadlock)");
+        let status = result.unwrap().expect("wait ok");
+        assert!(status.success(), "child exited cleanly");
+
+        let n = tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("drain completes")
+            .expect("drain ok");
+        assert_eq!(n, 256 * 1024, "all 256KB of stdout must be captured");
     }
 }
