@@ -45,17 +45,21 @@ impl Adapter {
 /// verdict indistinguishable from a real crash).
 pub fn adapter_for(backend: &str) -> Result<Adapter, AcpError> {
     match backend {
-        "pi" => Ok(Adapter {
-            spawn: r#"pi -p "{prompt}" --mode json"#.to_string(),
-            resume: r#"pi --session {sid} -p "{prompt}" --mode json"#.to_string(),
+        // NOTE: {prompt} is passed via cmd.arg() (no shell), so quotes around it must NOT
+    // be literal — otherwise pi receives `"` (1 char) as the prompt instead of the full
+    // multi-KB verifier prompt. build_spawn_command splits on whitespace and passes each
+    // token as a separate argv entry; the {prompt} itself is a single argv entry.
+    "pi" => Ok(Adapter {
+            spawn: r#"pi -p {prompt} --mode json"#.to_string(),
+            resume: r#"pi --session {sid} -p {prompt} --mode json"#.to_string(),
         }),
         "hermes" => Ok(Adapter {
-            spawn: r#"hermes -p "{prompt}" --mode json"#.to_string(),
-            resume: r#"hermes --session {sid} -p "{prompt}" --mode json"#.to_string(),
+            spawn: r#"hermes -p {prompt} --mode json"#.to_string(),
+            resume: r#"hermes --session {sid} -p {prompt} --mode json"#.to_string(),
         }),
         "acpx" => Ok(Adapter {
-            spawn: r#"acpx -p "{prompt}" --mode json"#.to_string(),
-            resume: r#"acpx --session {sid} -p "{prompt}" --mode json"#.to_string(),
+            spawn: r#"acpx -p {prompt} --mode json"#.to_string(),
+            resume: r#"acpx --session {sid} -p {prompt} --mode json"#.to_string(),
         }),
         other => Err(AcpError::BadEventShape(format!(
             "unknown backend '{other}' (expected one of: pi, hermes, acpx, or custom)"
@@ -84,8 +88,8 @@ mod tests {
     #[test]
     fn pi_templates_match_spec() {
         let a = adapter_for("pi").unwrap();
-        assert_eq!(a.spawn, r#"pi -p "{prompt}" --mode json"#);
-        assert_eq!(a.resume, r#"pi --session {sid} -p "{prompt}" --mode json"#);
+        assert_eq!(a.spawn, r#"pi -p {prompt} --mode json"#);
+        assert_eq!(a.resume, r#"pi --session {sid} -p {prompt} --mode json"#);
     }
 
     #[test]

@@ -422,7 +422,7 @@ fn archive_prior_sid(prev_vdir: &Path, sid: &str) -> Result<(), SpawnError> {
 /// Parse a rendered command string into a `Command`.
 ///
 /// Adapter templates embed the prompt via `{prompt}` substitution inside shell quotes
-/// (e.g. `pi -p "{prompt}" --mode json`). The prompt is arbitrary multi-KB text with
+/// (e.g. `pi -p {prompt} --mode json`). The prompt is arbitrary multi-KB text with
 /// spaces, newlines, and quotes, so naive `split_whitespace()` would shatter it into
 /// thousands of args. We delegate to `sh -c` so the shell handles quoting correctly.
 fn build_spawn_command(template: &str, prompt: &str) -> Command {
