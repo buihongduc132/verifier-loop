@@ -31,6 +31,31 @@ use crate::goal;
 use crate::store;
 use crate::verdict;
 
+/// Spawn configuration for verifier backends. On Unix, we do NOT isolate the process
+/// group/session because pi (the primary backend) stalls at 0% CPU when detached from
+/// the controlling terminal (verified: both process_group(0) and setsid cause stalls).
+/// Instead, we rely on a drain timeout in the gather layer to avoid hanging when pi's
+/// bash subprocesses keep the stdout pipe open after pi exits.
+#[cfg(unix)]
+fn isolate_process_group(_cmd: &mut Command) {
+    // No-op: pi needs the parent's session/controlling terminal to avoid stalling.
+}
+#[cfg(not(unix))]
+fn isolate_process_group(_cmd: &mut Command) {}
+
+/// Signal an entire process group (SIGKILL) by its leader's pid. Used after the main
+/// backend exits to force orphaned grandchildren to close inherited pipe fds so the
+/// stdout drain reaches EOF. No-op on non-Unix. Best-effort: errors are ignored.
+#[cfg(unix)]
+fn kill_process_group(leader_pid: u32) {
+    // Negative pid => signal the whole group whose pgid == leader_pid.
+    unsafe {
+        libc::killpg(leader_pid as i32, libc::SIGKILL);
+    }
+}
+#[cfg(not(unix))]
+fn kill_process_group(_leader_pid: u32) {}
+
 /// Subdirectory name for a verifier id under a round directory.
 /// Verifier ids are `v1`, `v2`, … `v{m}` (spec: "v1, v2, ...").
 fn verifier_id(idx: usize) -> String {
@@ -160,6 +185,7 @@ pub async fn spawn_round(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spaw
     // the OS process immediately; awaiting is the gather barrier.
     let mut children: Vec<(String, tokio::process::Child, PathBuf)> = Vec::new();
     for (vid, mut cmd, vdir) in plan {
+        isolate_process_group(&mut cmd);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -244,6 +270,7 @@ pub async fn spawn_resume(input: SpawnInput<'_>) -> Result<Vec<VerifierRun>, Spa
 
     let mut children: Vec<(String, tokio::process::Child, PathBuf)> = Vec::new();
     for (vid, mut cmd, vdir) in plan {
+        isolate_process_group(&mut cmd);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -278,6 +305,9 @@ async fn gather(
         // leaving a null verdict despite a successful run.
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
+        // Capture the child's pid BEFORE wait() so we can killpg its group (including
+        // orphaned grandchildren that hold the stdout pipe) once the main backend exits.
+        let leader_pid = child.id();
         let drain = tokio::spawn(async move {
             // Best-effort stderr drain so a chatty backend never blocks on a full pipe.
             if let Some(mut p) = stderr_pipe {
@@ -302,12 +332,25 @@ async fn gather(
             _ = tokio::time::sleep(timeout) => {
                 // Timeout (D9): kill, reap, leave null verdict. No SID / final output.
                 let _ = child.start_kill();
+                if let Some(pid) = leader_pid { kill_process_group(pid); }
                 let _ = child.wait().await;
                 VerifierRun { verifier_id: vid, sid: None, final_output: None, timed_out: true }
             }
             status = child.wait() => {
-                // Child exited; the drain task finishes shortly after (pipe hits EOF).
-                let buf = drain.await.unwrap_or_default();
+                // Main backend exited. Kill any orphaned grandchildren that inherited
+                // the stdout pipe (pi's bash subprocesses) so the drain can complete.
+                if let Some(pid) = leader_pid { kill_process_group(pid); }
+                // Drain with a 5s timeout: if grandchildren still hold the pipe after
+                // killpg (rare), don't hang forever — return what we have. The verdict
+                // is written to disk by the verifier-verdict binary, independent of
+                // stdout capture.
+                let buf = match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    drain,
+                ).await {
+                    Ok(Ok(buf)) => buf,
+                    _ => Vec::new(), // timed out or drain panicked
+                };
                 let stdout = String::from_utf8_lossy(&buf);
                 let sid = acp::extract_sid(&stdout);
                 let final_output = acp::extract_final_output(&stdout);

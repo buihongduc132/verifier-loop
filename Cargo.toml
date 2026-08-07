@@ -46,6 +46,10 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 # Portable advisory file locking (receipt-log append mutual exclusion) -> tamper-hardening PR#5 review
 fs4 = "0.12"
+# Unix process-group signalling (kill orphaned backend children that inherit the
+# stdout pipe so jewilo's drain reaches EOF after the main backend exits). -> §5.4 gather
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # deterministic temp HOMEs for store tests                        -> §2.3,§3.5
