@@ -243,7 +243,7 @@ pub fn truncate_diff(s: &str, max_chars: u64) -> (String, bool) {
 ///
 /// Runs, in `cwd`:
 ///   * `git status --porcelain`
-///   * `git diff` (unpaged)
+///   * `git diff HEAD` (unpaged; staged + unstaged vs last commit)
 ///   * `git ls-files` then reads each file's mtime (best-effort; a missing/unreadable
 ///     file is skipped, never fatal).
 ///   * `git rev-parse --show-toplevel` is checked first; a non-git cwd fails closed.
@@ -256,7 +256,17 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
     git_check(cwd)?;
 
     let git_status = git_capture(cwd, &["status", "--porcelain"])?;
-    let raw_diff = git_capture(cwd, &["diff"])?;
+    // Full working-tree delta vs the last commit (staged AND unstaged). Bare
+    // `git diff` would hide staged changes, letting an author `git add` a
+    // regression and keep it invisible to every verifier. On a repo with no
+    // commits yet (fresh `git init`), `git diff HEAD` errors — fall back to
+    // `git diff --cached` so staged intent is still captured (unstaged changes
+    // to untracked files are listed by `git status --porcelain` above).
+    let raw_diff = match git_capture(cwd, &["diff", "HEAD"]) {
+        Ok(d) => d,
+        Err(_) if !head_exists(cwd)? => git_capture(cwd, &["diff", "--cached"])?,
+        Err(e) => return Err(e),
+    };
     let (git_diff, truncated) = truncate_diff(&raw_diff, max_chars);
     let file_edit_times = capture_file_edit_times(cwd)?;
 
@@ -268,6 +278,19 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
         git_diff_max_chars: max_chars,
         truncated,
     })
+}
+
+/// Returns true iff `cwd` has at least one commit (HEAD resolves). Used to pick
+/// between `git diff HEAD` and the fresh-repo fallback without swallowing real
+/// git errors (fail-closed still holds for `git diff` failures on a real repo).
+fn head_exists(cwd: &Path) -> Result<bool, PromptError> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()
+        .map_err(|e| PromptError::SnapshotCapture(format!("git rev-parse failed: {e}")))?;
+    Ok(out.status.success())
 }
 
 /// Asserts `cwd` is inside a git work tree; errors otherwise (fail-closed).
@@ -309,27 +332,48 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<String, PromptError> {
 /// or unreadable file is skipped, never fatal to the whole snapshot.
 fn capture_file_edit_times(cwd: &Path) -> Result<String, PromptError> {
     let listing = git_capture(cwd, &["ls-files"])?;
+    // Cap the rendered snapshot to keep the verifier prompt well under Linux's
+    // MAX_ARG_STRLEN (128 KiB per arg) — the prompt is passed as a single CLI
+    // arg via cmd.arg(prompt) (orchestrator.rs build_spawn_command), and large
+    // repos (thousands of tracked files) push it past the limit → E2BIG → the
+    // verifier spawn silently fails (turnsUsed stays 0). 8 KiB leaves ample
+    // room for the prompt body + diff + git status while staying safely below
+    // the per-arg ceiling.
+    const MAX_FILE_EDIT_TIMES_BYTES: usize = 8 * 1024;
     let mut lines = Vec::new();
+    let mut total: usize = 0;
+    let mut truncated_count: u64 = 0;
     for rel in listing.lines() {
         if rel.is_empty() {
             continue;
         }
         let abs = cwd.join(rel);
-        match fs::metadata(&abs).and_then(|m| m.modified()) {
+        let entry = match fs::metadata(&abs).and_then(|m| m.modified()) {
             Ok(modified) => {
                 let secs = modified
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                lines.push(format!("{rel}:{secs}"));
+                format!("{rel}:{secs}")
             }
             Err(_) => {
                 // Skip unreadable/missing file; do not fail the snapshot.
-                lines.push(format!("{rel}:?"));
+                format!("{rel}:?")
             }
+        };
+        // +1 for the joining newline.
+        if total + entry.len() + 1 > MAX_FILE_EDIT_TIMES_BYTES {
+            truncated_count += 1;
+            continue;
         }
+        total += entry.len() + 1;
+        lines.push(entry);
     }
-    Ok(lines.join("\n"))
+    let mut out = lines.join("\n");
+    if truncated_count > 0 {
+        out.push_str(&format!("\n# ... ({} more files truncated: snapshot capped at {} bytes)", truncated_count, MAX_FILE_EDIT_TIMES_BYTES));
+    }
+    Ok(out)
 }
 
 /// Persists the rendered prompt to `rounds/<round>/<verifierId>/initial-prompt.txt`,
