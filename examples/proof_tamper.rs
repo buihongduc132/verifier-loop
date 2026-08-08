@@ -8,8 +8,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use verifier_loop::consensus::{self, CompletionRecord};
 use verifier_loop::goal;
+use verifier_loop::store::load_config_in;
 use verifier_loop::verdict;
-use verifier_loop::store::{load_config_in};
 
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).expect("goal_dir arg"));
@@ -49,7 +49,7 @@ fn main() {
     // verdict drops out of the matching set -> different (or no) hash.
     let mut verdicts = Vec::new();
     for vid in ["v1", "v2"] {
-        if let Ok(rec) = verdict::read_verdict(root, &gid, vid, round) {
+        if let Ok(rec) = verdict::read_verdict(root, &gid, vid, round, None) {
             verdicts.push((vid.to_string(), rec));
         }
     }

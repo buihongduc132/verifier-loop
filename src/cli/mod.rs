@@ -1,6 +1,7 @@
 //! CLI command definitions (tasks.md §10) for both binaries.
 //!
-//! * `verifier-loop` (`jewilo`):   `NEW "<goal>" [--context]`, `RESUME <goalId> [--fix "…"]`.
+//! * `verifier-loop` (`jewilo`):   `NEW "<goal>" [--context]` (or `NEW --init-prompt-file <path>`),
+//!   `RESUME <goalId> [--fix "…"] [--notes "…"]...`, `RECOVER <goalId>`, `STATUS <goalId>`.
 //! * `verifier-verdict` (`jewije`): `approve`, `reject --notes "…"` (defined inline in its
 //!   own bin; this module holds the `verifier-loop` shared command structs so the bin stays
 //!   a thin dispatch layer over the lib).
@@ -9,6 +10,8 @@
 //! the `verifier-loop` bin. Identity / store resolution (env wins) lives in the bin.
 
 use clap::{Parser, Subcommand};
+
+pub mod json_output;
 
 /// `verifier-loop` (jewilo) top-level CLI.
 #[derive(Debug, Parser)]
@@ -19,6 +22,12 @@ use clap::{Parser, Subcommand};
     about = "Spawn verifiers, gather verdicts, and produce a tamper-evident completion hash."
 )]
 pub struct VerifierLoopCli {
+    /// Machine-readable JSON output mode (`add-json-output-mode`, design D2). Global so it
+    /// parses both before AND after the subcommand: `jewilo --json NEW <goal>` and
+    /// `jewilo NEW <goal> --json` both work.
+    #[arg(long, short = 'j', global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: VerifierLoopCmd,
 }
@@ -29,11 +38,17 @@ pub enum VerifierLoopCmd {
     /// Create a new immutable goal, spawn round 1, evaluate n/m consensus.
     #[command(name = "NEW")]
     New {
-        /// The goal text (immutable once written to goal.json).
-        goal: String,
+        /// The goal text (immutable once written to goal.json). Optional when
+        /// `--init-prompt-file` is supplied; exactly one of the two must be given.
+        goal: Option<String>,
         /// Optional context annotation recorded into goal.json.
         #[arg(long)]
         context: Option<String>,
+        /// Read the goal text from this file instead of the positional `goal` arg.
+        /// A single trailing newline is trimmed; interior newlines are preserved.
+        /// Exactly one of `goal` / `--init-prompt-file` is required.
+        #[arg(long)]
+        init_prompt_file: Option<String>,
     },
     /// Resume a goal: increment the round, append fix notes, respawn verifiers.
     #[command(name = "RESUME")]
@@ -43,5 +58,43 @@ pub enum VerifierLoopCmd {
         /// Optional fix notes appended to the new round's fix-notes.json.
         #[arg(long)]
         fix: Option<String>,
+        /// Optional goal-scoped notes appended (append-only) to goal-notes.json. Each
+        /// `--notes` value is a separate entry; the on-disk goal stays immutable and the
+        /// notes are auto-concatenated (one per line) only into the verifier prompt.
+        /// Repeatable. There is no command to strip / remove / update notes.
+        #[arg(long = "notes")]
+        notes: Vec<String>,
+    },
+    /// Cross-process round recovery (SHAPE-1): wait for already-emitted verdicts from the
+    /// current round and re-evaluate consensus. Does NOT spawn, kill, re-render, or
+    /// re-capture. Use after jewilo was killed/interrupted mid-round (add-round-recovery).
+    #[command(name = "RECOVER")]
+    Recover {
+        /// The goalId (UUID) to recover.
+        goal_id: String,
+    },
+    /// Read-only machine-readable goal state: round, state, needs, and per-slot verdicts
+    /// (add-round-recovery LD7). Does not take the goal lock; never blocks.
+    #[command(name = "STATUS")]
+    Status {
+        /// The goalId (UUID) to inspect.
+        goal_id: String,
+    },
+    /// Read-only aggregate of ALL stored JSON for a goal run: goal record, creation-time
+    /// config snapshot, per-round verdicts, completion, health, and durations. Does not
+    /// take the goal lock; never blocks or spawns verifiers (intention 2026-07-14).
+    #[command(name = "STATS")]
+    Stats {
+        /// The goalId (UUID) to inspect.
+        goal_id: String,
+    },
+    /// Read-only post-hoc audit: verifies the final completion TRULY matches the
+    /// creation-time config requirement (n/m verdict match + hash recompute). Prints a
+    /// JSON report and exits 0 if valid, non-zero otherwise. Does not take the goal lock
+    /// or spawn verifiers (intention 2026-07-14).
+    #[command(name = "AUDIT")]
+    Audit {
+        /// The goalId (UUID) to audit.
+        goal_id: String,
     },
 }

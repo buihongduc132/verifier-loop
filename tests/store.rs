@@ -128,11 +128,7 @@ fn config_parses_verifier_prompt_file_when_present() {
 #[test]
 fn config_parses_min_goal_chars_when_present() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("config.json"),
-        r#"{"minGoalChars":50}"#,
-    )
-    .unwrap();
+    fs::write(dir.path().join("config.json"), r#"{"minGoalChars":50}"#).unwrap();
 
     let cfg = store::load_config_in(dir.path()).expect("config loads with minGoalChars");
     assert_eq!(
@@ -176,6 +172,10 @@ fn config_camel_case_round_trips_verifier_prompt_file_and_min_goal_chars() {
         verifier_timeout_sec: 10,
         verifier_prompt_file: Some("/abs/path/to/prompt.md".into()),
         min_goal_chars: 42,
+        file_edit_times_max_chars: 8_000,
+        context_max_chars: 20_000,
+        prompt_budget_bytes: 50_000,
+        ..store::Config::default()
     };
     let j = serde_json::to_string(&cfg).unwrap();
     // camelCase keys must appear verbatim on disk (the on-disk contract).
@@ -187,9 +187,26 @@ fn config_camel_case_round_trips_verifier_prompt_file_and_min_goal_chars() {
         j.contains("\"minGoalChars\":42"),
         "minGoalChars must serialize camelCase: {j}",
     );
+    // The 3 prompt-bloat config fields must serialize camelCase (a removed
+    // #[serde(rename)] would silently break the round-trip without these).
+    assert!(
+        j.contains("\"fileEditTimesMaxChars\":8000"),
+        "fileEditTimesMaxChars must serialize camelCase: {j}",
+    );
+    assert!(
+        j.contains("\"contextMaxChars\":20000"),
+        "contextMaxChars must serialize camelCase: {j}",
+    );
+    assert!(
+        j.contains("\"promptBudgetBytes\":50000"),
+        "promptBudgetBytes must serialize camelCase: {j}",
+    );
 
     let back: store::Config = serde_json::from_str(&j).unwrap();
-    assert_eq!(back, cfg, "round-trip preserves verifier_prompt_file + min_goal_chars");
+    assert_eq!(
+        back, cfg,
+        "round-trip preserves verifier_prompt_file + min_goal_chars"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -221,13 +238,9 @@ fn config_rejects_unknown_key_cwd() {
 #[test]
 fn config_rejects_unknown_key_model() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("config.json"),
-        r#"{"model":null}"#,
-    )
-    .unwrap();
-    let err = store::load_config_in(dir.path())
-        .expect_err("model is not a config key; MUST be rejected");
+    fs::write(dir.path().join("config.json"), r#"{"model":null}"#).unwrap();
+    let err =
+        store::load_config_in(dir.path()).expect_err("model is not a config key; MUST be rejected");
     assert!(
         err.to_string().to_lowercase().contains("model"),
         "error must name 'model': {}",
@@ -269,7 +282,7 @@ fn config_accepts_canonical_keys_only() {
         r#"{"n":2,"m":2,"maxTurn":3,"backend":"pi","gitDiffMaxChars":10000,"verifierTimeoutSec":1800,"verifierPromptFile":null,"minGoalChars":0}"#,
     )
     .unwrap();
-    let cfg = store::load_config_in(dir.path())
-        .expect("canonical keys only must parse without error");
+    let cfg =
+        store::load_config_in(dir.path()).expect("canonical keys only must parse without error");
     assert_eq!((cfg.n, cfg.m), (2, 2));
 }

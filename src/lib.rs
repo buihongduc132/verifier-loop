@@ -17,6 +17,7 @@
 //! | [`prompt`]  | §9       | verifier-prompt     | blind + frozen-artifact prompt rendering        |
 //! | [`cli`]     | §10      | (wiring)            | CLI command definitions for both binaries       |
 //! | [`crypto`]  | tamper   | verifier-identity / signed-verdict-record | Ed25519 sign/verify + canonical record bytes |
+//! | [`health`]  | 2026-07-14 | (health self-awareness) | unhealthy-run detection + cooldown fallback |
 //!
 //! Fail-closed invariants (D9): every error path is explicit (`Result<T,E>`); a NULL verdict
 //! never becomes APPROVE; a missing store yields no hash.
@@ -29,9 +30,14 @@ pub mod cli;
 pub mod consensus;
 pub mod crypto;
 pub mod goal;
+pub mod health;
+pub mod observe;
 pub mod prompt;
+pub mod pipeline;
 pub mod receipt;
+pub mod round_recover;
 pub mod spawn;
+pub mod stats;
 pub mod store;
 pub mod verdict;
 

@@ -2,12 +2,12 @@
 //!
 //! Two artefacts live under the store root (default `~/.verifier-loop/`):
 //!
-//! * `.salt`        — 64 hex chars, mode 0600, created on first run, **never** overwritten,
-//!                    never printed/logged/exposed to the invoking agent (A). It salts the
-//!                    goal signature (D5) which in turn feeds the completion hash (D6).
-//! * `config.json`  — n, m, maxTurn, backend, gitDiffMaxChars, verifierTimeoutSec, plus
-//!                    optional prompt/resume + custom-adapter templates. Missing fields fall
-//!                    back to documented defaults; a missing file is entirely defaulted.
+//! * `.salt` — 64 hex chars, mode 0600, created on first run, **never** overwritten,
+//!   never printed/logged/exposed to the invoking agent (A). It salts the goal
+//!   signature (D5) which in turn feeds the completion hash (D6).
+//! * `config.json` — n, m, maxTurn, backend, gitDiffMaxChars, verifierTimeoutSec,
+//!   plus optional prompt/resume + custom-adapter templates. Missing fields fall
+//!   back to documented defaults; a missing file is entirely defaulted.
 //!
 //! Fail-closed: every error is explicit (`Result<T, StoreError>`); a missing/unreadable
 //! store surfaces as an error, never a silent default-of-secrets.

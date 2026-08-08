@@ -55,3 +55,13 @@ examples_tmp/
 # ---- Dependencies vendored locally (avoid committing huge dirs) ----
 /vendor/
 /node_modules/
+.smoke/
+target
+
+# worktrees (never commit)
+.worktrees/
+
+# bench harness per-run output
+scripts/bench/runs/
+.pi-subagents/
+.pi-opa-net/

@@ -59,6 +59,14 @@ pub enum AcpEvent {
         messages: Vec<Message>,
         will_retry: bool,
     },
+    /// `{"type":"compaction","tokensBefore":N,"tokensAfter":M?}` — the backend compacted
+    /// the session context mid-run. Compaction is the confirmed kill mechanism for
+    /// verifier verdicts: the session terminates with no `agent_end` and the verdict is
+    /// lost. The orchestrator treats this as a first-class recoverable event (D6).
+    Compaction {
+        tokens_before: Option<u64>,
+        tokens_after: Option<u64>,
+    },
 }
 
 /// Parse a single ACP JSON line into an [`AcpEvent`].
@@ -107,7 +115,9 @@ pub fn parse_event(line: &str) -> Result<Option<AcpEvent>, AcpError> {
             let messages = value
                 .get("messages")
                 .and_then(Value::as_array)
-                .ok_or_else(|| AcpError::BadEventShape("agent_end missing 'messages' array".into()))?
+                .ok_or_else(|| {
+                    AcpError::BadEventShape("agent_end missing 'messages' array".into())
+                })?
                 .iter()
                 .map(parse_message_value)
                 .collect::<Result<Vec<_>, _>>()?;
@@ -118,6 +128,14 @@ pub fn parse_event(line: &str) -> Result<Option<AcpEvent>, AcpError> {
             AcpEvent::AgentEnd {
                 messages,
                 will_retry,
+            }
+        }
+        "compaction" => {
+            let tokens_before = value.get("tokensBefore").and_then(Value::as_u64);
+            let tokens_after = value.get("tokensAfter").and_then(Value::as_u64);
+            AcpEvent::Compaction {
+                tokens_before,
+                tokens_after,
             }
         }
         // Well-formed but non-essential events: ignorable. Returning None keeps the
@@ -162,6 +180,18 @@ pub fn extract_final_output(stream: &str) -> Option<String> {
         }
     }
     last
+}
+
+/// Returns true iff the stream contains at least one `compaction` event.
+/// Used by the orchestrator to decide whether a no-agent_end exit is a compaction
+/// kill (recoverable) vs a plain crash (fail-closed).
+pub fn extract_compaction_observed(stream: &str) -> bool {
+    for line in stream.lines() {
+        if matches!(parse_event(line), Ok(Some(AcpEvent::Compaction { .. }))) {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

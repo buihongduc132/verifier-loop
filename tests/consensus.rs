@@ -65,25 +65,29 @@ fn null_verdict() -> verdict::VerdictRecord {
 
 /// Pre-create the spawn-time null placeholder verdict for a verifier slot.
 fn pre_create_null(root: &Path, goal_id: &str, vid: &str, round: u32) {
-    let vdir = verdict::verdict_path(root, goal_id, vid, round);
+    let vdir = verdict::verdict_path(root, goal_id, vid, round, None);
     fs::create_dir_all(&vdir).unwrap();
-    fs::write(
-        vdir.join(verdict::VERDICT_FILE),
-        r#"{"status":null}"#,
-    )
-    .unwrap();
+    fs::write(vdir.join(verdict::VERDICT_FILE), r#"{"status":null}"#).unwrap();
 }
 
 /// Independent canonical-JSON of matching verdicts (mirrors the spec): an array of
-/// objects `{"registeredAt":..,"verifierId":..}` sorted by verifierId, keys alphabetical
-/// (via BTreeMap), no whitespace. This is the audit-side recompute, NOT the impl.
+/// objects `{"phaseId":..,"registeredAt":..,"verifierId":..}` sorted by
+/// (phaseId, verifierId), keys alphabetical (via BTreeMap), no whitespace. This is the
+/// audit-side recompute, NOT the impl. Updated for dynamic-pipeline (LD25): phaseId is
+/// now a hash input.
 fn canonical_matching_json(matching: &[consensus::MatchingVerdict]) -> String {
     let mut sorted: Vec<&consensus::MatchingVerdict> = matching.iter().collect();
-    sorted.sort_by(|a, b| a.verifier_id.cmp(&b.verifier_id));
+    // LD25: sort by (phaseId, verifierId).
+    sorted.sort_by(|a, b| {
+        a.phase_id
+            .cmp(&b.phase_id)
+            .then(a.verifier_id.cmp(&b.verifier_id))
+    });
     let arr: Vec<Value> = sorted
         .iter()
         .map(|m| {
             let mut map = BTreeMap::new();
+            map.insert("phaseId".to_string(), json!(m.phase_id));
             map.insert("registeredAt".to_string(), json!(m.registered_at));
             map.insert("verifierId".to_string(), json!(m.verifier_id));
             serde_json::to_value(&map).unwrap()
@@ -139,7 +143,14 @@ fn evaluate_2_of_2_unanimous_pass() {
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
     ];
     // Legacy unsigned regime: no pinned pubkeys → unsigned APPROVEs are trusted.
-    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 2);
+    let r = consensus::evaluate(
+        Path::new("/nonexistent-consensus-legacy"),
+        "g",
+        1,
+        &verdicts,
+        2,
+        2,
+    );
     assert!(r.passed, "2/2 unanimous must pass");
     assert_eq!(r.approve_count, 2);
     assert_eq!(r.n, 2);
@@ -154,7 +165,14 @@ fn evaluate_2_of_3_majority_pass() {
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
         ("v3".to_string(), reject_at("bad", "2026-07-03T10:02:00Z")),
     ];
-    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 3);
+    let r = consensus::evaluate(
+        Path::new("/nonexistent-consensus-legacy"),
+        "g",
+        1,
+        &verdicts,
+        2,
+        3,
+    );
     assert!(r.passed, "2 of 3 APPROVE must pass");
     assert_eq!(r.approve_count, 2);
     assert_eq!(r.matching_verdicts.len(), 2, "only approvers match");
@@ -165,9 +183,19 @@ fn evaluate_below_threshold_fails() {
     let verdicts = vec![
         ("v1".to_string(), approve_at("2026-07-03T10:00:00Z")),
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
-        ("v3".to_string(), reject_at("missing X", "2026-07-03T10:02:00Z")),
+        (
+            "v3".to_string(),
+            reject_at("missing X", "2026-07-03T10:02:00Z"),
+        ),
     ];
-    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 3, 3);
+    let r = consensus::evaluate(
+        Path::new("/nonexistent-consensus-legacy"),
+        "g",
+        1,
+        &verdicts,
+        3,
+        3,
+    );
     assert!(!r.passed, "2 of 3 with n=3 must fail");
 }
 
@@ -176,9 +204,19 @@ fn evaluate_null_and_reject_do_not_count_toward_n() {
     let verdicts = vec![
         ("v1".to_string(), approve_at("2026-07-03T10:00:00Z")),
         ("v2".to_string(), null_verdict()),
-        ("v3".to_string(), reject_at("notes here", "2026-07-03T10:02:00Z")),
+        (
+            "v3".to_string(),
+            reject_at("notes here", "2026-07-03T10:02:00Z"),
+        ),
     ];
-    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 3);
+    let r = consensus::evaluate(
+        Path::new("/nonexistent-consensus-legacy"),
+        "g",
+        1,
+        &verdicts,
+        2,
+        3,
+    );
     assert!(!r.passed, "1 APPROVE + null + reject cannot reach n=2");
     assert_eq!(r.approve_count, 1);
     // Rejection surfaces the reject notes and the null marker.
@@ -192,7 +230,14 @@ fn evaluate_null_and_reject_do_not_count_toward_n() {
 fn evaluate_missing_verdict_treated_as_null_fail_closed() {
     // Fewer verdicts than m: the missing ones are absent entirely.
     let verdicts = vec![("v1".to_string(), approve_at("2026-07-03T10:00:00Z"))];
-    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 2, 2);
+    let r = consensus::evaluate(
+        Path::new("/nonexistent-consensus-legacy"),
+        "g",
+        1,
+        &verdicts,
+        2,
+        2,
+    );
     assert!(!r.passed, "missing verdicts must fail closed");
 }
 
@@ -203,10 +248,25 @@ fn matching_verdicts_sorted_by_verifier_id() {
         ("v1".to_string(), approve_at("2026-07-03T10:00:00Z")),
         ("v2".to_string(), approve_at("2026-07-03T10:01:00Z")),
     ];
-    let r = consensus::evaluate(Path::new("/nonexistent-consensus-legacy"), "g", 1, &verdicts, 3, 3);
+    let r = consensus::evaluate(
+        Path::new("/nonexistent-consensus-legacy"),
+        "g",
+        1,
+        &verdicts,
+        3,
+        3,
+    );
     assert!(r.passed);
-    let ids: Vec<&str> = r.matching_verdicts.iter().map(|m| m.verifier_id.as_str()).collect();
-    assert_eq!(ids, vec!["v1", "v2", "v3"], "must be sorted asc by verifierId");
+    let ids: Vec<&str> = r
+        .matching_verdicts
+        .iter()
+        .map(|m| m.verifier_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["v1", "v2", "v3"],
+        "must be sorted asc by verifierId"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -217,10 +277,14 @@ fn matching_verdicts_sorted_by_verifier_id() {
 fn compute_hash_formula_matches_spec_recompute() {
     let matching = vec![
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v1".into(),
             registered_at: "2026-07-03T10:00:00Z".into(),
         },
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v2".into(),
             registered_at: "2026-07-03T10:01:00Z".into(),
         },
@@ -234,45 +298,88 @@ fn compute_hash_formula_matches_spec_recompute() {
         "2026-07-03T10:05:00Z",
         "",
     );
-    let (exp_short, exp_full) = spec_recompute("deadbeef", "goal-123", "sig-abc", 1, &matching, "2026-07-03T10:05:00Z");
-    assert_eq!(out.short_hash(), exp_short, "short hash must match independent recompute");
-    assert_eq!(out.full_digest(), exp_full, "full digest must match independent recompute");
+    let (exp_short, exp_full) = spec_recompute(
+        "deadbeef",
+        "goal-123",
+        "sig-abc",
+        1,
+        &matching,
+        "2026-07-03T10:05:00Z",
+    );
+    assert_eq!(
+        out.short_hash(),
+        exp_short,
+        "short hash must match independent recompute"
+    );
+    assert_eq!(
+        out.full_digest(),
+        exp_full,
+        "full digest must match independent recompute"
+    );
 }
 
 #[test]
 fn compute_hash_deterministic_identical_inputs() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
     let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
     let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
-    assert_eq!(a.short_hash(), b.short_hash(), "identical inputs -> identical short hash");
-    assert_eq!(a.full_digest(), b.full_digest(), "identical inputs -> identical full digest");
+    assert_eq!(
+        a.short_hash(),
+        b.short_hash(),
+        "identical inputs -> identical short hash"
+    );
+    assert_eq!(
+        a.full_digest(),
+        b.full_digest(),
+        "identical inputs -> identical full digest"
+    );
 
     // Stable regardless of the order matching was assembled (sorting is impl's job).
     let matching_rev = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let c = consensus::compute_hash("s", "g", "sig", 1, &matching_rev, "2026-07-03T10:05:00Z", "");
+    let c = consensus::compute_hash(
+        "s",
+        "g",
+        "sig",
+        1,
+        &matching_rev,
+        "2026-07-03T10:05:00Z",
+        "",
+    );
     assert_eq!(a.short_hash(), c.short_hash());
 }
 
 #[test]
 fn compute_hash_short_form_is_mmddyy_dash_8hex() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
     let out = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
     let short = out.short_hash();
     // mmddyy from matchedAt UTC (2026-07-03 -> 070326), hyphen, 8 lowercase hex.
-    assert_eq!(&short[..7], "070326-", "prefix must be mmddyy- from matchedAt: {short}");
+    assert_eq!(
+        &short[..7],
+        "070326-",
+        "prefix must be mmddyy- from matchedAt: {short}"
+    );
     assert_eq!(short.len(), 15, "mmddyy(6) + -(1) + 8hex = 15: {short}");
     let hex_part = &short[7..];
     assert!(
-        hex_part.chars().all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        hex_part
+            .chars()
+            .all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "suffix must be 8 lowercase hex chars: {short}"
     );
 }
@@ -280,6 +387,8 @@ fn compute_hash_short_form_is_mmddyy_dash_8hex() {
 #[test]
 fn compute_hash_full_digest_is_64_lowercase_hex() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
@@ -287,7 +396,8 @@ fn compute_hash_full_digest_is_64_lowercase_hex() {
     let full = out.full_digest();
     assert_eq!(full.len(), 64, "full digest must be 64 hex chars: {full}");
     assert!(
-        full.chars().all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        full.chars()
+            .all(|c: char| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "full digest must be lowercase hex: {full}"
     );
 }
@@ -297,13 +407,23 @@ fn compute_hash_mmddyy_tracks_matched_at_not_created_at() {
     // Same inputs except matchedAt differs across two runs: short hash prefix (mmddyy)
     // must change, full digest must also change.
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
     let a = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-07-03T10:05:00Z", "");
     let b = consensus::compute_hash("s", "g", "sig", 1, &matching, "2026-08-15T10:05:00Z", "");
-    assert_ne!(a.short_hash()[..6], b.short_hash()[..6], "mmddyy must come from matchedAt");
-    assert_ne!(a.full_digest(), b.full_digest(), "full digest must change with matchedAt");
+    assert_ne!(
+        a.short_hash()[..6],
+        b.short_hash()[..6],
+        "mmddyy must come from matchedAt"
+    );
+    assert_ne!(
+        a.full_digest(),
+        b.full_digest(),
+        "full digest must change with matchedAt"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -319,10 +439,20 @@ fn tamper_goal_text_invalidates_both_short_and_full_digest() {
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
 
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: "2026-07-03T10:00:00Z".into(),
     }];
-    let original = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching, "2026-07-03T10:05:00Z", "");
+    let original = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &sig,
+        1,
+        &matching,
+        "2026-07-03T10:05:00Z",
+        "",
+    );
 
     // Tamper goalText on disk.
     let mut tampered = record.clone();
@@ -335,29 +465,55 @@ fn tamper_goal_text_invalidates_both_short_and_full_digest() {
 
     // Recompute signature from the now-tampered goalText -> different signature -> different hash.
     let tampered_sig = goal::compute_signature(&salt, &tampered.goal_text, &record.created_at);
-    let after = consensus::compute_hash(&salt, &goal_id, &tampered_sig, 1, &matching, "2026-07-03T10:05:00Z", "");
+    let after = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &tampered_sig,
+        1,
+        &matching,
+        "2026-07-03T10:05:00Z",
+        "",
+    );
 
-    assert_ne!(original.short_hash(), after.short_hash(), "edited goalText MUST invalidate short hash");
-    assert_ne!(original.full_digest(), after.full_digest(), "edited goalText MUST invalidate full digest");
+    assert_ne!(
+        original.short_hash(),
+        after.short_hash(),
+        "edited goalText MUST invalidate short hash"
+    );
+    assert_ne!(
+        original.full_digest(),
+        after.full_digest(),
+        "edited goalText MUST invalidate full digest"
+    );
 }
 
 #[test]
 fn tamper_verdict_notes_invalidates_full_digest() {
     let (dir, goal_id) = fresh_goal("goal");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
 
     let salt = store::salt_in(dir.path()).unwrap();
     let record = goal::load(dir.path(), &goal_id).unwrap();
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
 
     // Hash from the registered APPROVE verdict.
-    let v = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let v = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: v.registered_at.clone().unwrap(),
     }];
-    let original = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching, "2026-07-03T10:05:00Z", "");
+    let original = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &sig,
+        1,
+        &matching,
+        "2026-07-03T10:05:00Z",
+        "",
+    );
 
     // Tamper the verdict: edit registeredAt (and notes to force a value-bearing change).
     let tampered = verdict::VerdictRecord {
@@ -368,19 +524,33 @@ fn tamper_verdict_notes_invalidates_full_digest() {
         pubkey_id: None,
     };
     fs::write(
-        verdict::verdict_path(dir.path(), &goal_id, "v1", 1).join(verdict::VERDICT_FILE),
+        verdict::verdict_path(dir.path(), &goal_id, "v1", 1, None).join(verdict::VERDICT_FILE),
         serde_json::to_string_pretty(&tampered).unwrap(),
     )
     .unwrap();
 
-    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
+    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let matching2 = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: v2.registered_at.clone().unwrap(),
     }];
-    let after = consensus::compute_hash(&salt, &goal_id, &sig, 1, &matching2, "2026-07-03T10:05:00Z", "");
+    let after = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &sig,
+        1,
+        &matching2,
+        "2026-07-03T10:05:00Z",
+        "",
+    );
 
-    assert_ne!(original.full_digest(), after.full_digest(), "edited verdict MUST invalidate full digest");
+    assert_ne!(
+        original.full_digest(),
+        after.full_digest(),
+        "edited verdict MUST invalidate full digest"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -392,16 +562,13 @@ fn write_completion_writes_record_on_success() {
     let (dir, goal_id) = fresh_goal("goal");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
     pre_create_null(dir.path(), &goal_id, "v2", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
-    verdict::register_approve(dir.path(), &goal_id, "v2", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None, None).unwrap();
 
     let cfg = store::Config::load_in(dir.path()).unwrap(); // defaults n=2,m=2
-    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
-    let verdicts = vec![
-        ("v1".to_string(), v1),
-        ("v2".to_string(), v2),
-    ];
+    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1, None).unwrap();
+    let verdicts = vec![("v1".to_string(), v1), ("v2".to_string(), v2)];
     let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, cfg.n, cfg.m);
     assert!(r.passed);
 
@@ -409,9 +576,18 @@ fn write_completion_writes_record_on_success() {
     let record = goal::load(dir.path(), &goal_id).unwrap();
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
     let matched_at = "2026-07-03T10:05:00Z";
-    let hash = consensus::compute_hash(&salt, &goal_id, &sig, 1, &r.matching_verdicts, matched_at, "");
+    let hash = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &sig,
+        1,
+        &r.matching_verdicts,
+        matched_at,
+        "",
+    );
 
-    let path = consensus::write_completion(dir.path(), &goal_id, &r, 1, &hash, matched_at).unwrap();
+    let path =
+        consensus::write_completion(dir.path(), &goal_id, &r, 1, &hash, matched_at, None).unwrap();
     assert!(path.exists(), "completion.json must exist");
 
     let raw = fs::read_to_string(&path).unwrap();
@@ -421,7 +597,10 @@ fn write_completion_writes_record_on_success() {
     assert_eq!(v["goalId"], json!(goal_id));
     assert_eq!(v["roundNumber"], json!(1));
     assert_eq!(v["matchedAt"], json!(matched_at));
-    assert!(v["matchingVerdicts"].is_array(), "matchingVerdicts must be present");
+    assert!(
+        v["matchingVerdicts"].is_array(),
+        "matchingVerdicts must be present"
+    );
     assert_eq!(v["matchingVerdicts"].as_array().unwrap().len(), 2);
 }
 
@@ -437,7 +616,15 @@ fn no_completion_on_failure() {
 
     // write_completion must refuse on a non-passing round.
     let dummy = consensus::compute_hash("s", "g", "sig", 1, &[], "2026-07-03T10:05:00Z", "");
-    let res = consensus::write_completion(dir.path(), &goal_id, &r, 1, &dummy, "2026-07-03T10:05:00Z");
+    let res = consensus::write_completion(
+        dir.path(),
+        &goal_id,
+        &r,
+        1,
+        &dummy,
+        "2026-07-03T10:05:00Z",
+        None,
+    );
     assert!(res.is_err(), "must refuse to write completion on failure");
 
     let completion_path = goal::goal_dir(dir.path(), &goal_id).join("completion.json");
@@ -453,12 +640,12 @@ fn audit_recompute_matches_stored_hash() {
     let (dir, goal_id) = fresh_goal("build the thing");
     pre_create_null(dir.path(), &goal_id, "v1", 1);
     pre_create_null(dir.path(), &goal_id, "v2", 1);
-    verdict::register_approve(dir.path(), &goal_id, "v1", 1).unwrap();
-    verdict::register_approve(dir.path(), &goal_id, "v2", 1).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v1", 1, None, None).unwrap();
+    verdict::register_approve(dir.path(), &goal_id, "v2", 1, None, None).unwrap();
 
     let cfg = store::Config::load_in(dir.path()).unwrap();
-    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
+    let v1 = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let v2 = verdict::read_verdict(dir.path(), &goal_id, "v2", 1, None).unwrap();
     let verdicts = vec![("v1".to_string(), v1), ("v2".to_string(), v2)];
     let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, cfg.n, cfg.m);
     assert!(r.passed);
@@ -467,35 +654,54 @@ fn audit_recompute_matches_stored_hash() {
     let record = goal::load(dir.path(), &goal_id).unwrap();
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
     let matched_at = "2026-07-03T10:05:00Z";
-    let hash = consensus::compute_hash(&salt, &goal_id, &sig, 1, &r.matching_verdicts, matched_at, "");
-    consensus::write_completion(dir.path(), &goal_id, &r, 1, &hash, matched_at).unwrap();
+    let hash = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &sig,
+        1,
+        &r.matching_verdicts,
+        matched_at,
+        "",
+    );
+    consensus::write_completion(dir.path(), &goal_id, &r, 1, &hash, matched_at, None).unwrap();
 
     // --- Auditor recompute, reading ONLY goal-dir + .salt ---
     let salt2 = store::salt_in(dir.path()).unwrap();
     assert_eq!(salt2, salt, "salt stable");
     let rec2 = goal::load(dir.path(), &goal_id).unwrap();
     let sig2 = goal::compute_signature(&salt2, &rec2.goal_text, &rec2.created_at);
-    let va = verdict::read_verdict(dir.path(), &goal_id, "v1", 1).unwrap();
-    let vb = verdict::read_verdict(dir.path(), &goal_id, "v2", 1).unwrap();
+    let va = verdict::read_verdict(dir.path(), &goal_id, "v1", 1, None).unwrap();
+    let vb = verdict::read_verdict(dir.path(), &goal_id, "v2", 1, None).unwrap();
     let audit_matching = vec![
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v1".into(),
             registered_at: va.registered_at.unwrap(),
         },
         consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: "v2".into(),
             registered_at: vb.registered_at.unwrap(),
         },
     ];
-    let recomputed = consensus::compute_hash(&salt2, &goal_id, &sig2, 1, &audit_matching, matched_at, "");
+    let recomputed =
+        consensus::compute_hash(&salt2, &goal_id, &sig2, 1, &audit_matching, matched_at, "");
 
-    let completion_raw = fs::read_to_string(
-        goal::goal_dir(dir.path(), &goal_id).join("completion.json"),
-    )
-    .unwrap();
+    let completion_raw =
+        fs::read_to_string(goal::goal_dir(dir.path(), &goal_id).join("completion.json")).unwrap();
     let cv: Value = serde_json::from_str(&completion_raw).unwrap();
-    assert_eq!(cv["hash"], json!(recomputed.short_hash()), "stored short hash must match audit recompute");
-    assert_eq!(cv["fullDigest"], json!(recomputed.full_digest()), "stored fullDigest must match audit recompute");
+    assert_eq!(
+        cv["hash"],
+        json!(recomputed.short_hash()),
+        "stored short hash must match audit recompute"
+    );
+    assert_eq!(
+        cv["fullDigest"],
+        json!(recomputed.full_digest()),
+        "stored fullDigest must match audit recompute"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -506,11 +712,7 @@ fn audit_recompute_matches_stored_hash() {
 fn n_m_static_from_config_json() {
     let dir = tempfile::tempdir().unwrap();
     // Human-configured threshold 2-of-3.
-    fs::write(
-        dir.path().join("config.json"),
-        r#"{"n":2,"m":3}"#,
-    )
-    .unwrap();
+    fs::write(dir.path().join("config.json"), r#"{"n":2,"m":3}"#).unwrap();
     let cfg = store::Config::load_in(dir.path()).unwrap();
     assert_eq!((cfg.n, cfg.m), (2, 3));
 
@@ -559,8 +761,8 @@ const SIGNED_TS: &str = "2026-07-04T09:00:00Z";
 /// verifying key, `register_signed_approve` signs the canonical record bytes with the
 /// matching secret and writes the verdict (+ appends a receipt entry).
 fn mint_pin_and_signed_approve(root: &Path, goal_id: &str, vid: &str, round: u32) {
-    let secret = verdict::mint_and_pin_pubkey(root, goal_id, vid, round).unwrap();
-    verdict::register_signed_approve(root, goal_id, vid, round, &secret).unwrap();
+    let secret = verdict::mint_and_pin_pubkey(root, goal_id, vid, round, None).unwrap();
+    verdict::register_signed_approve(root, goal_id, vid, round, None, None, &secret).unwrap();
 }
 
 /// Build + atomically write a verdict signed by `secret`, declaring `claim_pubkey_id`.
@@ -583,14 +785,8 @@ fn write_signed_verdict_with_key(
         verdict::VerdictStatus::Reject => "REJECT",
         verdict::VerdictStatus::Null => "null",
     };
-    let canonical = crypto::canonical_record_bytes(
-        status_str,
-        notes,
-        &registered_at,
-        goal_id,
-        vid,
-        round,
-    );
+    let canonical =
+        crypto::canonical_record_bytes(status_str, notes, &registered_at, goal_id, vid, round);
     let sig = crypto::sign(&canonical, secret);
     let rec = verdict::VerdictRecord {
         status,
@@ -599,7 +795,7 @@ fn write_signed_verdict_with_key(
         signature: Some(hex::encode(&sig)),
         pubkey_id: Some(claim_pubkey_id.to_string()),
     };
-    let vdir = verdict::verdict_path(root, goal_id, vid, round);
+    let vdir = verdict::verdict_path(root, goal_id, vid, round, None);
     fs::create_dir_all(&vdir).unwrap();
     let target = vdir.join(verdict::VERDICT_FILE);
     let tmp = vdir.join(format!("{}.tmp", verdict::VERDICT_FILE));
@@ -609,8 +805,15 @@ fn write_signed_verdict_with_key(
 
 /// In-place-edit a single top-level field of an on-disk verdict.json (WITHOUT
 /// re-signing). Used to simulate in-flight tampering after registration.
-fn tamper_verdict_field(root: &Path, goal_id: &str, vid: &str, round: u32, field: &str, value: Value) {
-    let path = verdict::verdict_path(root, goal_id, vid, round).join(verdict::VERDICT_FILE);
+fn tamper_verdict_field(
+    root: &Path,
+    goal_id: &str,
+    vid: &str,
+    round: u32,
+    field: &str,
+    value: Value,
+) {
+    let path = verdict::verdict_path(root, goal_id, vid, round, None).join(verdict::VERDICT_FILE);
     let raw = fs::read_to_string(&path).unwrap();
     let mut v: Value = serde_json::from_str(&raw).unwrap();
     v[field] = value;
@@ -619,10 +822,15 @@ fn tamper_verdict_field(root: &Path, goal_id: &str, vid: &str, round: u32, field
 
 /// Read the on-disk verdicts for a fixed set of verifier ids into the
 /// `[(verifierId, VerdictRecord)]` shape `evaluate` consumes.
-fn read_all_verdicts(root: &Path, goal_id: &str, round: u32, vids: &[&str]) -> Vec<(String, verdict::VerdictRecord)> {
+fn read_all_verdicts(
+    root: &Path,
+    goal_id: &str,
+    round: u32,
+    vids: &[&str],
+) -> Vec<(String, verdict::VerdictRecord)> {
     vids.iter()
         .map(|vid| {
-            let rec = verdict::read_verdict(root, goal_id, vid, round).unwrap();
+            let rec = verdict::read_verdict(root, goal_id, vid, round, None).unwrap();
             (vid.to_string(), rec)
         })
         .collect()
@@ -711,7 +919,14 @@ fn evaluate_rejects_in_flight_notes_edit() {
     mint_pin_and_signed_approve(dir.path(), &goal_id, "v1", 1);
     mint_pin_and_signed_approve(dir.path(), &goal_id, "v2", 1);
 
-    tamper_verdict_field(dir.path(), &goal_id, "v1", 1, "notes", json!("injected after signing"));
+    tamper_verdict_field(
+        dir.path(),
+        &goal_id,
+        "v1",
+        1,
+        "notes",
+        json!("injected after signing"),
+    );
 
     let verdicts = read_all_verdicts(dir.path(), &goal_id, 1, &["v1", "v2"]);
     let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, 2, 2);
@@ -770,7 +985,7 @@ fn evaluate_rejects_in_flight_registered_at_edit() {
 fn evaluate_rejects_verdict_signed_by_non_pinned_key() {
     let (dir, goal_id) = fresh_goal("ship the feature");
     // Pin K1 for v1, then sign v1's APPROVE with an unrelated K2 and CLAIM K2's id.
-    let _pinned_secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let _pinned_secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let kp2 = crypto::generate_keypair();
     let wrong_id = crypto::pubkey_id(&kp2.verifying);
     write_signed_verdict_with_key(
@@ -788,14 +1003,20 @@ fn evaluate_rejects_verdict_signed_by_non_pinned_key() {
     let verdicts = read_all_verdicts(dir.path(), &goal_id, 1, &["v1", "v2"]);
     let r = consensus::evaluate(dir.path(), &goal_id, 1, &verdicts, 2, 2);
 
-    assert!(!r.passed, "a verdict signed by a non-pinned key MUST fail closed");
+    assert!(
+        !r.passed,
+        "a verdict signed by a non-pinned key MUST fail closed"
+    );
     assert_eq!(r.approve_count, 1, "the forged v1 does not count");
     let offender = r
         .rejection
         .signature_failures
         .iter()
         .find(|(vid, _)| vid == "v1");
-    assert!(offender.is_some(), "v1 must be named in the rejection summary");
+    assert!(
+        offender.is_some(),
+        "v1 must be named in the rejection summary"
+    );
     let reason = offender.unwrap().1.to_lowercase();
     assert!(
         reason.contains("pubkey") || reason.contains("wrongpubkey"),
@@ -812,7 +1033,7 @@ fn evaluate_rejects_unsigned_approve() {
     let (dir, goal_id) = fresh_goal("ship the feature");
     // Pin a pubkey for v1 (so the slot IS in the signed regime) but write an UNSIGNED
     // APPROVE — simulating a pre-change or tampered record.
-    let _secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1).unwrap();
+    let _secret = verdict::mint_and_pin_pubkey(dir.path(), &goal_id, "v1", 1, None).unwrap();
     let unsigned = verdict::VerdictRecord {
         status: verdict::VerdictStatus::Approve,
         notes: None,
@@ -820,7 +1041,7 @@ fn evaluate_rejects_unsigned_approve() {
         signature: None,
         pubkey_id: None,
     };
-    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", 1);
+    let vdir = verdict::verdict_path(dir.path(), &goal_id, "v1", 1, None);
     fs::create_dir_all(&vdir).unwrap();
     fs::write(
         vdir.join(verdict::VERDICT_FILE),
@@ -839,7 +1060,10 @@ fn evaluate_rejects_unsigned_approve() {
         .signature_failures
         .iter()
         .find(|(vid, _)| vid == "v1");
-    assert!(offender.is_some(), "v1 must be named in the rejection summary");
+    assert!(
+        offender.is_some(),
+        "v1 must be named in the rejection summary"
+    );
     let reason = offender.unwrap().1.to_lowercase();
     assert!(
         reason.contains("unsigned") || reason.contains("untrusted"),
@@ -869,8 +1093,7 @@ fn compute_hash_differs_when_receipt_head_differs() {
     );
 
     // Append ONE extra receipt entry to dir2 ONLY → its head now differs.
-    receipt::append_receipt(dir2.path(), &goal_id, "approve", "v3", "APPROVE", "extra")
-        .unwrap();
+    receipt::append_receipt(dir2.path(), &goal_id, "approve", "v3", "APPROVE", "extra").unwrap();
     assert_ne!(
         receipt::read_receipt_head(dir1.path(), &goal_id),
         receipt::read_receipt_head(dir2.path(), &goal_id),
@@ -879,8 +1102,18 @@ fn compute_hash_differs_when_receipt_head_differs() {
 
     // Identical matching verdicts + matched_at, but different heads.
     let matching = vec![
-        consensus::MatchingVerdict { verifier_id: "v1".into(), registered_at: SIGNED_TS.into() },
-        consensus::MatchingVerdict { verifier_id: "v2".into(), registered_at: SIGNED_TS.into() },
+        consensus::MatchingVerdict {
+
+            phase_id: String::new(),
+            verifier_id: "v1".into(),
+            registered_at: SIGNED_TS.into(),
+        },
+        consensus::MatchingVerdict {
+
+            phase_id: String::new(),
+            verifier_id: "v2".into(),
+            registered_at: SIGNED_TS.into(),
+        },
     ];
     let matched_at = "2026-07-04T09:05:00Z";
 
@@ -893,8 +1126,16 @@ fn compute_hash_differs_when_receipt_head_differs() {
     let h1 = consensus::compute_hash(&salt1, &goal_id, "sig", 1, &matching, matched_at, &head1);
     let h2 = consensus::compute_hash(&salt2, &goal_id, "sig", 1, &matching, matched_at, &head2);
 
-    assert_ne!(h1.full_digest(), h2.full_digest(), "differing receipt head MUST change the digest");
-    assert_ne!(h1.short_hash(), h2.short_hash(), "short hash changes too (w.h.p.)");
+    assert_ne!(
+        h1.full_digest(),
+        h2.full_digest(),
+        "differing receipt head MUST change the digest"
+    );
+    assert_ne!(
+        h1.short_hash(),
+        h2.short_hash(),
+        "short hash changes too (w.h.p.)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +1145,8 @@ fn compute_hash_differs_when_receipt_head_differs() {
 #[test]
 fn compute_hash_same_when_receipt_head_same() {
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: SIGNED_TS.into(),
     }];
@@ -913,8 +1156,16 @@ fn compute_hash_same_when_receipt_head_same() {
     let a = consensus::compute_hash("salt", "goal-1", "sig", 1, &matching, matched_at, head);
     let b = consensus::compute_hash("salt", "goal-1", "sig", 1, &matching, matched_at, head);
 
-    assert_eq!(a.short_hash(), b.short_hash(), "identical inputs → identical short hash");
-    assert_eq!(a.full_digest(), b.full_digest(), "identical inputs → identical full digest");
+    assert_eq!(
+        a.short_hash(),
+        b.short_hash(),
+        "identical inputs → identical short hash"
+    );
+    assert_eq!(
+        a.full_digest(),
+        b.full_digest(),
+        "identical inputs → identical full digest"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -925,9 +1176,14 @@ fn compute_hash_same_when_receipt_head_same() {
 fn compute_hash_empty_receipt_head_for_fresh_goal() {
     let (dir, goal_id) = fresh_goal("fresh goal, no receipt log");
     let head = receipt::read_receipt_head(dir.path(), &goal_id);
-    assert!(head.is_empty(), "a fresh goal has no receipt log → empty head");
+    assert!(
+        head.is_empty(),
+        "a fresh goal has no receipt log → empty head"
+    );
 
     let matching = vec![consensus::MatchingVerdict {
+
+        phase_id: String::new(),
         verifier_id: "v1".into(),
         registered_at: SIGNED_TS.into(),
     }];
@@ -936,9 +1192,17 @@ fn compute_hash_empty_receipt_head_for_fresh_goal() {
 
     let a = consensus::compute_hash(&salt, &goal_id, "sig", 1, &matching, matched_at, "");
     let b = consensus::compute_hash(&salt, &goal_id, "sig", 1, &matching, matched_at, "");
-    assert_eq!(a.full_digest(), b.full_digest(), "empty head must still hash deterministically");
+    assert_eq!(
+        a.full_digest(),
+        b.full_digest(),
+        "empty head must still hash deterministically"
+    );
     assert_eq!(a.short_hash(), b.short_hash());
-    assert_eq!(a.full_digest().len(), 64, "full digest is still 64 hex chars with empty head");
+    assert_eq!(
+        a.full_digest().len(),
+        64,
+        "full digest is still 64 hex chars with empty head"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -957,14 +1221,27 @@ fn closed_loop_hash_includes_receipt_head() {
     mint_pin_and_signed_approve(dir.path(), &goal_id, "v2", 1);
 
     let head = receipt::read_receipt_head(dir.path(), &goal_id);
-    assert!(!head.is_empty(), "m=2 signed approves produced a non-empty receipt log");
+    assert!(
+        !head.is_empty(),
+        "m=2 signed approves produced a non-empty receipt log"
+    );
 
     let salt = store::salt_in(dir.path()).unwrap();
     let record = goal::load(dir.path(), &goal_id).unwrap();
     let sig = goal::compute_signature(&salt, &record.goal_text, &record.created_at);
     let matching = vec![
-        consensus::MatchingVerdict { verifier_id: "v1".into(), registered_at: SIGNED_TS.into() },
-        consensus::MatchingVerdict { verifier_id: "v2".into(), registered_at: SIGNED_TS.into() },
+        consensus::MatchingVerdict {
+
+            phase_id: String::new(),
+            verifier_id: "v1".into(),
+            registered_at: SIGNED_TS.into(),
+        },
+        consensus::MatchingVerdict {
+
+            phase_id: String::new(),
+            verifier_id: "v2".into(),
+            registered_at: SIGNED_TS.into(),
+        },
     ];
     let matched_at = "2026-07-04T09:05:00Z";
 

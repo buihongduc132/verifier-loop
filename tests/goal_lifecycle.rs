@@ -18,8 +18,7 @@ fn new_creates_immutable_signed_goal() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
-    let goal_id = goal::new(root, "fix the auth bug", Some("ticket #42"))
-        .expect("NEW succeeds");
+    let goal_id = goal::new(root, "fix the auth bug", Some("ticket #42")).expect("NEW succeeds");
     assert!(!goal_id.is_empty(), "goalId is non-empty");
 
     let gdir = root.join("goals").join(&goal_id);
@@ -93,20 +92,26 @@ fn resume_increments_round_and_appends_fix_notes_without_touching_goal() {
     let goal_before = fs::read(gdir.join("goal.json")).unwrap();
     let sig_before = fs::read(gdir.join("signature.json")).unwrap();
 
-    let round = goal::resume(root, &goal_id, Some("fixed issues 1 and 2"))
-        .expect("RESUME succeeds");
+    let round =
+        goal::resume(root, &goal_id, Some("fixed issues 1 and 2")).expect("RESUME succeeds");
     assert_eq!(round, 2, "RESUME after NEW(round 1) must yield round 2");
 
     let goal_after = fs::read(gdir.join("goal.json")).unwrap();
     let sig_after = fs::read(gdir.join("signature.json")).unwrap();
-    assert_eq!(goal_before, goal_after, "goal.json byte-identical after RESUME");
+    assert_eq!(
+        goal_before, goal_after,
+        "goal.json byte-identical after RESUME"
+    );
     assert_eq!(
         sig_before, sig_after,
         "signature.json byte-identical after RESUME"
     );
 
     let fix_notes_path = gdir.join("rounds").join("2").join("fix-notes.json");
-    assert!(fix_notes_path.exists(), "fix-notes.json written for round 2");
+    assert!(
+        fix_notes_path.exists(),
+        "fix-notes.json written for round 2"
+    );
     let fix_notes: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&fix_notes_path).unwrap()).unwrap();
     assert_eq!(fix_notes["notes"][0], "fixed issues 1 and 2");
@@ -155,7 +160,10 @@ fn missing_store_yields_no_goal_creation() {
     let bad_root = dir.path().join("afile");
     fs::write(&bad_root, "x").unwrap();
     let res = goal::new(&bad_root, "g", None);
-    assert!(res.is_err(), "NEW must fail closed when store root is unusable");
+    assert!(
+        res.is_err(),
+        "NEW must fail closed when store root is unusable"
+    );
 }
 
 #[test]

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use verifier_loop::cli::json_output::{JsonEnvelope, Output};
 use verifier_loop::verdict::{self, VerdictError};
 
 /// `VERIFIER_LOOP_HOME` overrides the store root; otherwise `~/.verifier-loop`.
@@ -35,6 +36,12 @@ const DEFAULT_HOME_DIR: &str = ".verifier-loop";
     about = "Register a verifier verdict (approve / reject --notes)."
 )]
 struct Cli {
+    /// Machine-readable JSON output mode (`add-json-output-mode`, design D2). Global so
+    /// it parses both before AND after the subcommand: `jewije --json approve` and
+    /// `jewije approve --json` both work.
+    #[arg(long, short = 'j', global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Cmd,
 }
@@ -42,7 +49,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Register an APPROVE verdict for this verifier's slot.
-    Approve,
+    ///
+    /// `--notes` (or `-n`) is OPTIONAL on approve (design D1). When supplied and
+    /// non-empty, the notes are stored on the verdict record; when omitted or empty,
+    /// behavior is unchanged (legacy approve). Reject keeps `--notes` required.
+    Approve {
+        /// Optional approval evidence/notes. Trimmed; empty/whitespace -> no notes key.
+        #[arg(long, short = 'n')]
+        notes: Option<String>,
+    },
     /// Register a REJECT verdict; `--notes` is required (non-empty).
     Reject {
         /// Required: the reason for rejection. Must be non-empty.
@@ -52,18 +67,99 @@ enum Cmd {
 }
 
 fn main() {
+    // Initialize tracing (fail-open, design D5). jewije runs inside the spawned V*
+    // process; VERIFIER_LOOP_TRACE_ID (set by the spawning jewilo) is picked up by
+    // the receipt layer at append time and by tracing spans via the subscriber.
+    let _ = verifier_loop::observe::init(None);
     let cli = Cli::parse();
+    // Output channel selector (design D6). Chosen once from the parsed --json flag so
+    // every success / error site routes through a single abstraction.
+    let output = if cli.json { Output::Json } else { Output::Human };
+    let command_label = command_label(&cli.command);
     let code = match run(&cli) {
         Ok(()) => {
-            println!("Verdict registered");
+            let env = JsonEnvelope {
+                ok: true,
+                command: command_label.to_string(),
+                goal_id: env_value(ENV_GOAL_ID),
+                round: env_round(),
+                verifier_id: env_value(ENV_VERIFIER_ID),
+                status: Some("verdict-registered".to_string()),
+                hash: None,
+                full_digest: None,
+                needs: None,
+                rejection: None,
+                verdicts: None,
+                state: None,
+                report: None,
+                error: None,
+            };
+            output.print_success(&env, "Verdict registered", &mut std::io::stdout());
             0
         }
         Err(msg) => {
-            eprintln!("{msg}");
+            // Error envelope: ok:false + the human error string. Identity fields are
+            // best-effort populated from env (None when not yet resolved).
+            let env = JsonEnvelope {
+                ok: false,
+                command: command_label.to_string(),
+                goal_id: env_value(ENV_GOAL_ID),
+                round: env_round(),
+                verifier_id: env_value(ENV_VERIFIER_ID),
+                status: None,
+                hash: None,
+                full_digest: None,
+                needs: None,
+                rejection: None,
+                verdicts: None,
+                state: None,
+                report: None,
+                error: Some(envelope_error(&msg)),
+            };
+            // Human-readable diagnostic rides stderr under both modes (design D7);
+            // stdout carries the structured envelope under Json only. Both writers are
+            // boxed to a common `dyn Write` so they share the formatter's single generic
+            // `W` (stdout and stderr are distinct concrete types).
+            let mut out: Box<dyn std::io::Write> = Box::new(std::io::stdout());
+            let mut err: Box<dyn std::io::Write> = Box::new(std::io::stderr());
+            output.print_error(&env, &msg, &mut out, &mut err);
             1
         }
     };
+    // Flush + shut down the OTLP tracer before exit so in-flight spans are not
+    // lost (design D3). No-op when OTLP is not configured / feature off.
+    verifier_loop::observe::shutdown();
     std::process::exit(code);
+}
+
+/// Map a `Cmd` to its command label for the JSON envelope (`approve` / `reject`).
+fn command_label(cmd: &Cmd) -> &'static str {
+    match cmd {
+        Cmd::Approve { .. } => "approve",
+        Cmd::Reject { .. } => "reject",
+    }
+}
+
+/// Best-effort read of an env identity var for envelope population (None when unset).
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// Best-effort parse of `VERIFIER_LOOP_ROUND` for envelope population (None when unset / invalid).
+fn env_round() -> Option<u32> {
+    std::env::var(ENV_ROUND).ok().and_then(|s| s.parse().ok())
+}
+
+/// Map the verbose human-facing error string to a concise machine-readable label for
+/// the JSON envelope's `error` field (design D4: structured equivalents ride the
+/// envelope; the verbose human text rides stderr unchanged). Only phrases that would
+/// leak the human diagnostic onto stdout are remapped; everything else passes through.
+fn envelope_error(human: &str) -> String {
+    if human.contains("requires non-empty --notes") {
+        "notes-required".to_string()
+    } else {
+        human.to_string()
+    }
 }
 
 fn run(cli: &Cli) -> Result<(), String> {
@@ -71,6 +167,24 @@ fn run(cli: &Cli) -> Result<(), String> {
     let goal_id = resolve_required(ENV_GOAL_ID, "goal id")?;
     let verifier_id = resolve_required(ENV_VERIFIER_ID, "verifier id")?;
     let round = resolve_round()?;
+
+    // Verdict registration span (lifecycle-tracing spec). The traceId comes from
+    // VERIFIER_LOOP_TRACE_ID (propagated by the spawning jewilo) or is empty when
+    // jewije is invoked manually — the receipt layer records whichever is active.
+    let trace_id = verifier_loop::observe::trace_id_from_env();
+    let kind = match cli.command {
+        Cmd::Approve { .. } => "approve",
+        Cmd::Reject { .. } => "reject",
+    };
+    let _span = tracing::info_span!(
+        "jewije.register",
+        goalId = %goal_id,
+        verifierId = %verifier_id,
+        round = round,
+        traceId = %trace_id.as_deref().unwrap_or(""),
+        kind = kind,
+    )
+    .entered();
 
     // Resolve the optional signing secret. A missing/empty secret is legal only for
     // slots in the legacy (unsigned) regime — see the regime gate below.
@@ -89,27 +203,33 @@ fn run(cli: &Cli) -> Result<(), String> {
     // secret is required. Pinned + no secret, or secret + no pin, are both
     // Unauthenticated (fail closed). Both absent → legacy unsigned path. Both present
     // (and matching) → signed path.
-    let pinned = verdict::read_pinned_pubkey(&root, &goal_id, &verifier_id, round)
+    //
+    // phase_id from VERIFIER_LOOP_PHASE env var (dynamic-pipeline LD17). The orchestrator
+    // sets this so the V* child's jewije calls write into the correct phaseId-nested slot.
+    let phase_id_owned: Option<String> = std::env::var(verifier_loop::goal::PHASE_ENV_VAR)
+        .ok()
+        .filter(|s| !s.is_empty());
+    let phase_id_ref: Option<&str> = phase_id_owned.as_deref();
+
+    let pinned = verdict::read_pinned_pubkey(&root, &goal_id, &verifier_id, round, phase_id_ref)
         .map_err(|e| e.to_string())?;
 
     let result = match (&cli.command, pinned, signing_key.as_ref()) {
-        (Cmd::Approve, None, None) => {
-            verdict::register_approve(&root, &goal_id, &verifier_id, round)
+        (Cmd::Approve { ref notes }, None, None) => {
+            verdict::register_approve(&root, &goal_id, &verifier_id, round, phase_id_ref, notes.as_deref())
         }
-        (Cmd::Approve, Some(_), Some(sk)) => {
-            verdict::register_signed_approve(&root, &goal_id, &verifier_id, round, sk)
-        }
-        (Cmd::Approve, _, None) => Err(VerdictError::Unauthenticated(
+        (Cmd::Approve { ref notes }, Some(_), Some(sk)) => verdict::register_signed_approve(&root, &goal_id, &verifier_id, round, phase_id_ref, notes.as_deref(), sk),
+        (Cmd::Approve { .. }, _, None) => Err(VerdictError::Unauthenticated(
             "verifier secret missing; set $VERIFIER_LOOP_VERIFIER_SECRET".to_string(),
         )),
-        (Cmd::Approve, None, Some(_)) => Err(VerdictError::Unauthenticated(
+        (Cmd::Approve { .. }, None, Some(_)) => Err(VerdictError::Unauthenticated(
             "no pinned verifier pubkey for this slot".to_string(),
         )),
         (Cmd::Reject { ref notes }, None, None) => {
-            verdict::register_reject(&root, &goal_id, &verifier_id, round, notes)
+            verdict::register_reject(&root, &goal_id, &verifier_id, round, phase_id_ref, notes)
         }
         (Cmd::Reject { ref notes }, Some(_), Some(sk)) => {
-            verdict::register_signed_reject(&root, &goal_id, &verifier_id, round, notes, sk)
+            verdict::register_signed_reject(&root, &goal_id, &verifier_id, round, phase_id_ref, notes, sk)
         }
         (Cmd::Reject { .. }, _, None) => Err(VerdictError::Unauthenticated(
             "verifier secret missing; set $VERIFIER_LOOP_VERIFIER_SECRET".to_string(),
@@ -119,7 +239,27 @@ fn run(cli: &Cli) -> Result<(), String> {
         )),
     };
 
-    result.map_err(map_verdict_error)
+    result
+        .map(|()| {
+            // Record a verdict-registered event in the per-goal trace.jsonl (trace-export
+            // spec). Fail-open: a write error is swallowed inside append_trace_event.
+            let status = match cli.command {
+                Cmd::Approve { .. } => "APPROVE",
+                Cmd::Reject { .. } => "REJECT",
+            };
+            let _ = verifier_loop::observe::append_trace_event(
+                &root,
+                &goal_id,
+                "info",
+                "jewije.registered",
+                serde_json::json!({
+                    "verifierId": verifier_id,
+                    "round": round,
+                    "status": status,
+                }),
+            );
+        })
+        .map_err(map_verdict_error)
 }
 
 /// Map a `VerdictError` to a user-facing stderr string. Each arm fails closed.
@@ -145,8 +285,7 @@ fn resolve_home() -> Result<PathBuf, String> {
 
 /// Resolve a required identity value from env (env wins; there is no arg override).
 fn resolve_required(env_key: &str, label: &str) -> Result<String, String> {
-    std::env::var(env_key)
-        .map_err(|_| format!("{label} not set (expected ${env_key})"))
+    std::env::var(env_key).map_err(|_| format!("{label} not set (expected ${env_key})"))
 }
 
 /// Parse the round from `VERIFIER_LOOP_ROUND` (u32).

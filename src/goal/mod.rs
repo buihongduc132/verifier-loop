@@ -4,7 +4,8 @@
 //!   = `SHA256(salt + goalText + createdAt)` (D5), `rounds/` dir, current round = 1.
 //! * `RESUME <id> [--fix "…"]`   → increment round, append note to
 //!   `rounds/<round>/fix-notes.json` (append-only). `goal.json` and `signature.json` are
-//!   byte-for-byte unchanged.
+//!   byte-for-byte unchanged. The optional `--notes` flag appends goal-scoped notes to
+//!   `goal-notes.json` (also append-only, also never a hash input).
 //! * Missing store / missing goal → fail closed, no hash.
 //!
 //! All core functions take the store root explicitly (parallel-safe); env-resolving
@@ -32,6 +33,11 @@ pub const STATE_FILE: &str = "state.json";
 pub const ROUNDS_DIR: &str = "rounds";
 /// Append-only fix-notes within a round (written by RESUME).
 pub const FIX_NOTES_FILE: &str = "fix-notes.json";
+/// Goal-scoped append-only notes (written by `RESUME --notes`). Each note is a separate
+/// line; the file lives alongside `goal.json` but is NEVER a signature or hash input —
+/// `goal.json` and `signature.json` stay byte-for-byte immutable. There is NO command to
+/// strip / remove / update notes; only append + load exist.
+pub const GOAL_NOTES_FILE: &str = "goal-notes.json";
 
 /// The immutable goal record written once at `NEW`.
 ///
@@ -60,10 +66,64 @@ pub struct SignatureRecord {
 const SIG_ALGO: &str = "SHA256(salt+goalText+createdAt)";
 
 /// Per-goal state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// dynamic-pipeline extension (LD17, LD18, LD4, LD25, LD26): gains four fields.
+///   * `current_phase` — letter-suffixed sub-phase id ("1a", ...) or `None` for legacy
+///     v0 goals.
+///   * `esca_count` — consecutive Gate-pass/Confirm-reject counter (LD4).
+///   * `escalation_depth` — count of completed PL-E cycles (LD25).
+///   * `verifier_id_version` — `0` = legacy `v{i+1}`, `1` = d/s scheme (LD26).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StateRecord {
     pub current_round: u32,
+    /// dynamic-pipeline: current sub-phase id within the round (`None` for legacy v0).
+    #[serde(default)]
+    pub current_phase: Option<String>,
+    /// dynamic-pipeline: consecutive Gate-pass/Confirm-reject counter (LD4).
+    #[serde(default)]
+    pub esca_count: u32,
+    /// dynamic-pipeline: count of completed PL-E cycles (LD25).
+    #[serde(default)]
+    pub escalation_depth: u32,
+    /// dynamic-pipeline: verifier-id scheme version (0 = legacy, 1 = d/s) (LD26).
+    #[serde(default)]
+    pub verifier_id_version: u8,
+}
+
+impl Default for StateRecord {
+    fn default() -> Self {
+        Self {
+            current_round: 1,
+            current_phase: None,
+            esca_count: 0,
+            escalation_depth: 0,
+            verifier_id_version: 1, // new goals default to the d/s scheme
+        }
+    }
+}
+
+/// Env var propagated to every V* child carrying the current sub-phase id (LD17).
+/// Lets `jewije` verdict registrations tag themselves with their spawning phase.
+pub const PHASE_ENV_VAR: &str = "VERIFIER_LOOP_PHASE";
+
+/// Compute the slot directory for one verifier in one sub-phase (dynamic-pipeline LD17).
+///
+/// `<root>/goals/<goalId>/rounds/<round>/<phaseId>/<vid>/`
+///
+/// For legacy v0 goals, pass a sentinel `phase_id` (e.g. `"0"`).
+pub fn slot_dir(
+    root: impl AsRef<Path>,
+    goal_id: &str,
+    round: u32,
+    phase_id: &str,
+    vid: &str,
+) -> PathBuf {
+    goal_dir(root.as_ref(), goal_id)
+        .join(ROUNDS_DIR)
+        .join(round.to_string())
+        .join(phase_id)
+        .join(vid)
 }
 
 /// Compute the directory for a goal.
@@ -120,22 +180,15 @@ pub fn new(root: &Path, goal_text: &str, context: Option<&str>) -> Result<String
     )?;
 
     // Write state.json (current round = 1).
-    let state = StateRecord { current_round: 1 };
-    fs::write(
-        gdir.join(STATE_FILE),
-        serde_json::to_string_pretty(&state)?,
-    )?;
+    let state = StateRecord::default();
+    fs::write(gdir.join(STATE_FILE), serde_json::to_string_pretty(&state)?)?;
 
     Ok(goal_id)
 }
 
 /// Resume a goal: increment the round, append fix notes (if any). `goal.json` and
 /// `signature.json` are never touched. Returns the new round number.
-pub fn resume(
-    root: &Path,
-    goal_id: &str,
-    fix_notes: Option<&str>,
-) -> Result<u32, GoalError> {
+pub fn resume(root: &Path, goal_id: &str, fix_notes: Option<&str>) -> Result<u32, GoalError> {
     let gdir = goal_dir(root, goal_id);
     if !gdir.exists() {
         return Err(GoalError::GoalNotFound);
@@ -146,7 +199,7 @@ pub fn resume(
     let mut state: StateRecord = if state_path.exists() {
         serde_json::from_str(&fs::read_to_string(&state_path)?)?
     } else {
-        StateRecord { current_round: 1 }
+        StateRecord::default()
     };
     state.current_round = state.current_round.saturating_add(1);
     let round = state.current_round;
@@ -171,6 +224,62 @@ pub fn resume(
     fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
 
     Ok(round)
+}
+
+/// Append each note in `notes` to the goal-scoped `goal-notes.json` (append-only across
+/// calls, never overwriting). `goal.json` and `signature.json` are NEVER touched — notes
+/// are metadata, not a signature or hash input. Fail-closed if the goal dir is missing.
+///
+/// On-disk shape: `{ "notes": ["line1", "line2", ...] }`. Each call pushes onto the
+/// existing array (creating the file if absent). An empty `notes` slice is a no-op that
+/// does NOT create the file (backward compatible: `RESUME` without `--notes` leaves no
+/// goal-notes.json behind).
+pub fn append_notes(root: &Path, goal_id: &str, notes: &[String]) -> Result<(), GoalError> {
+    if notes.is_empty() {
+        // No-op: do not create an empty goal-notes.json.
+        return Ok(());
+    }
+    let gdir = goal_dir(root, goal_id);
+    if !gdir.exists() {
+        return Err(GoalError::GoalNotFound);
+    }
+    let notes_path = gdir.join(GOAL_NOTES_FILE);
+    let mut arr: serde_json::Value = if notes_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&notes_path)?)?
+    } else {
+        serde_json::json!({ "notes": [] })
+    };
+    if let Some(arr_notes) = arr.get_mut("notes").and_then(|v| v.as_array_mut()) {
+        for note in notes {
+            arr_notes.push(serde_json::Value::String(note.clone()));
+        }
+    }
+    fs::write(&notes_path, serde_json::to_string_pretty(&arr)?)?;
+    Ok(())
+}
+
+/// Load every goal-scoped note ever appended, in insertion order. Returns an empty
+/// `Vec` (NOT an error) when no `goal-notes.json` exists. Fail-closed (`GoalNotFound`)
+/// when the goal directory itself is missing.
+pub fn load_notes(root: &Path, goal_id: &str) -> Result<Vec<String>, GoalError> {
+    let gdir = goal_dir(root, goal_id);
+    if !gdir.exists() {
+        return Err(GoalError::GoalNotFound);
+    }
+    let notes_path = gdir.join(GOAL_NOTES_FILE);
+    if !notes_path.exists() {
+        return Ok(Vec::new());
+    }
+    let arr: serde_json::Value = serde_json::from_str(&fs::read_to_string(&notes_path)?)?;
+    let mut out = Vec::new();
+    if let Some(arr_notes) = arr.get("notes").and_then(|v| v.as_array()) {
+        for v in arr_notes {
+            if let Some(s) = v.as_str() {
+                out.push(s.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Return the current round for a goal (fail closed if missing).

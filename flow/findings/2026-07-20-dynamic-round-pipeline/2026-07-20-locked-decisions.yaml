@@ -1,0 +1,463 @@
+# Locked decisions — dynamic-round-pipeline explore (2026-07-20)
+#
+# IMMUTABLE INPUT to any future OpenSpec proposal on this topic.
+# Traceability: each entry cites turn + parts + verbatim user_quote.
+# Future artifact MUST cite [LDx]; reader jumps to turn file → user_quote.
+#
+# Turn file map:
+#   turn1 = 2026-07-20-turn1-initial-proposal.md
+#   turn2 = 2026-07-20-turn2-reframe-dump-smart.md
+#   turn3 = 2026-07-20-turn3-dynamic-generic.md
+#   turn4 = 2026-07-20-turn4-rename-esca.md
+
+- id: LD1
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "reword / rethink all of your next response. DO NOT linger into cheap/expensive; linger into dump/smart. We are not consider about COST there at all."
+  decision: Frame verifiers as Dump (D) vs Smart (S). Cost is NOT a consideration. Stop using cheap/expensive framing.
+  status: locked
+
+- id: LD2
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "Consider the smart one is just another round of review. ... That having exact same mechanic , lifecycle as a normal round."
+  decision: Smart phase = just another round of review. Same spawn/gather/evaluate/lifecycle as a normal round. No special-case code path for lifecycle.
+  status: locked
+
+- id: LD3
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "but name instead of 1-2-3-4 , it will be 1b 1c 1d or something"
+  decision: Sub-rounds within one invocation use letter suffixes (1a, 1b, 1c, 1d), NOT sequential integers (1-2-3-4). Distinguishes sub-phases from top-level RESUME rounds.
+  status: locked
+
+- id: LD4
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "Ok , if it is 2 consequtive dumpPass - smartReject. Then switch to: 1/2 smart ; 1/2 dump; (50% , round up); THEN it still have to have another \"smart\" one if 2/2 passed (even with 1 smart 1 dump);"
+  decision: Escalation rule — after 2 consecutive (Gate-pass + Confirm-reject), switch Gate to Mixed mode (half dump + half smart, smart rounds up). After Mixed unanimous pass, still require one more smart (Final).
+  status: locked
+
+- id: LD5
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "1 cmd only."
+  decision: Single `jewilo NEW` / `jewilo RESUME` invocation runs the entire pipeline (all sub-phases). No separate confirm command. No AwaitingConfirmation goal state.
+  status: locked
+
+- id: LD6
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "ALSO , the output should shows like 2+1/2 instead of 3/2 or 2/2. To easily determine what kind of jewilo was ran."
+  decision: Output format = `<phase1passes>+<phase2passes>[+...]/<n>`. `+` boundaries encode which pipeline path ran. Lets reader determine pipeline shape from output alone.
+  status: locked
+
+- id: LD7
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "2 verifier hash. 2/2 + 1Final as verdict."
+  decision: Completion hash covers ALL verdicts in the chain (Gate 2/2 + Confirm/Final), not just the last phase. Hash input = union of matching verdicts across all sub-phases.
+  status: locked
+
+- id: LD8
+  turn: turn2
+  parts: ["[user]"]
+  user_quote: |
+    "global."
+  decision: Escalation policy + pipeline config live in global `config.json`, NOT per-goal at NEW time.
+  status: locked
+
+- id: LD9
+  turn: turn3
+  parts: ["[user]"]
+  user_quote: |
+    "MAKE THE mixed to be dynamic calculate ; Not a fixed number;"
+  decision: Mixed phase composition is DERIVED from m via formula (floor(m/2) dump + ceil(m/2) smart), never hardcoded. Dynamic per m.
+  status: locked
+
+- id: LD10
+  turn: turn3
+  parts: ["[user]"]
+  user_quote: |
+    "Also , make the 2D / 1D+1S to be more generic , because it is not always 2D initially , it could be 3/3 (3D) or something ;"
+  decision: Gate is generic m verifiers (m=2 → 2D, m=3 → 3D, etc.). NOT hardcoded to 2D. Threshold n + count m both configurable.
+  status: locked
+
+- id: LD11
+  turn: turn3
+  parts: ["[user]"]
+  user_quote: |
+    "Remember: These number are configurable; Also , make the concept that will not rot."
+  decision: All counts/thresholds configurable. Concepts must be rot-proof — abstractions (Phase, Pipeline, D/S as adapter refs) stable; compositions config-derived. Adapter names not hardcoded.
+  status: locked
+
+- id: LD12
+  turn: turn4
+  parts: ["[user]"]
+  user_quote: |
+    "qChange the Esc to esca (to avoid mistaken with the Esc in the keyboard);"
+  decision: Rename abbreviation Esc → esca (and EscT → escaT). Avoids confusion with keyboard Esc key.
+  status: locked
+
+# --- auto-decided threads (findings-resolve-threads, 2026-07-20) ---
+# Each resolved an open thread; flagged auto_decided: true so a reader knows
+# these are assistant-locked (challengeable) vs user-locked (LD1-LD12).
+
+- id: LD13
+  turn: findings-resolve-threads
+  parts: ["OT3"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    A sub-phase REJECT (Confirm/Mixed/Final) = hard reject for that ONE invocation. jewilo prints rejection notes + exits non-zero (same as a normal failed round). A (outer) then runs RESUME N+1. No internal auto-RESUME.
+  status: locked
+  auto_decided: true
+  resolves: OT3
+  tradeoff: |
+    Alternative = Confirm/Mixed REJECT silently triggers an internal RESUME N+1 within
+    the same cmd. Rejected — breaks LD5 (one cmd = one decision) symmetry and hides the
+    rejection from A. Hard-reject preserves existing jewilo reject-then-RESUME lifecycle
+    (evidence: src/bin/verifier_loop.rs run_round prints rejection + exits non-zero;
+    LD2 says smart phase = ordinary round lifecycle).
+
+- id: LD14
+  turn: findings-resolve-threads
+  parts: ["OT4"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Add a `pipeline` field (values: "PL-D" or "PL-E") to completion.json as receipt metadata. Records which pipeline path produced the hash. NOT a hash input (preserves hash determinism).
+  status: locked
+  auto_decided: true
+  resolves: OT4
+  tradeoff: |
+    Alternative = encode pipeline shape into the hash inputs. Rejected — changes hash
+    determinism and breaks audit recompute of historical receipts. Metadata-only field
+    matches existing pattern: completion.json already carries non-hash metadata (traceId,
+    fullDigest) per src/consensus/mod.rs CompletionRecord. LD7 (hash covers verdicts)
+    unaffected — verdicts already encode role via verifierId.
+
+- id: LD15
+  turn: findings-resolve-threads
+  parts: ["OT5"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    When m < 2, escaT is IGNORED — pipeline stays PL-D forever (Gate m-dump → Confirm k-smart). Mixed/Final never activate. A stderr warning is emitted if escaT > 0 while m < 2.
+  status: locked
+  auto_decided: true
+  resolves: OT5
+  tradeoff: |
+    Alternative = hard config-validation error when escaT > 0 and m < 2. Rejected —
+    config-time error blocks ALL goals over a benign misconfig; ignore+warn keeps
+    forward progress. Justified by turn3 math: floor(1/2)=0D so Mixed degenerates
+    to 1S ≡ Confirm, making PL-E identical to PL-D at m=1 (no escalation possible).
+
+- id: LD16
+  turn: findings-resolve-threads
+  parts: ["OT8"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Role-prefixed verifierIds — dump-phase slots = d1,d2,…; smart-phase slots = s1,s2,…. Unique + stable across phase compositions; role-transparent in the receipt hash.
+  status: locked
+  auto_decided: true
+  resolves: OT8
+  tradeoff: |
+    Alternative = reuse the existing v-namespace (v1,v2 → v3,v4…). Rejected — role
+    becomes ambiguous when slot composition changes between phases (e.g. v1=dump in
+    Gate vs v1=dump in Mixed is fine, but a single smart slot in Confirm as 'v3'
+    hides that it is smart). Role-prefix is deterministic + collision-free, which LD7
+    (hash sorts by verifierId) + LD11 (rot-proof) require. Cost: breaks current
+    `v{i+1}` convention in src/spawn/orchestrator.rs::identity_env_pairs and requires
+    add-verifier-tamper-hardening pubkey mapping to key on role-prefixed ids.
+
+# --- gotcha-coverage resolutions (findings-resolve-threads step 30, 2026-07-21) ---
+# Each resolves a gotcha-coverage thread (OT9-OT22). All auto-decided unless noted.
+# Evidence cited from gotcha appendix files + original turn files.
+
+- id: LD17
+  turn: findings-resolve-threads
+  parts: ["OT9"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Add phase dimension to slot path: rounds/<round>/<phaseId>/<vid>/. Add VERIFIER_LOOP_PHASE
+    env var + currentPhase field to state.json. RECOVER/STATUS/prompt-collection/hash all
+    filter by phaseId. This is the single highest-leverage fix (resolves 5 gotchas).
+  status: locked
+  auto_decided: true
+  resolves: OT9
+  tradeoff: |-
+    Alternative = keep flat rounds/<round>/<vid>/ and encode phase in verifierId prefix.
+    Rejected — pollutes verifierId namespace (LD16 already uses d/s prefix for role),
+    and RECOVER/STATUS would still need to parse which slots belong to which phase.
+    Explicit phaseId axis is cleaner and matches LD11 rot-proof principle (phase is a
+    first-class concept, not encoded in names).
+
+- id: LD18
+  turn: findings-resolve-threads
+  parts: ["OT10"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Keep round: u32 as the top-level RESUME counter. Add a separate phaseId: String axis
+    (values "1a","1b","1c","1d" per LD3) for sub-phase identity WITHIN one invocation.
+    phaseId is NOT part of the round number. Hash input gains phaseId in MatchingVerdict.
+    Verdict paths become rounds/<round>/<phaseId>/<vid>/. collect_prior_reject_notes
+    walks phaseId-ordered history within current_round, not just round < current_round.
+  status: locked
+  auto_decided: true
+  resolves: OT10
+  tradeoff: |-
+    Alternative = widen round type to String to encode "1a"/"1b". Rejected — changes
+    every hash input format, breaks audit recompute of historical receipts, touches
+    u32 round in StateRecord/consensus/verdict/receipt/tamper. Separate phaseId axis
+    preserves all existing u32 contracts. The Turn 5 conclusion ("no new mechanic needed
+    for note-passing") is CORRECTED: a new phase-scoped note-passing path IS required,
+    because collect_prior_reject_notes filters round >= current_round (same invocation
+    shares current_round). This is the only correction to Turn 5's conclusion.
+
+- id: LD19
+  turn: findings-resolve-threads
+  parts: ["OT11"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Add pipeline fields (dumpAdapter, smartAdapter, confirmCount, escaT) directly to Config
+    struct (bump schema, keep deny_unknown_fields). Precedence rule for adapter resolution:
+    (1) per-slot verifiers[].adapter array (highest) → (2) role-derived dumpAdapter/
+    smartAdapter pair → (3) legacy backend field (lowest, alias for dumpAdapter). Reject
+    config with both backend AND dumpAdapter present without verifiers[] (ambiguous).
+    ALL pipeline fields snapshotted into goal.json at NEW (matches existing per-verifier-
+    adapter snapshot pattern).
+  status: locked
+  auto_decided: true
+  resolves: OT11
+  tradeoff: |-
+    Alternative = pipeline sub-object with deny_unknown_fields=false for forward-evolution.
+    Rejected — adds a second config surface with different rules, increases complexity.
+    Direct struct fields with explicit precedence is simpler and version-gated (deny_unknown_fields
+    forces a code change per addition, which is honest). Snapshot-at-NEW resolves G8.1/G8.5
+    (config drift mid-goal): once snapshotted, live config edits don't affect in-flight goals.
+
+- id: LD20
+  turn: findings-resolve-threads
+  parts: ["OT12"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Extend SpawnInput to carry adapters: Vec<Adapter> parallel to slot indices.
+    spawn_round/spawn_resume resolve adapter per slot index using LD19 precedence rule.
+    Mixed phase calls spawn once with a Vec mixing dump and smart adapters per slot.
+    The Vec<Phase> executor (turn3) calls spawn per phase, passing the phase's resolved
+    adapter Vec.
+  status: locked
+  auto_decided: true
+  resolves: OT12
+  tradeoff: |-
+    Alternative = call spawn_round twice per Mixed phase (once per role) and merge.
+    Rejected — breaks the gather barrier contract (one spawn = one gather), and merging
+    two VerifierRun Vecs adds error-prone bookkeeping. Vec<Adapter> is the minimal extension
+    that preserves the existing spawn/gather/evaluate lifecycle per phase.
+
+- id: LD21
+  turn: findings-resolve-threads
+  parts: ["OT13"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    esca lifecycle fully specified: (1) Oscillation cap: add escaMaxRetries config
+    (default 3). After N PL-D↔PL-E cycles without a Confirm/Final pass, hard-fail goal
+    with "escalation exhaustion" exit (non-zero). (2) Time-bomb fix: when m<2, FREEZE
+    esca (do not increment). When m crosses from <2 to ≥2 (config edit), reset esca=0
+    one-shot. (3) Streak definition: "consecutive" = completed PL-D invocations ending
+    in Confirm-reject. PL-E invocations never increment the PL-D streak. Interrupted
+    RESUMEs (no Confirm run) don't count. (4) escaT=0 = escalation disabled (PL-D
+    forever). Validate escaT≥0 at config load.
+  status: locked
+  auto_decided: true
+  resolves: OT13
+  tradeoff: |-
+    Alternative for oscillation = no cap, rely on operator to abandon goal. Rejected —
+    silent infinite loop violates fail-loud principle. Alternative for time-bomb = always
+    reset esca on config change. Rejected — too aggressive, loses legitimate escalation
+    history on unrelated config edits. Freeze-while-m<2 + one-shot-reset-on-cross is the
+    minimal intervention that prevents the silent trigger.
+
+- id: LD22
+  turn: findings-resolve-threads
+  parts: ["OT14"]
+  user_quote: "auto-decided — evidence in LD4 verbatim (\"2/2 passed\") + LD4 decision text (\"unanimous\")"
+  decision: |-
+    Mixed phase threshold = m (unanimity), NOT n. All Mixed verifiers (floor(m/2) dump
+    + ceil(m/2) smart) must APPROVE. This matches LD4's verbatim "2/2 passed" framing
+    and the LD4 decision text "Mixed unanimous pass". turn3's derivation "Mixed threshold
+    = n" is CORRECTED to threshold = m. Gate retains threshold = n; Mixed is stricter
+    (unanimity) because it is the escalation mode.
+  status: locked
+  auto_decided: true
+  resolves: OT14
+  tradeoff: |-
+    Alternative = Mixed threshold = n (consistent with Gate). Rejected — for n < ceil(m/2),
+    smart alone passes Mixed without any dump approval, making dump advisory-only and
+    defeating the "mixed" intent (LD4: "half-half, round up" implies both roles matter).
+    LD4's "2/2 passed" for m=2 is unanimity; generalized to m, that's m/m. Threshold = m
+    forces dump to be load-bearing in Mixed for all m.
+
+- id: LD23
+  turn: findings-resolve-threads
+  parts: ["OT15"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    m, n, escaT, confirmCount, dumpAdapter, smartAdapter are ALL snapshotted into goal.json
+    at NEW time. Pipeline composition for every round of that goal is derived from the
+    snapshot, not live config. This matches the existing per-verifier-adapter snapshot
+    pattern (goal.json already freezes Config). Editing config.json mid-goal has NO effect
+    on in-flight goals.
+  status: locked
+  auto_decided: true
+  resolves: OT15
+  tradeoff: |-
+    Alternative = read pipeline fields live from config each invocation. Rejected —
+    breaks audit recompute determinism (old receipt re-derived with new config yields
+    different composition → hash mismatch). Snapshot-at-NEW is the only way to preserve
+    receipt verifiability across config edits. Already the existing pattern for n/m/adapter.
+
+- id: LD24
+  turn: findings-resolve-threads
+  parts: ["OT16"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Release and reacquire the GoalLock between phases. Each phase acquires the lock at
+    spawn-start and releases it at verdict-gather-complete. This allows RECOVER/STATUS to
+    probe between phases. Cooldown tracking is scoped per-backend (dump and smart adapters
+    have separate health counters in health.jsonl, keyed by adapter name). Document the
+    wall-clock ceiling (Σ phase timeouts) in the design doc.
+  status: locked
+  auto_decided: true
+  resolves: OT16
+  tradeoff: |-
+    Alternative = hold lock for entire pipeline (simpler). Rejected — blocks recovery
+    for up to 4×verifierTimeoutSec (2h default), defeating round-recovery's purpose.
+    Per-phase lock is a natural breakpoint (spawn→gather is atomic; between phases is
+    safe). Per-backend cooldown prevents dump failures from tripping smart's cooldown
+    (they are different adapters with different failure modes).
+
+- id: LD25
+  turn: findings-resolve-threads
+  parts: ["OT17"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Add phaseId to MatchingVerdict hash input. Hash inputs: salt + goalId + goalSignature
+    + String(roundNumber) + canonicalJSON(matchingVerdicts sorted by (phaseId, verifierId))
+    + matchedAtISO. Receipt log append is mandatory for EVERY verdict write across all
+    sub-phases — assert receiptHead changes after each phase. completion.json gains
+    escalationDepth field (count of PL-E cycles) for audit granularity.
+  status: locked
+  auto_decided: true
+  resolves: OT17
+  tradeoff: |-
+    Alternative = rely on receiptHead alone to bind phase order transitively. Rejected —
+    requires unverified assumption that receipt spans all phases. Explicit phaseId in
+    hash input is fail-closed: two different phase orderings CANNOT produce the same hash.
+    escalationDepth captures what LD14's binary PL-D/PL-E field loses (audit can't
+    distinguish 1-escalation from 5-escalation otherwise).
+
+- id: LD26
+  turn: findings-resolve-threads
+  parts: ["OT18"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Per-invocation monotonic verifierId counter. Dump ids: Gate d1..d{floor(m/2)};
+    Mixed continues d{floor(m/2)+1}..d{m}. Smart ids: Confirm s1..s{confirmCount};
+    Mixed smart continues s{confirmCount+1}..s{confirmCount+ceil(m/2)}; Final smart
+    s{confirmCount+ceil(m/2)+1}. No collisions within an invocation. Migration: state.json
+    gains verifier_id_version field (0 = legacy v{i+1}, 1 = d/s scheme). verifier_id()
+    checks version. Old goals use v-namespace, new goals use d/s.
+  status: locked
+  auto_decided: true
+  resolves: OT18
+  tradeoff: |-
+    Alternative = per-phase-restart counter with phase-qualified ids (Gd1, Md1, Cs1, Fs1).
+    Rejected — longer ids, and "role-transparent in receipt" (LD16 goal) is lost behind
+    the phase prefix. Monotonic counter preserves role-prefix (d/s) while guaranteeing
+    uniqueness without phase qualifier. Migration via version gate is the minimal
+    deployment hazard (no rename script needed; old goals continue working under v-namespace).
+
+- id: LD27
+  turn: findings-resolve-threads
+  parts: ["OT19"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Output denominator = m (total verifiers in the Gate phase), NOT n. This preserves
+    backward compat with existing jewilo output ("did not reach {}/{} consensus" uses
+    approveCount/m). The + segments encode per-phase approve counts. For m>n where sum
+    exceeds denominator (e.g. "4/2" for m=2,n=1 PL-E pass), document that sum is per-phase
+    and can exceed the Gate count. Add --json output mode emitting structured
+    {pipeline, phases:[{role,count,approved}], n, m, verdict}.
+  status: locked
+  auto_decided: true
+  resolves: OT19
+  tradeoff: |-
+    Alternative = denominator = n (threshold) per LD6's literal "2+1/2" reading. Rejected
+    — existing jewilo code uses /m (src/bin/verifier_loop.rs:157,176), and switching to
+    /n silently breaks every script/parser that treats /X as "X verifiers ran". For n=1,m=3
+    an APPROVE would read "2/1" — nonsense. m is the stable "how many verifiers" number
+    across the pipeline. The + segments (not the denominator) encode pipeline shape per LD6.
+
+- id: LD28
+  turn: findings-resolve-threads
+  parts: ["OT20"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Config validation at parse time (fail-closed): n must satisfy 1 ≤ n ≤ m (reject n=0
+    vacuous-pass, reject n>m impossible). m must satisfy m ≥ 1 (reject m=0 empty pipeline).
+    confirmCount must satisfy confirmCount ≥ 1. escaT must satisfy escaT ≥ 0 (escaT=0 =
+    disabled per LD21). All violations produce clear error messages at config load.
+  status: locked
+  auto_decided: true
+  resolves: OT20
+  tradeoff: |-
+    Alternative = accept degenerate configs and document edge behavior. Rejected — n>m
+    creates perpetual-REJECT loop with no escalation escape (Gate never passes → esca
+    never increments). n=0 creates vacuous-pass Gate. These are silent misconfigs with
+    no recovery path. Fail-closed at parse time is the existing pattern (deny_unknown_fields
+    already rejects unknown keys).
+
+- id: LD29
+  turn: findings-resolve-threads
+  parts: ["OT21"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Narrow LD1's claim explicitly. LD1 is amended (via this addendum, not edit) to state:
+    "D and S are capability-ordered labels (S verifies at least as strictly as D in
+    detection power); cost is not the axis, but the S ≥ D capability assumption is
+    load-bearing for LD4's escalation predicate. If S ≥ D is NOT assumed, LD4's escalation
+    is unjustified and the pipeline degenerates to a single-phase smart verifier."
+  status: locked
+  auto_decided: true
+  resolves: OT21
+  tradeoff: |-
+    Alternative = remove capability ordering, treat D/S as peers. Rejected — LD4's
+    escalation predicate (dumpPass ∧ smartReject) has no justification if S is not
+    stronger than D. The entire pipeline design presupposes S catches problems D misses.
+    Making the assumption explicit (rather than hidden) lets a future verifier/reader
+    challenge it if the assumption is invalidated by measurement.
+
+- id: LD30
+  turn: findings-resolve-threads
+  parts: ["OT22"]
+  user_quote: "auto-decided (no explicit user lock)"
+  decision: |-
+    Rename config fields to escaCount / escaThreshold (full-word camelCase). Rust fields:
+    esca_count / esca_threshold with #[serde(rename = "escaCount")] / "escaThreshold".
+    Matches existing config convention (maxTurn, gitDiffMaxChars, verifierTimeoutSec — all
+    full words). The abbreviations esca / escaT remain in prose/docs/variable-comments
+    as shorthand, but the config field names and struct fields use full words.
+  status: locked
+  auto_decided: true
+  resolves: OT22
+  tradeoff: |-
+    Alternative = keep esca/escaT in config (shorter). Rejected — esca/escaT differ by
+    one trailing capital, typo is a silent logic bug (compare counter to counter). escaT
+    breaks existing camelCase convention (reads as typo for "esc at" or "escat").
+    escaCount/escaThreshold are longer but unambiguous and grep-friendly.

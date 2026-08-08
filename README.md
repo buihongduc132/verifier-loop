@@ -116,6 +116,88 @@ On n/m APPROVE consensus the short completion hash (`mmddyy-XXXXXXXX`) is printe
 full 64-hex `fullDigest` for exact audit recompute). On failure the rejection summary is printed
 to stderr and the exit code is non-zero.
 
+## JSON output mode (`--json`)
+
+Both binaries accept a global flag `--json` (short `-j`) that selects machine-readable output
+for programmatic callers (outer driving agents, CI, wrapper scripts). It is parsed on the
+top-level CLI of each binary, so either placement works: `jewilo --json NEW "<goal>"` and
+`jewilo NEW "<goal>" --json`.
+
+When set, **exactly one JSON object** is written to stdout and the legacy free-text lines
+(`goalId: …`, the bare `mmddyy-XXXXXXXX`, `Verdict registered`, multi-line rejection summaries)
+are suppressed on stdout. `--json` is purely an output-shape layer: exit codes, the
+completion-hash inputs, verdict semantics, signature verification, and the on-disk artifacts
+(`completion.json`, `receipt-log.jsonl`, `trace.jsonl`) are **byte-identical** with and without
+it. Default (no `--json`) output is unchanged.
+
+### Envelope schema
+
+One root object (never an array, never NDJSON). Field names are camelCase, matching the on-disk
+artifact convention. Every field except `ok` and `command` is `Option<…>` and is **omitted**
+from the serialized object when absent (`serde skip_serializing_if`).
+
+| field                          | type      | present when |
+|--------------------------------|-----------|--------------|
+| `ok`                           | boolean   | always — `true` on success, `false` on any error |
+| `command`                      | string    | always — `new` \| `resume` \| `recover` \| `status` \| `approve` \| `reject` |
+| `goalId`                       | string    | when known |
+| `round`                        | number    | when known |
+| `verifierId`                   | string    | `jewije` verdict registration |
+| `status`                       | string    | see status values below |
+| `hash`                         | string    | short hash present (consensus / cooldown fallback) |
+| `fullDigest`                   | string    | 64-hex digest present (consensus) |
+| `needs`                        | string    | a decided round — `recover` \| `resume` \| `done` |
+| `rejection`                    | object    | rejected consensus |
+| `verdicts`                     | array     | `STATUS` body |
+| `state`                        | string    | `STATUS` body |
+| `error`                        | string    | `ok` is `false` |
+
+`rejection` (present only on `status: "rejected"`) carries three arrays, each sorted by
+`verifierId` ascending for deterministic consumer equality:
+
+| field                 | shape                                   | meaning |
+|-----------------------|-----------------------------------------|---------|
+| `rejectNotes`         | `[[verifierId, note], …]` tuple-arrays  | every REJECT verdict's notes |
+| `nullVerifiers`       | `[verifierId, …]`                       | verifiers that emitted a NULL verdict |
+| `signatureFailures`   | `[[verifierId, reason], …]` tuple-arrays| verdicts whose signature failed verification |
+
+Consumers MUST tolerate unknown fields (the schema is additive). Producers MUST NOT add fields
+to the completion-hash inputs.
+
+### Per-command `status` values
+
+| `status`                     | command                              | meaning |
+|------------------------------|--------------------------------------|---------|
+| `consensus-passed`           | `NEW` / `RESUME`                     | n/m consensus reached; `hash` + `fullDigest` set |
+| `rejected`                   | `NEW` / `RESUME` / `RECOVER`         | no consensus; `rejection` breakdown present |
+| `cooldown-fallback`          | `NEW` / `RESUME`                     | store in cooldown; `hash` is the fallback `<mmddyy>-ffffff` |
+| `recover-null-after-timeout` | `RECOVER`                            | timeout with null slots still present |
+| `verdict-registered`         | `approve` / `reject`                 | verdict written to disk |
+
+### stdout / stderr separation
+
+Under `--json`, stdout is the **single** structured parse point: exactly one envelope object,
+regardless of how many internal phases ran. All human-readable diagnostics (cooldown notices,
+recoverable-round hints, captured V\* stderr previews, prompt-budget warnings, tracing init
+notes) stay on **stderr**. The envelope carries the structured equivalent a consumer needs
+(`status`, `hash`, `rejection`) so parsing stdout never requires parsing stderr. On the error
+path, stdout still gets one envelope `{"ok":false,"error":"…"}` while the human-readable
+text mirrors to stderr as a debugging aid.
+
+### Example — consensus-passed `NEW` round
+
+```bash
+jewilo --json NEW "implement the foo-bar endpoint with tests"
+# stdout (single line):
+{"ok":true,"command":"new","goalId":"20260715-abc123","round":1,
+ "status":"consensus-passed","hash":"071526-00a50e40",
+ "fullDigest":"9f8e7d6c5b4a3928f7e6d5c4b3a2918f7e6d5c4b3a2918f7e6d5c4b3a2918f"}
+# exit 0
+```
+
+A consumer parses this one object instead of scraping `goalId:` / the bare hash. Use case:
+[`flow/usecases/programmatic-json-output.md`](flow/usecases/programmatic-json-output.md).
+
 ## Completion-hash formula
 
 ```
@@ -150,6 +232,27 @@ where  goalSignature = SHA256(salt + goalText + createdAt)
 - A missing `~/.verifier-loop/` or goal directory yields **no hash**.
 - Editing `goal.json` `goalText` after creation breaks `signature.json` and every downstream hash.
 - Editing a stored APPROVE verdict invalidates the completion hash on recompute.
+
+## Observability / tracing (add-otel-observability)
+
+The full `jewilo`/`jewije` lifecycle is observable via structured tracing:
+
+- **Per-goal `traceId`**: minted at NEW, persisted to `<store>/goals/<goalId>/trace-id`,
+  reused across RESUME, and propagated to every V* child env (`VERIFIER_LOOP_TRACE_ID`)
+  so `jewije` verdict registrations join the spawning round's trace.
+- **Per-goal `trace.jsonl`**: newline-delimited JSON lifecycle events (round start,
+  consensus pass/reject, verdict registered) under `<store>/goals/<goalId>/trace.jsonl`.
+  camelCase keys. Append-only; one file per goal.
+- **Opt-in OTLP/gRPC**: build with `--features otel` + set
+  `VERIFIER_LOOP_OTEL_EXPORTER_OTLP_ENDPOINT` to ship spans to a collector. Default
+  builds link NO OpenTelemetry deps (`tracing` + `tracing-subscriber` only).
+- **Level/format**: `VERIFIER_LOOP_LOG` (default `info`; `error`/`warn`/`info`/`debug`/`trace`),
+  `VERIFIER_LOOP_LOG_FORMAT` (`text` legacy byte-identical stderr | `json` structured NDJSON).
+
+**Critical:** `traceId` is **metadata, not a hash input**. The completion-hash and
+receipt-`entryHash` formulas are byte-identical with and without tracing enabled.
+Tracing is **fail-open**: any tracing error is swallowed and never blocks a verdict or
+hash. See [`THREAT-MODEL.md`](THREAT-MODEL.md) "Observability artifacts are NOT evidence".
 
 ## Coverage gate (>=80% lines)
 

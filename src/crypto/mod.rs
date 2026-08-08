@@ -20,7 +20,7 @@ use std::fmt;
 // `verifier_loop::crypto::{SigningKey, VerifyingKey, ...}` without depending on the
 // crate directly. Bringing `Signer` / `Verifier` into scope is also required locally so
 // `.sign()` / `.verify()` resolve on the dalek types.
-pub use ed25519_dalek::{SignatureError, Signature, Signer, SigningKey, Verifier, VerifyingKey};
+pub use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
 
 use rand::rngs::OsRng;
 use serde_json::Value;
@@ -129,7 +129,9 @@ pub fn canonical_record_bytes(
     map.insert("goalId", Value::String(goal_id.to_string()));
     map.insert(
         "notes",
-        notes.map(|n| Value::String(n.to_string())).unwrap_or(Value::Null),
+        notes
+            .map(|n| Value::String(n.to_string()))
+            .unwrap_or(Value::Null),
     );
     map.insert("registeredAt", Value::String(registered_at.to_string()));
     map.insert("round", Value::Number(round.into()));
@@ -137,7 +139,8 @@ pub fn canonical_record_bytes(
     map.insert("verifierId", Value::String(verifier_id.to_string()));
     // `to_vec` produces compact JSON with no whitespace and BTreeMap iterates in sorted
     // key order — both guarantees relied on by the canonical-bytes tests.
-    let mut bytes = serde_json::to_vec(&map).expect("serializing a flat BTreeMap<&str, Value> cannot fail");
+    let mut bytes =
+        serde_json::to_vec(&map).expect("serializing a flat BTreeMap<&str, Value> cannot fail");
     // D7 "no whitespace" is total: the canonical form must contain zero 0x20 bytes *anywhere*,
     // including inside string values (e.g. free-form `notes`). Escape ASCII space as the
     // 6-byte JSON escape `\u0020`. This is valid JSON (a parser decodes it back to a space),
@@ -178,7 +181,10 @@ fn escape_spaces_in_json(bytes: Vec<u8>) -> Vec<u8> {
 /// than panicking on a bad-length slice.
 pub fn signing_key_from_hex(hex_str: &str) -> Result<SigningKey, CryptoError> {
     let bytes = hex::decode(hex_str)?;
-    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| CryptoError::BadLength)?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::BadLength)?;
     // SigningKey::from_bytes infallibly wraps a 32-byte secret; keep the error path for
     // API symmetry with verifying_key_from_hex and future key-validation hooks.
     Ok(SigningKey::from_bytes(&arr))
@@ -189,7 +195,10 @@ pub fn signing_key_from_hex(hex_str: &str) -> Result<SigningKey, CryptoError> {
 /// Fail-closed on malformed hex, wrong length, or non-canonical pubkey encoding.
 pub fn verifying_key_from_hex(hex_str: &str) -> Result<VerifyingKey, CryptoError> {
     let bytes = hex::decode(hex_str)?;
-    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| CryptoError::BadLength)?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::BadLength)?;
     VerifyingKey::from_bytes(&arr).map_err(CryptoError::InvalidKey)
 }
 

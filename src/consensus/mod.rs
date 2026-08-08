@@ -40,15 +40,36 @@ const HASH_FULL_HEX_LEN: usize = 64;
 
 /// A matching (APPROVE) verdict participating in the hash input.
 ///
-/// Serialized canonically as `{"registeredAt":..,"verifierId":..}` (keys alphabetical
-/// via `BTreeMap`) inside the sorted-by-`verifierId` array.
+/// Serialized canonically as `{"phaseId":..,"registeredAt":..,"verifierId":..}`
+/// (keys alphabetical via `BTreeMap`) inside the sorted-by-`(phaseId, verifierId)` array.
+/// `phaseId` is the dynamic-pipeline sub-phase axis (LD25): two different phase orderings
+/// CANNOT produce the same hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchingVerdict {
+    /// dynamic-pipeline (LD17, LD25): sub-phase id ("1a", ...) that produced this verdict.
+    #[serde(default = "default_phase_id")]
+    pub phase_id: String,
     pub verifier_id: String,
     /// ISO-8601 timestamp the verdict was registered. Always present for a matching
     /// (APPROVE) verdict — a verdict without `registeredAt` cannot match (fail-closed).
     pub registered_at: String,
+}
+
+/// Legacy/v0 default `phaseId`. Empty string for old receipts so audit recompute stays
+/// byte-identical for pre-dynamic-pipeline goals (verifierIdVersion = 0).
+fn default_phase_id() -> String {
+    String::new()
+}
+
+impl Default for MatchingVerdict {
+    fn default() -> Self {
+        Self {
+            phase_id: default_phase_id(),
+            verifier_id: String::new(),
+            registered_at: String::new(),
+        }
+    }
 }
 
 /// The rejection surfaced to A when a round does not pass: each non-APPROVE verifier's
@@ -83,6 +104,12 @@ pub struct ConsensusResult {
 ///
 /// `hash` is the short `mmddyy-XXXXXXXX` form (displayed); `fullDigest` is the full
 /// 64-hex SHA-256 digest for exact audit recompute (not printed).
+///
+/// `trace_id` (add-otel-observability D4) is observability metadata: a convenience
+/// pivot from the completion record to the goal's span trail. It is NOT a hash
+/// input — `hash`/`fullDigest` are computed from the canonical tuple only.
+/// `None` when no trace id was resolved (backward-compat); omitted from JSON via
+/// skip_serializing_if so old completion.json files still deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionRecord {
@@ -92,6 +119,22 @@ pub struct CompletionRecord {
     pub round_number: u32,
     pub matched_at: String,
     pub matching_verdicts: Vec<MatchingVerdict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// dynamic-pipeline (LD14): which pipeline path produced this hash ("PL-D" | "PL-E").
+    /// Metadata-only — NOT a hash input (preserves hash determinism). Defaults to "PL-D"
+    /// for legacy goals.
+    #[serde(default = "default_pipeline_tag")]
+    pub pipeline: String,
+    /// dynamic-pipeline (LD25): count of PL-E cycles consumed reaching this completion.
+    /// Captures audit granularity the binary PL-D/PL-E tag loses.
+    #[serde(default)]
+    pub escalation_depth: u32,
+}
+
+/// Default `pipeline` tag for legacy receipts (LD14).
+fn default_pipeline_tag() -> String {
+    "PL-D".to_string()
 }
 
 /// Output of [`compute_hash`]: the short display hash + the full digest.
@@ -162,13 +205,14 @@ pub fn evaluate(
                 };
 
                 // Signature gate: bind the APPROVE to the slot's pinned pubkey.
-                let pinned = match verdict::read_pinned_pubkey(root, goal_id, vid, round) {
+                let pinned = match verdict::read_pinned_pubkey(root, goal_id, vid, round, None) {
                     Ok(opt) => opt,
                     // Malformed pin → cannot trust the slot; fail closed.
                     Err(_) => {
-                        rejection
-                            .signature_failures
-                            .push((vid.clone(), "WrongPubkey: pinned pubkey is unreadable".to_string()));
+                        rejection.signature_failures.push((
+                            vid.clone(),
+                            "WrongPubkey: pinned pubkey is unreadable".to_string(),
+                        ));
                         continue;
                     }
                 };
@@ -177,6 +221,7 @@ pub fn evaluate(
                     // Pinned slot: the signature MUST verify.
                     match verdict::verify_record(rec, Some(&key), goal_id, vid, round) {
                         Ok(()) => matching.push(MatchingVerdict {
+                            phase_id: String::new(),
                             verifier_id: vid.clone(),
                             registered_at: ts.to_string(),
                         }),
@@ -189,6 +234,7 @@ pub fn evaluate(
                 } else {
                     // Legacy unsigned regime: no pinned key → trust the APPROVE.
                     matching.push(MatchingVerdict {
+                        phase_id: String::new(),
                         verifier_id: vid.clone(),
                         registered_at: ts.to_string(),
                     });
@@ -203,7 +249,7 @@ pub fn evaluate(
                 // signature failure, not silently pass as a benign reject.
                 // Only check when a pinned key exists (legacy unsigned regime is
                 // exempt — there is no signature to verify).
-                if let Ok(Some(key)) = verdict::read_pinned_pubkey(root, goal_id, vid, round) {
+                if let Ok(Some(key)) = verdict::read_pinned_pubkey(root, goal_id, vid, round, None) {
                     if let Err(err) = verdict::verify_record(rec, Some(&key), goal_id, vid, round) {
                         rejection
                             .signature_failures
@@ -224,8 +270,14 @@ pub fn evaluate(
         // is expected to supply all m slots; here we simply ensure no false pass.
     }
 
-    // Sort matching by verifier_id ascending (canonical hash input order).
-    matching.sort_by(|a, b| a.verifier_id.cmp(&b.verifier_id));
+    // Sort matching by (phase_id, verifier_id) ascending (canonical hash input order).
+    // dynamic-pipeline (LD25): phase_id is a primary sort key so two different phase
+    // orderings CANNOT produce the same hash.
+    matching.sort_by(|a, b| {
+        a.phase_id
+            .cmp(&b.phase_id)
+            .then(a.verifier_id.cmp(&b.verifier_id))
+    });
 
     let approve_count = matching.len() as u32;
     let passed = approve_count >= n && (verdicts.len() as u32) >= m;
@@ -265,12 +317,23 @@ fn signature_failure_reason(err: &verdict::VerdictError) -> String {
 /// `matching` is assumed already sorted by the caller (or re-sorted here defensively).
 fn canonical_matching_json(matching: &[MatchingVerdict]) -> String {
     let mut sorted: Vec<&MatchingVerdict> = matching.iter().collect();
-    sorted.sort_by(|a, b| a.verifier_id.cmp(&b.verifier_id));
+    // LD25: sort by (phase_id, verifier_id) so two different phase orderings CANNOT
+    // produce the same hash. This MUST match the sort in `evaluate` (line 277).
+    sorted.sort_by(|a, b| {
+        a.phase_id
+            .cmp(&b.phase_id)
+            .then(a.verifier_id.cmp(&b.verifier_id))
+    });
 
     let arr: Vec<serde_json::Value> = sorted
         .iter()
         .map(|m| {
             let mut map = BTreeMap::new();
+            // LD25: phaseId IS a hash input — fail-closed phase binding.
+            map.insert(
+                "phaseId".to_string(),
+                serde_json::Value::String(m.phase_id.clone()),
+            );
             map.insert(
                 "registeredAt".to_string(),
                 serde_json::Value::String(m.registered_at.clone()),
@@ -297,10 +360,7 @@ fn mmddyy_of(matched_at_iso: &str) -> String {
     // Defensive: if shorter/malformed, fall back to zeros (the hash stays deterministic;
     // the prefix is only a sortable label, never a tamper guard).
     let bytes = matched_at_iso.as_bytes();
-    let (yyyy, mm, dd) = if bytes.len() >= 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-    {
+    let (yyyy, mm, dd) = if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
         (
             &matched_at_iso[0..4],
             &matched_at_iso[5..7],
@@ -344,8 +404,16 @@ pub fn compute_hash(
     // MODIFIED, D6). Empty for a fresh goal with no receipt log.
     let input = format!("{salt}{goal_id}{goal_sig}{round}{canon}{matched_at_iso}{receipt_head}");
     let full = hex::encode(Sha256::digest(input.as_bytes()));
-    debug_assert_eq!(full.len(), HASH_FULL_HEX_LEN, "SHA-256 hex digest must be 64 chars");
-    let short = format!("{}-{}", mmddyy_of(matched_at_iso), &full[..HASH_SHORT_HEX_LEN]);
+    debug_assert_eq!(
+        full.len(),
+        HASH_FULL_HEX_LEN,
+        "SHA-256 hex digest must be 64 chars"
+    );
+    let short = format!(
+        "{}-{}",
+        mmddyy_of(matched_at_iso),
+        &full[..HASH_SHORT_HEX_LEN]
+    );
     CompletionHash { short, full }
 }
 
@@ -363,6 +431,7 @@ pub fn write_completion(
     round: u32,
     hash: &CompletionHash,
     matched_at_iso: &str,
+    trace_id: Option<&str>,
 ) -> Result<PathBuf, ConsensusError> {
     if !result.passed {
         return Err(ConsensusError::NotPassed);
@@ -380,6 +449,9 @@ pub fn write_completion(
         round_number: round,
         matched_at: matched_at_iso.to_string(),
         matching_verdicts: result.matching_verdicts.clone(),
+        trace_id: trace_id.map(str::to_string),
+        pipeline: default_pipeline_tag(),
+        escalation_depth: 0,
     };
 
     let target = gdir.join(COMPLETION_FILE);
@@ -409,6 +481,7 @@ mod tests {
 
     fn mv(vid: &str, ts: &str) -> MatchingVerdict {
         MatchingVerdict {
+            phase_id: String::new(),
             verifier_id: vid.into(),
             registered_at: ts.into(),
         }
@@ -423,42 +496,76 @@ mod tests {
         // Keys alphabetical within each object: registeredAt before verifierId.
         assert!(j.find(r#""registeredAt""#).unwrap() < j.find(r#""verifierId""#).unwrap());
         // No whitespace.
-        assert!(!j.contains(' '), "canonical JSON must have no whitespace: {j}");
+        assert!(
+            !j.contains(' '),
+            "canonical JSON must have no whitespace: {j}"
+        );
     }
 
     #[test]
     fn compute_hash_uses_exact_concatenation_order() {
         let matching = vec![mv("v1", "2026-07-03T10:00:00Z")];
-        let h = compute_hash("SALT", "GID", "SIG", 1, &matching, "2026-07-03T10:05:00Z", "head0");
+        let h = compute_hash(
+            "SALT",
+            "GID",
+            "SIG",
+            1,
+            &matching,
+            "2026-07-03T10:05:00Z",
+            "head0",
+        );
 
         // Independent recompute — full digest + short form (head appended last).
         let canon = canonical_matching_json(&matching);
         let input = format!("SALTGIDSIG1{canon}2026-07-03T10:05:00Zhead0");
         let digest = hex::encode(Sha256::digest(input.as_bytes()));
-        assert_eq!(h.full_digest(), digest, "full digest must match exact concat order");
-        assert_eq!(h.short_hash(), format!("070326-{}", &digest[..HASH_SHORT_HEX_LEN]));
+        assert_eq!(
+            h.full_digest(),
+            digest,
+            "full digest must match exact concat order"
+        );
+        assert_eq!(
+            h.short_hash(),
+            format!("070326-{}", &digest[..HASH_SHORT_HEX_LEN])
+        );
     }
 
     #[test]
     fn evaluate_reject_notes_collected_on_fail() {
         let verdicts = vec![
-            ("v1".to_string(), VerdictRecord {
-                status: VerdictStatus::Approve,
-                notes: None,
-                registered_at: Some("t".into()),
-                signature: None,
-                pubkey_id: None,
-            }),
-            ("v2".to_string(), VerdictRecord {
-                status: VerdictStatus::Reject,
-                notes: Some("needs work".into()),
-                registered_at: Some("t".into()),
-                signature: None,
-                pubkey_id: None,
-            }),
+            (
+                "v1".to_string(),
+                VerdictRecord {
+                    status: VerdictStatus::Approve,
+                    notes: None,
+                    registered_at: Some("t".into()),
+                    signature: None,
+                    pubkey_id: None,
+                },
+            ),
+            (
+                "v2".to_string(),
+                VerdictRecord {
+                    status: VerdictStatus::Reject,
+                    notes: Some("needs work".into()),
+                    registered_at: Some("t".into()),
+                    signature: None,
+                    pubkey_id: None,
+                },
+            ),
         ];
-        let r = evaluate(std::path::Path::new("/nonexistent-consensus-internal-test"), "g", 1, &verdicts, 2, 2);
+        let r = evaluate(
+            std::path::Path::new("/nonexistent-consensus-internal-test"),
+            "g",
+            1,
+            &verdicts,
+            2,
+            2,
+        );
         assert!(!r.passed);
-        assert_eq!(r.rejection.reject_notes, vec![("v2".to_string(), "needs work".to_string())]);
+        assert_eq!(
+            r.rejection.reject_notes,
+            vec![("v2".to_string(), "needs work".to_string())]
+        );
     }
 }

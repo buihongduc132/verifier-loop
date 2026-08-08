@@ -98,15 +98,20 @@ EOF
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn round succeeds");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
+        phase_id: None,
+        }))
+        .expect("spawn round succeeds");
 
     assert_eq!(runs.len(), 2, "m=2 spawns exactly two verifier runs");
 
@@ -114,7 +119,11 @@ EOF
         let vdir = verifier_dir(root, &goal_id, 1, vid);
         let verdict: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
-        assert_eq!(verdict["status"], serde_json::Value::Null, "{vid} verdict null");
+        assert_eq!(
+            verdict["status"],
+            serde_json::Value::Null,
+            "{vid} verdict null"
+        );
 
         let meta: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(vdir.join("meta.json")).unwrap()).unwrap();
@@ -167,6 +176,10 @@ ACP
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn succeeds");
 
@@ -187,7 +200,7 @@ ACP
 fn parallel_spawn_does_not_serialize() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    // m=2; each verifier sleeps 300ms. If serialized → ~600ms; parallel → ~300ms.
+    // m=2; each verifier sleeps 1s. If serialized → ~2s; parallel → ~1s.
     let config = serde_json::json!({
         "n": 1, "m": 2, "maxTurn": 3, "backend": "custom",
         "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10
@@ -197,13 +210,20 @@ fn parallel_spawn_does_not_serialize() {
     let script = write_script(
         dir.path(),
         "slow.sh",
-        r#"#!/bin/sh
-sleep 0.3
+        &format!(
+            r#"#!/bin/sh
+sleep 1
 cat <<'EOF'
-{"type":"session","id":"s"}
-{"type":"agent_end","messages":[],"willRetry":false}
+{{"type":"session","id":"s"}}
+{{"type":"agent_end","messages":[],"willRetry":false}}
 EOF
+# Write a verdict so the new verdict-enforcement nudge loop does not fire;
+# this test is about parallel spawn timing, not about verdict enforcement.
+SLOT="$VERIFIER_LOOP_HOME/goals/$VERIFIER_LOOP_GOAL_ID/rounds/$VERIFIER_LOOP_ROUND/$VERIFIER_LOOP_VERIFIER_ID"
+mkdir -p "$SLOT"
+printf '%s\n' '{{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}}' > "$SLOT/verdict.json"
 "#,
+        ),
     );
     let adapter = script_adapter(&script);
 
@@ -215,13 +235,22 @@ EOF
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn succeeds");
     let elapsed = start.elapsed();
 
-    // Parallel upper bound: well below 2x the single sleep. Allow generous slack.
+    // Parallel upper bound: well below 2x the single sleep. Each verifier sleeps 1s, so
+    // a serialized run would take >= 2s; a parallel run takes ~1s + per-child spawn
+    // overhead (fork/exec/load, observed up to ~500ms on a busy host). The 1.7s
+    // threshold sits comfortably between the realistic parallel ceiling (~1.5s) and
+    // the serialized floor (2.0s), giving ~300ms margin on each side so the test does
+    // not flake under load while still detecting true serialization.
     assert!(
-        elapsed < Duration::from_millis(550),
+        elapsed < Duration::from_millis(1700),
         "spawn was serialized (elapsed={elapsed:?})"
     );
 }
@@ -250,24 +279,36 @@ sleep 30
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn round still returns (timeout is not a hard error)");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
+        phase_id: None,
+        }))
+        .expect("spawn round still returns (timeout is not a hard error)");
 
     assert_eq!(runs.len(), 1);
     assert!(runs[0].timed_out, "the verifier run is marked timed out");
-    assert!(runs[0].sid.is_none(), "no SID captured from a timed-out run");
+    assert!(
+        runs[0].sid.is_none(),
+        "no SID captured from a timed-out run"
+    );
 
     let vdir = verifier_dir(root, &goal_id, 1, "v1");
     let verdict: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
-    assert_eq!(verdict["status"], serde_json::Value::Null, "null verdict preserved");
+    assert_eq!(
+        verdict["status"],
+        serde_json::Value::Null,
+        "null verdict preserved"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -296,15 +337,20 @@ EOF
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn succeeds");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
+        phase_id: None,
+        }))
+        .expect("spawn succeeds");
 
     assert_eq!(runs[0].sid.as_deref(), Some("abc-123"));
     assert_eq!(runs[0].final_output.as_deref(), Some("VERIFY: approve me"));
@@ -414,12 +460,19 @@ EOF
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn round succeeds");
 
     for vid in ["v1", "v2"] {
         let p = verifier_dir(root, &goal_id, 1, vid).join(verdict::PUBKEY_FILE);
-        assert!(p.exists(), "{vid} verifier-pubkey.json should be pinned at spawn time");
+        assert!(
+            p.exists(),
+            "{vid} verifier-pubkey.json should be pinned at spawn time"
+        );
         let raw = fs::read_to_string(&p).unwrap();
         let file: verdict::VerifierPubkeyFile = serde_json::from_str(&raw).unwrap();
         // 64 hex chars = 32-byte Ed25519 verifying key.
@@ -465,6 +518,10 @@ EOF
         config: &store::Config::load_in(root).unwrap(),
         prompt: PROMPT,
         adapter: &adapter,
+        verifier_count: None,
+        id_prefix: None,
+        id_offset: 0,
+        phase_id: None,
     }))
     .expect("spawn succeeds");
 
@@ -508,15 +565,19 @@ fn closed_loop_produces_signed_verdicts() {
 
     for vid in ["v1", "v2"] {
         // (a) pinned pubkey present.
-        let pinned = verdict::read_pinned_pubkey(home, &goal_id, vid, 1)
+        let pinned = verdict::read_pinned_pubkey(home, &goal_id, vid, 1, None)
             .expect("pinned pubkey reads")
             .expect("pubkey was pinned at spawn");
 
         // (b) verdict.json is signed.
-        let rec = verdict::read_verdict(home, &goal_id, vid, 1).expect("verdict reads");
+        let rec = verdict::read_verdict(home, &goal_id, vid, 1, None).expect("verdict reads");
         assert_eq!(rec.status, verdict::VerdictStatus::Approve, "{vid} APPROVE");
         let sig = rec.signature.as_ref().expect("{vid} signature present");
-        assert_eq!(sig.len(), 128, "{vid} signature is 128 hex (64-byte Ed25519)");
+        assert_eq!(
+            sig.len(),
+            128,
+            "{vid} signature is 128 hex (64-byte Ed25519)"
+        );
         let pkid = rec.pubkey_id.as_ref().expect("{vid} pubkeyId present");
         assert_eq!(pkid.len(), 16, "{vid} pubkeyId is 16 hex");
 
@@ -591,16 +652,23 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
         .unwrap();
 
     let completion = read_completion(home, &goal_id);
-    let stored_full = completion["fullDigest"].as_str().expect("fullDigest present").to_string();
-    let matched_at = completion["matchedAt"].as_str().expect("matchedAt present").to_string();
-    let round = completion["roundNumber"].as_u64().expect("roundNumber present") as u32;
+    let stored_full = completion["fullDigest"]
+        .as_str()
+        .expect("fullDigest present")
+        .to_string();
+    let matched_at = completion["matchedAt"]
+        .as_str()
+        .expect("matchedAt present")
+        .to_string();
+    let round = completion["roundNumber"]
+        .as_u64()
+        .expect("roundNumber present") as u32;
 
     // Recompute the inputs we can read back.
     let salt = store::salt_in(home).expect("salt reads");
-    let sig_record: goal::SignatureRecord = serde_json::from_str(&fs::read_to_string(
-        goal::goal_dir(home, &goal_id).join(goal::SIGNATURE_FILE),
+    let sig_record: goal::SignatureRecord = serde_json::from_str(
+        &fs::read_to_string(goal::goal_dir(home, &goal_id).join(goal::SIGNATURE_FILE)).unwrap(),
     )
-    .unwrap())
     .unwrap();
 
     // Reconstruct matching verdicts from completion.json (already canonical order).
@@ -609,6 +677,8 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
         .expect("matchingVerdicts array")
         .iter()
         .map(|v| consensus::MatchingVerdict {
+
+            phase_id: String::new(),
             verifier_id: v["verifierId"].as_str().unwrap().to_string(),
             registered_at: v["registeredAt"].as_str().unwrap().to_string(),
         })
@@ -635,7 +705,10 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
     // The NEW contract: the digest must fold in the receipt head. Recompute WITH the
     // head appended to the canonical input string and assert it equals the stored
     // digest.
-    assert!(!head.is_empty(), "receipt head is non-empty after m=2 approves");
+    assert!(
+        !head.is_empty(),
+        "receipt head is non-empty after m=2 approves"
+    );
 
     // Mirror consensus::compute_hash's input assembly, then append the head.
     // (The exact insertion point is the GREEN task's choice; this test pins the
@@ -645,8 +718,19 @@ fn closed_loop_completion_hash_inputs_include_receipt_head() {
             .iter()
             .map(|m| {
                 let mut map = std::collections::BTreeMap::new();
-                map.insert("registeredAt", serde_json::Value::String(m.registered_at.clone()));
-                map.insert("verifierId", serde_json::Value::String(m.verifier_id.clone()));
+                // dynamic-pipeline (LD25): phaseId IS a hash input now.
+                map.insert(
+                    "phaseId",
+                    serde_json::Value::String(m.phase_id.clone()),
+                );
+                map.insert(
+                    "registeredAt",
+                    serde_json::Value::String(m.registered_at.clone()),
+                );
+                map.insert(
+                    "verifierId",
+                    serde_json::Value::String(m.verifier_id.clone()),
+                );
                 serde_json::to_value(&map).unwrap()
             })
             .collect::<Vec<_>>(),
@@ -691,7 +775,7 @@ fn stub_approve_receives_secret_env() {
     // The verdict must be SIGNED — which only happens if VERIFIER_LOOP_VERIFIER_SECRET
     // reached jewije via the stub. An unsigned APPROVE (or a null verdict) means the
     // secret was never injected/forwarded.
-    let rec = verdict::read_verdict(home, &goal_id, "v1", 1).expect("verdict reads");
+    let rec = verdict::read_verdict(home, &goal_id, "v1", 1, None).expect("verdict reads");
     assert_eq!(rec.status, verdict::VerdictStatus::Approve);
     assert!(
         rec.signature.is_some(),
@@ -742,15 +826,20 @@ EOF
     );
     let adapter = script_adapter(&script);
 
-    let runs = rt().block_on(spawn::spawn_round(spawn::SpawnInput {
-        root,
-        goal_id: &goal_id,
-        round: 1,
-        config: &store::Config::load_in(root).unwrap(),
-        prompt: PROMPT,
-        adapter: &adapter,
-    }))
-    .expect("spawn succeeds");
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
+        phase_id: None,
+        }))
+        .expect("spawn succeeds");
 
     assert_eq!(runs.len(), 3, "gather returned all three runs");
     // Every verifier reached its done marker → barrier truly waited for all.
@@ -760,4 +849,177 @@ EOF
             "{vid} completed before gather returned"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// §5.6 — crashed backend stderr is surfaced, not swallowed
+//
+// When a backend (e.g. pi with a broken extension) exits non-zero with an error
+// on stderr and emits NO ACP session event, the run fails closed (null verdict).
+// The stderr MUST be persisted to `stderr.txt` in the verifier dir and surfaced on
+// the `VerifierRun.stderr` field so the CLI can show the user WHY it failed — not
+// a silent `{status:null}`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn crashed_backend_stderr_is_persisted_and_surfaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = serde_json::json!({
+        "n": 1, "m": 1, "maxTurn": 3, "backend": "custom",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10
+    });
+    let goal_id = seed_goal(root, "g", &config);
+
+    // A backend that mimics the broken-pi failure: writes a real error to stderr,
+    // emits NOTHING on stdout, exits non-zero. No ACP session event ⇒ null verdict.
+    let script = write_script(
+        dir.path(),
+        "crash.sh",
+        r#"#!/bin/sh
+echo "Error: Failed to load extension bridge.ts: Cannot find module @blackbelt-technology/pi-dashboard-shared/session-meta.js" >&2
+exit 1
+"#,
+    );
+    let adapter = script_adapter(&script);
+
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
+        phase_id: None,
+        }))
+        .expect("spawn round still returns (crash is not a hard error)");
+
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].sid.is_none(), "no SID from a crashed backend");
+
+    // (a) stderr is surfaced on the run so the CLI can print it.
+    let surfaced = runs[0]
+        .stderr
+        .as_deref()
+        .expect("stderr surfaced on the run");
+    assert!(
+        surfaced.contains("Failed to load extension bridge.ts"),
+        "surfaced stderr carries the backend error: {surfaced}"
+    );
+
+    // (b) stderr is persisted to disk next to the verdict for post-mortem.
+    let vdir = verifier_dir(root, &goal_id, 1, "v1");
+    let stderr_file = fs::read_to_string(vdir.join(spawn::STDERR_FILE)).unwrap();
+    assert!(
+        stderr_file.contains("Cannot find module"),
+        "stderr.txt carries the backend error: {stderr_file}"
+    );
+
+    // (c) the verdict is still null (fail-closed intact — we surface, we do NOT fake).
+    let verdict: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(vdir.join("verdict.json")).unwrap()).unwrap();
+    assert_eq!(
+        verdict["status"],
+        serde_json::Value::Null,
+        "fail-closed: verdict stays null"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §5.7 — chatty stderr is bounded (RAM-safe), not fully buffered
+//
+// A backend that spews megabytes of stderr must NOT cause unbounded RAM growth.
+// The drain keeps only the last STDERR_CAP_BYTES and marks the elision.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chatty_stderr_is_bounded_to_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let config = serde_json::json!({
+        "n": 1, "m": 1, "maxTurn": 3, "backend": "custom",
+        "gitDiffMaxChars": 1000, "verifierTimeoutSec": 10
+    });
+    let goal_id = seed_goal(root, "g", &config);
+
+    // Emit 4× the cap of stderr, then exit non-zero. The useful error is at the END.
+    let cap = spawn::STDERR_CAP_BYTES;
+    let oversize = cap * 4;
+    let script = write_script(
+        dir.path(),
+        "chatty.sh",
+        &format!(
+            r#"#!/bin/sh
+# Write {oversize} bytes of noise, then the real error at the end.
+# Use printf in a loop (more reliable under load than `dd | tr` whose pipeline
+# can lose the final echo under pipe-buffering races).
+i=0
+while [ "$i" -lt {iters} ]; do
+  printf '{chunk}' >&2
+  i=$((i + 1))
+done
+echo "FATAL: the actual error is here" >&2
+# Write a verdict so the new verdict-enforcement nudge loop does not re-run this
+# noisy script and overwrite the bounded stderr this test is inspecting.
+SLOT="$VERIFIER_LOOP_HOME/goals/$VERIFIER_LOOP_GOAL_ID/rounds/$VERIFIER_LOOP_ROUND/$VERIFIER_LOOP_VERIFIER_ID"
+mkdir -p "$SLOT"
+printf '%s\n' '{{"status":"APPROVE","registeredAt":"2026-07-11T00:00:00Z"}}' > "$SLOT/verdict.json"
+exit 1
+"#,
+            iters = oversize / 1024,
+            chunk = "x".repeat(1024),
+        ),
+    );
+    let adapter = script_adapter(&script);
+
+    let runs = rt()
+        .block_on(spawn::spawn_round(spawn::SpawnInput {
+            root,
+            goal_id: &goal_id,
+            round: 1,
+            config: &store::Config::load_in(root).unwrap(),
+            prompt: PROMPT,
+            adapter: &adapter,
+            verifier_count: None,
+            id_prefix: None,
+            id_offset: 0,
+        phase_id: None,
+        }))
+        .expect("spawn round returns");
+
+    let surfaced = runs[0].stderr.as_deref().expect("stderr surfaced");
+
+    // (a) The surfaced buffer is bounded — well under the oversize payload.
+    assert!(
+        surfaced.len() <= cap + 256,
+        "surfaced stderr ({} bytes) must be bounded near the cap ({cap}), got way more",
+        surfaced.len(),
+    );
+    assert!(
+        surfaced.len() < oversize,
+        "surfaced stderr must be smaller than the {}-byte payload",
+        oversize,
+    );
+
+    // (b) The real error at the END is retained (we keep the tail, not the head).
+    assert!(
+        surfaced.contains("FATAL: the actual error is here"),
+        "tail error must survive truncation: {surfaced}"
+    );
+
+    // (c) A truncation marker is present so the user knows output was elided.
+    assert!(
+        surfaced.contains("[...truncated"),
+        "truncation marker must be present when stderr exceeds cap: {surfaced}"
+    );
+
+    // (d) Persisted file is the same bounded content.
+    let persisted =
+        fs::read_to_string(verifier_dir(root, &goal_id, 1, "v1").join(spawn::STDERR_FILE)).unwrap();
+    assert!(persisted.contains("FATAL: the actual error is here"));
+    assert!(persisted.contains("[...truncated"));
 }

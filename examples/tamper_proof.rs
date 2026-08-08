@@ -66,9 +66,11 @@ fn main() -> ExitCode {
         if !entry.path().is_dir() || !vid.starts_with('v') {
             continue;
         }
-        let v = verdict::read_verdict(&root, &goal_id, &vid, round).unwrap();
+        let v = verdict::read_verdict(&root, &goal_id, &vid, round, None).unwrap();
         if v.status == VerdictStatus::Approve {
             matching.push(MatchingVerdict {
+
+                phase_id: String::new(),
                 verifier_id: vid.clone(),
                 registered_at: v.registered_at.clone().unwrap_or_default(),
             });
@@ -91,8 +93,15 @@ fn main() -> ExitCode {
     let mut tampered = record.clone();
     tampered.goal_text = format!("{} [TAMPERED]", tampered.goal_text);
     let tampered_sig = goal::compute_signature(&salt, &tampered.goal_text, &tampered.created_at);
-    let hash_a =
-        consensus::compute_hash(&salt, &goal_id, &tampered_sig, round, &matching, matched_at, "");
+    let hash_a = consensus::compute_hash(
+        &salt,
+        &goal_id,
+        &tampered_sig,
+        round,
+        &matching,
+        matched_at,
+        "",
+    );
     println!("[3] tamper goalText → recompute");
     println!("    sig:    {sig}  → {tampered_sig}");
     println!("    hash:   {stored_hash}  → {hash_a}");
@@ -111,14 +120,14 @@ fn main() -> ExitCode {
     // each APPROVE verdict's `registeredAt`. Editing a verdict on disk (e.g. back-dating
     // its registeredAt, the classic verdict-tamper vector) therefore changes the
     // recomputed hash — proving verdict tampering is fail-closed detectable.
-    let v1_path = verdict::verdict_path(&root, &goal_id, "v1", round).join(verdict::VERDICT_FILE);
+    let v1_path = verdict::verdict_path(&root, &goal_id, "v1", round, None).join(verdict::VERDICT_FILE);
     let v1_raw = std::fs::read_to_string(&v1_path).unwrap();
     let mut vr: VerdictRecord = serde_json::from_str(&v1_raw).unwrap();
     let original_registered_at = vr.registered_at.clone().unwrap_or_default();
     vr.registered_at = Some("1999-01-01T00:00:00Z".to_string());
     std::fs::write(&v1_path, serde_json::to_string_pretty(&vr).unwrap()).unwrap();
 
-    let v1_tampered = verdict::read_verdict(&root, &goal_id, "v1", round).unwrap();
+    let v1_tampered = verdict::read_verdict(&root, &goal_id, "v1", round, None).unwrap();
     let mut matching_b = matching.clone();
     if let Some(slot) = matching_b.iter_mut().find(|m| m.verifier_id == "v1") {
         slot.registered_at = v1_tampered.registered_at.clone().unwrap_or_default();
@@ -127,7 +136,10 @@ fn main() -> ExitCode {
     // Restore the file so the goal-dir transcript stays pristine for the audit trail.
     std::fs::write(&v1_path, &v1_raw).unwrap();
     println!("[4] tamper verdict registeredAt → recompute hash");
-    println!("    registeredAt: {original_registered_at} → {}", v1_tampered.registered_at.as_deref().unwrap_or(""));
+    println!(
+        "    registeredAt: {original_registered_at} → {}",
+        v1_tampered.registered_at.as_deref().unwrap_or("")
+    );
     println!("    hash:         {stored_hash} → {}", hash_b.short_hash());
     if stored_hash == hash_b.short_hash() {
         println!("    => FAIL: hash did NOT change after verdict edit");

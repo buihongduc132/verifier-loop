@@ -56,7 +56,12 @@ fn signature_is_64_bytes() {
     // Ed25519 signatures are exactly 64 bytes.
     let kp = generate_keypair();
     let sig = sign(b"any message", &kp.signing);
-    assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes, got {}", sig.len());
+    assert_eq!(
+        sig.len(),
+        64,
+        "Ed25519 signature must be 64 bytes, got {}",
+        sig.len()
+    );
 }
 
 #[test]
@@ -104,7 +109,10 @@ fn canonical_record_bytes_is_deterministic_across_calls() {
     // Same logical inputs → byte-identical output, regardless of how many times called.
     let a = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
     let b = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
-    assert_eq!(a, b, "canonical_record_bytes must be deterministic for identical inputs");
+    assert_eq!(
+        a, b,
+        "canonical_record_bytes must be deterministic for identical inputs"
+    );
 }
 
 #[test]
@@ -120,12 +128,20 @@ fn canonical_record_bytes_uses_sorted_keys_and_no_whitespace() {
         1,
     );
     let s = std::str::from_utf8(&bytes).expect("canonical bytes are valid UTF-8 JSON");
-    assert!(!s.contains(' '), "canonical JSON must contain no spaces: {s}");
-    assert!(!s.contains('\n'), "canonical JSON must contain no newlines: {s}");
+    assert!(
+        !s.contains(' '),
+        "canonical JSON must contain no spaces: {s}"
+    );
+    assert!(
+        !s.contains('\n'),
+        "canonical JSON must contain no newlines: {s}"
+    );
     // Assert the keys appear in alphabetical order.
     let pos_goal = s.find("\"goalId\"").expect("goalId key present");
     let pos_notes = s.find("\"notes\"").expect("notes key present");
-    let pos_reg = s.find("\"registeredAt\"").expect("registeredAt key present");
+    let pos_reg = s
+        .find("\"registeredAt\"")
+        .expect("registeredAt key present");
     let pos_round = s.find("\"round\"").expect("round key present");
     let pos_status = s.find("\"status\"").expect("status key present");
     let pos_vid = s.find("\"verifierId\"").expect("verifierId key present");
@@ -140,16 +156,30 @@ fn canonical_record_bytes_uses_sorted_keys_and_no_whitespace() {
 fn canonical_record_bytes_serializes_none_notes_as_null() {
     let bytes = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
     let s = std::str::from_utf8(&bytes).unwrap();
-    assert!(s.contains("\"notes\":null"), "None notes must serialize as null: {s}");
+    assert!(
+        s.contains("\"notes\":null"),
+        "None notes must serialize as null: {s}"
+    );
 }
 
 #[test]
 fn canonical_record_bytes_distinguishes_approve_from_reject() {
     // A status change MUST change the canonical bytes (signature binds status — guards
     // against in-flight REJECT→APPROVE edits per signed-verdict-record spec).
-    let approve = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
-    let reject = canonical_record_bytes("REJECT", Some("nope"), "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
-    assert_ne!(approve, reject, "APPROVE and REJECT must produce distinct canonical bytes");
+    let approve =
+        canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
+    let reject = canonical_record_bytes(
+        "REJECT",
+        Some("nope"),
+        "2026-07-04T10:00:00Z",
+        "goal-1",
+        "v1",
+        1,
+    );
+    assert_ne!(
+        approve, reject,
+        "APPROVE and REJECT must produce distinct canonical bytes"
+    );
 }
 
 #[test]
@@ -158,14 +188,20 @@ fn canonical_record_bytes_distinguishes_verifier_ids() {
     // fail signature verification. That requires verifierId to be part of the canonical bytes.
     let v1 = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
     let v2 = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v2", 1);
-    assert_ne!(v1, v2, "different verifierId must produce distinct canonical bytes (binds identity)");
+    assert_ne!(
+        v1, v2,
+        "different verifierId must produce distinct canonical bytes (binds identity)"
+    );
 }
 
 #[test]
 fn canonical_record_bytes_distinguishes_rounds() {
     let r1 = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 1);
     let r2 = canonical_record_bytes("APPROVE", None, "2026-07-04T10:00:00Z", "goal-1", "v1", 2);
-    assert_ne!(r1, r2, "different round must produce distinct canonical bytes");
+    assert_ne!(
+        r1, r2,
+        "different round must produce distinct canonical bytes"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +253,13 @@ fn pubkey_id_is_first_16_hex_of_pubkey() {
     let kp = generate_keypair();
     let full_hex = verifying_key_to_hex(&kp.verifying);
     let id = pubkey_id(&kp.verifying);
-    assert_eq!(id.len(), 16, "pubkey_id must be 16 hex chars, got {} ({})", id.len(), id);
+    assert_eq!(
+        id.len(),
+        16,
+        "pubkey_id must be 16 hex chars, got {} ({})",
+        id.len(),
+        id
+    );
     assert!(
         full_hex.starts_with(&id),
         "pubkey_id must equal the first 16 hex chars of the pubkey; full={full_hex} id={id}"
@@ -227,10 +269,16 @@ fn pubkey_id_is_first_16_hex_of_pubkey() {
 #[test]
 fn signing_key_from_hex_rejects_invalid_input() {
     // Fail-closed on malformed hex.
-    assert!(signing_key_from_hex("not-hex").is_err(), "garbage hex must error");
+    assert!(
+        signing_key_from_hex("not-hex").is_err(),
+        "garbage hex must error"
+    );
     assert!(signing_key_from_hex("").is_err(), "empty hex must error");
     // Wrong length (Ed25519 signing keys are 32 bytes = 64 hex chars).
-    assert!(signing_key_from_hex("ab").is_err(), "too-short hex must error");
+    assert!(
+        signing_key_from_hex("ab").is_err(),
+        "too-short hex must error"
+    );
 }
 
 #[test]

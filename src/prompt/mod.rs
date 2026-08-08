@@ -109,14 +109,43 @@ pub const DEFAULT_RESUME_TEMPLATE: &str = concat!(
     include_str!("default_resume_template.txt"),
 );
 
-/// The baked-in default round-1 prompt template.
+/// The baked-in default round-1 prompt template WITH the embedded verifier policy.
 pub fn default_template() -> &'static str {
     DEFAULT_TEMPLATE
 }
 
-/// The baked-in default resume prompt template.
+/// The baked-in default resume prompt template WITH the embedded verifier policy.
 pub fn default_resume_template() -> &'static str {
     DEFAULT_RESUME_TEMPLATE
+}
+
+/// The baked-in default round-1 template WITHOUT the embedded `VERIFIER_POLICY` block
+/// (design D2 — override semantics). Used when a custom `verifierPromptFile` is
+/// configured: the custom file REPLACES the built-in policy, so the built-in block is
+/// omitted to avoid the 2x duplication (62KB wasted) that D2 eliminates.
+///
+/// Identity preamble + body file only. The bin prepends the custom file via
+/// [`prepend_custom`], producing exactly one policy source (the custom file).
+pub const DEFAULT_TEMPLATE_NO_POLICY: &str = concat!(
+    "You are verifier {{verifierId}} for goal {{goalId}}.\n\n",
+    include_str!("default_template.txt"),
+);
+
+/// The baked-in default resume template WITHOUT the embedded `VERIFIER_POLICY` block
+/// (design D2 — override semantics). See [`DEFAULT_TEMPLATE_NO_POLICY`].
+pub const DEFAULT_RESUME_TEMPLATE_NO_POLICY: &str = concat!(
+    "You are verifier {{verifierId}} for goal {{goalId}} (resumed).\n\n",
+    include_str!("default_resume_template.txt"),
+);
+
+/// The baked-in default round-1 template WITHOUT the embedded verifier policy (D2).
+pub fn default_template_no_policy() -> &'static str {
+    DEFAULT_TEMPLATE_NO_POLICY
+}
+
+/// The baked-in default resume template WITHOUT the embedded verifier policy (D2).
+pub fn default_resume_template_no_policy() -> &'static str {
+    DEFAULT_RESUME_TEMPLATE_NO_POLICY
 }
 
 /// Renders the round-1 (NEW) prompt. `template = None` -> baked-in default.
@@ -129,10 +158,7 @@ pub fn render(template: Option<&str>, vars: &PromptVars<'_>) -> Result<String, P
 }
 
 /// Renders the RESUME prompt. `template = None` -> baked-in resume default.
-pub fn render_resume(
-    template: Option<&str>,
-    vars: &PromptVars<'_>,
-) -> Result<String, PromptError> {
+pub fn render_resume(template: Option<&str>, vars: &PromptVars<'_>) -> Result<String, PromptError> {
     let tpl = match template {
         Some(t) => t,
         None => default_resume_template(),
@@ -252,6 +278,18 @@ pub fn truncate_diff(s: &str, max_chars: u64) -> (String, bool) {
 /// non-zero (other than an empty diff) is a hard error — V* must never receive a silently
 /// empty snapshot, which would let A hide uncommitted regressions.
 pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptError> {
+    capture_snapshot_with(cwd, max_chars, 8_000)
+}
+
+/// Same as [`capture_snapshot`] but with explicit caps for the diff (`max_chars`) and
+/// the fileEditTimes block (`file_edit_times_max_chars`). Prompt-bloat fix D1 threads
+/// the latter from `Config.file_edit_times_max_chars`.
+/// `capture_snapshot_with` body (shared by the single-cap + dual-cap entrypoints).
+pub fn capture_snapshot_with(
+    cwd: &Path,
+    max_chars: u64,
+    file_edit_times_max_chars: u64,
+) -> Result<Snapshot, PromptError> {
     // Fail closed if this is not a git work tree.
     git_check(cwd)?;
 
@@ -260,15 +298,26 @@ pub fn capture_snapshot(cwd: &Path, max_chars: u64) -> Result<Snapshot, PromptEr
     // `git diff` would hide staged changes, letting an author `git add` a
     // regression and keep it invisible to every verifier. On a repo with no
     // commits yet (fresh `git init`), `git diff HEAD` errors — fall back to
-    // `git diff --cached` so staged intent is still captured (unstaged changes
-    // to untracked files are listed by `git status --porcelain` above).
+    // BOTH `git diff --cached` (staged) AND `git diff` (unstaged) so the
+    // verifier still sees the full working tree (untracked files are listed by
+    // `git status --porcelain` above).
     let raw_diff = match git_capture(cwd, &["diff", "HEAD"]) {
         Ok(d) => d,
-        Err(_) if !head_exists(cwd)? => git_capture(cwd, &["diff", "--cached"])?,
+        Err(_) if !head_exists(cwd)? => {
+            let staged = git_capture(cwd, &["diff", "--cached"])?;
+            let unstaged = git_capture(cwd, &["diff"])?;
+            if staged.is_empty() {
+                unstaged
+            } else if unstaged.is_empty() {
+                staged
+            } else {
+                format!("{staged}\n{unstaged}")
+            }
+        }
         Err(e) => return Err(e),
     };
     let (git_diff, truncated) = truncate_diff(&raw_diff, max_chars);
-    let file_edit_times = capture_file_edit_times(cwd)?;
+    let file_edit_times = capture_file_edit_times(cwd, file_edit_times_max_chars)?;
 
     Ok(Snapshot {
         cwd: cwd.to_string_lossy().into_owned(),
@@ -296,7 +345,12 @@ fn head_exists(cwd: &Path) -> Result<bool, PromptError> {
 /// Asserts `cwd` is inside a git work tree; errors otherwise (fail-closed).
 fn git_check(cwd: &Path) -> Result<(), PromptError> {
     let out = Command::new("git")
-        .args(["-C", &cwd.to_string_lossy(), "rev-parse", "--is-inside-work-tree"])
+        .args([
+            "-C",
+            &cwd.to_string_lossy(),
+            "rev-parse",
+            "--is-inside-work-tree",
+        ])
         .output()
         .map_err(|e| PromptError::SnapshotCapture(format!("git not available: {e}")))?;
     if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim() != "true" {
@@ -328,55 +382,146 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<String, PromptError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Captures `<path>:<mtime_secs>` for every tracked file. Best-effort per file: a missing
-/// or unreadable file is skipped, never fatal to the whole snapshot.
-fn capture_file_edit_times(cwd: &Path) -> Result<String, PromptError> {
-    let listing = git_capture(cwd, &["ls-files"])?;
-    // Cap the rendered snapshot to keep the verifier prompt well under Linux's
-    // MAX_ARG_STRLEN (128 KiB per arg) — the prompt is passed as a single CLI
-    // arg via cmd.arg(prompt) (orchestrator.rs build_spawn_command), and large
-    // repos (thousands of tracked files) push it past the limit → E2BIG → the
-    // verifier spawn silently fails (turnsUsed stays 0). 8 KiB leaves ample
-    // room for the prompt body + diff + git status while staying safely below
-    // the per-arg ceiling.
-    const MAX_FILE_EDIT_TIMES_BYTES: usize = 8 * 1024;
-    let mut lines = Vec::new();
-    let mut total: usize = 0;
-    let mut truncated_count: u64 = 0;
-    for rel in listing.lines() {
-        if rel.is_empty() {
+/// Captures `<path>:<mtime_secs>` for **changed files only** (`git status --porcelain -z`,
+/// not `git ls-files`). Best-effort per file: a missing or unreadable file is skipped,
+/// never fatal to the whole snapshot. The block is byte-capped to `max_chars` with an
+/// indicator when exceeded (prompt-bloat fix D1).
+///
+/// `git status --porcelain -z` (NUL-delimited, no C-quoting) records look like:
+///   - single path: `XY <path>\0`
+///   - rename:      `XY <new/dest>\0<old/source>\0`  (destination FIRST, then source;
+///     this is the OPPOSITE order of the human-readable `->` form)
+///
+/// We parse the NUL-delimited stream carefully so pathnames containing spaces or the
+/// literal substring ` -> ` are never mis-split.
+pub fn capture_file_edit_times(cwd: &Path, max_chars: u64) -> Result<String, PromptError> {
+    // Use `-z` (NUL-delimited) so pathnames containing spaces or the literal ` -> `
+    // are never C-quoted or mis-split by the `rsplit(" -> ")` heuristic. Each record
+    // is `XY <path>\0` for single-path statuses, or `XY <new/dest>\0<old/source>\0`
+    // for renames (note: under `-z` the NEW/destination path comes FIRST, then the
+    // OLD/source — the opposite of the human-readable `old -> new` form).
+    let status = git_capture(cwd, &["status", "--porcelain", "-z"])?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut records = status.split('\u{0000}').peekable();
+    while let Some(record) = records.next() {
+        if record.len() < 3 {
+            // An empty trailing record (from the final NUL) is fine; skip it.
             continue;
         }
-        let abs = cwd.join(rel);
-        let entry = match fs::metadata(&abs).and_then(|m| m.modified()) {
+        // Porcelain record: 2-char XY status, 1 space, then the path.
+        let status_chars = &record[..2];
+        let path_part = &record[3..];
+        // Renames (R/C status in either column) emit TWO NUL-delimited entries under
+        // `-z`: the format is `XY <new/dest>\0<old/source>\0` (destination path FIRST,
+        // then source). So the CURRENT record's path is the NEW/destination path (the
+        // post-rename file that exists on disk and that we want to stat); the NEXT
+        // record is the OLD/source path and must be consumed and discarded so it is
+        // not treated as a standalone changed file.
+        let path = if is_rename_status(status_chars) {
+            // Consume + discard the trailing old-path record.
+            let _old = records.next();
+            path_part
+        } else {
+            path_part
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let abs = cwd.join(path);
+        match fs::metadata(&abs).and_then(|m| m.modified()) {
             Ok(modified) => {
                 let secs = modified
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                format!("{rel}:{secs}")
+                lines.push(format!("{path}:{secs}"));
             }
             Err(_) => {
                 // Skip unreadable/missing file; do not fail the snapshot.
-                format!("{rel}:?")
+                lines.push(format!("{path}:?"));
             }
-        };
-        // +1 for the joining newline.
-        if total + entry.len() + 1 > MAX_FILE_EDIT_TIMES_BYTES {
-            truncated_count += 1;
-            continue;
         }
-        total += entry.len() + 1;
-        lines.push(entry);
     }
-    let mut out = lines.join("\n");
-    if truncated_count > 0 {
-        out.push_str(&format!("\n# ... ({} more files truncated: snapshot capped at {} bytes)", truncated_count, MAX_FILE_EDIT_TIMES_BYTES));
-    }
-    Ok(out)
+    let joined = lines.join("\n");
+    let (capped, _) = truncate_diff(&joined, max_chars);
+    Ok(capped)
 }
 
-/// Persists the rendered prompt to `rounds/<round>/<verifierId>/initial-prompt.txt`,
+/// Returns true if a porcelain `XY` status (two status characters) denotes a rename
+/// (R in either the staged-X or working-tree-Y column). A rename record under `-z` is
+/// followed by a second NUL-delimited path: `XY <new/dest>\0<old/source>\0` — the
+/// NEW/destination path comes FIRST, the OLD/source path comes SECOND.
+fn is_rename_status(xy: &str) -> bool {
+    xy.starts_with('R')
+        || xy.starts_with('C')
+        || xy.get(1..2) == Some("R")
+        || xy.get(1..2) == Some("C")
+}
+
+/// Truncates the `--context` input to `max_chars` characters, appending
+/// [`TRUNCATION_INDICATOR`] when truncated. Prompt-bloat fix D3. Mirrors
+/// [`truncate_diff`] semantics (char-boundary-safe).
+pub fn cap_context(s: &str, max_chars: u64) -> (String, bool) {
+    truncate_diff(s, max_chars)
+}
+
+/// Returns a per-section budget warning when `rendered` exceeds `budget` bytes, else
+/// `None`. The warning does NOT block the spawn — it is informational for the operator.
+/// Prompt-bloat fix D4.
+///
+/// The warning cites the total rendered size and the budget, plus a coarse breakdown by
+/// section heading (the function scans for `# `-prefixed headings and reports their byte
+/// spans). The breakdown is best-effort: if no headings are present it still reports the
+/// total vs budget.
+pub fn budget_warning(rendered: &str, budget: usize) -> Option<String> {
+    let total = rendered.len();
+    if total <= budget {
+        return None;
+    }
+    let mut msg = format!(
+        "warning: rendered verifier prompt is {total} bytes, over the {budget}-byte budget (will still spawn).\n",
+    );
+    msg.push_str("section breakdown:\n");
+    // Best-effort: split on `# ` headings and report each section's size.
+    let mut sections: Vec<(&str, usize)> = Vec::new();
+    let bytes = rendered.as_bytes();
+    let mut start = 0;
+    let mut heading: Option<&str> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#'
+            && (i + 1 < bytes.len() && bytes[i + 1] == b' ')
+            && (i == 0 || bytes[i - 1] == b'\n')
+        {
+            // close previous section
+            if let Some(h) = heading {
+                sections.push((h, i - start));
+            }
+            // find end of heading line
+            let line_end = bytes[i..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| i + p)
+                .unwrap_or(bytes.len());
+            start = i;
+            heading = Some(&rendered[i + 2..line_end]);
+            i = line_end;
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(h) = heading {
+        sections.push((h, bytes.len() - start));
+    }
+    if sections.is_empty() {
+        msg.push_str(&format!("  (no headings detected) total = {total} bytes\n"));
+    } else {
+        for (h, sz) in sections {
+            msg.push_str(&format!("  # {h}: ~{sz} bytes\n"));
+        }
+    }
+    Some(msg)
+}
 /// forming part of the per-verifier trust trail.
 pub fn write_initial_prompt(
     goal_root: &Path,
@@ -393,6 +538,191 @@ pub fn write_initial_prompt(
     let path = slot.join(INITIAL_PROMPT_FILE);
     fs::write(&path, rendered).map_err(|e| PromptError::Persistence(e.to_string()))?;
     Ok(path)
+}
+
+/// Collect the REJECT verdict notes across ALL prior rounds of a goal (every verifier
+/// slot, every round < `current_round`), returning a single concatenated section
+/// (intention 2026-07-14 feature b).
+///
+/// This generalizes the per-verifier own-prior-notes (`prevNotes`) mechanism — which
+/// feeds a single verifier its OWN prior-round notes — to a cross-round aggregation of
+/// EVERY prior REJECT for the goal. The returned string is fed to
+/// [`append_prior_reject_notes`] so the current round's verifier prompt carries the full
+/// rejection history and can verify fixes against it.
+///
+/// APPROVE and null verdicts are ignored. A round directory that is missing or has no
+/// verdicts contributes nothing. The notes are de-duplicated and ordered by round then
+/// verifier id for deterministic output.
+///
+/// Returns an empty string when there are no prior REJECTs (the caller treats empty as a
+/// no-op in [`append_prior_reject_notes`]).
+pub fn collect_prior_reject_notes(root: &Path, goal_id: &str, current_round: u32) -> String {
+    // dynamic-pipeline (OT10/LD18 fix): walk phaseId-ordered history WITHIN
+    // current_round, not just round < current_round. Within one invocation all
+    // sub-phases share current_round, so the old `round < current_round` filter
+    // excluded them — meaning a Confirm-phase verifier never saw the Gate-phase
+    // REJECT notes from the SAME invocation.
+    //
+    // New layout: rounds/<round>/<phaseId>/<vid>/verdict.json
+    //   * round < current_round: include ALL phaseIds (prior invocation).
+    //   * round == current_round: include only phaseIds < current phase (lexical).
+    //   * round > current_round: exclude.
+    // For legacy v0 goals (no phaseId dirs), the old flat layout still works.
+    collect_prior_reject_notes_for_phase(root, goal_id, current_round, None)
+}
+
+/// Phase-aware variant: also restricts WITHIN current_round to phaseIds lexically
+/// less than `current_phase` (so a Confirm verifier sees Gate REJECTs from the same
+/// invocation, but a Gate verifier does not see its own invocation's later phases).
+///
+/// `current_phase = None` means "no phase restriction" (legacy single-phase goals).
+pub fn collect_prior_reject_notes_for_phase(
+    root: &Path,
+    goal_id: &str,
+    current_round: u32,
+    current_phase: Option<&str>,
+) -> String {
+    use crate::verdict::{self, VerdictStatus};
+    use std::collections::BTreeSet;
+
+    let rounds_root = crate::goal::goal_dir(root, goal_id).join(crate::goal::ROUNDS_DIR);
+    // (round, phaseId, vid, notes) — deterministic sort key.
+    let mut entries: Vec<(u32, String, String, String)> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    let Ok(round_dirs) = fs::read_dir(&rounds_root) else {
+        return String::new();
+    };
+    for entry in round_dirs.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        let Ok(round) = name_str.parse::<u32>() else {
+            continue;
+        };
+        if round > current_round {
+            continue;
+        }
+        let same_round = round == current_round;
+        // Each round dir now contains phaseId dirs (1a, 1b, ...). Legacy v0 goals
+        // have flat vid dirs directly under the round (no phaseId axis).
+        let Ok(child_dirs) = fs::read_dir(entry.path()) else {
+            continue;
+        };
+        // Detect layout: peek first child; if it parses as u32 it's a legacy vid
+        // index OR a phaseId. phaseIds are letter-suffixed ("1a"), legacy vids
+        // are "v1"-style. We try the phaseId layout first; if the child dir itself
+        // contains verdict.json, it's the legacy flat layout.
+        let children: Vec<_> = child_dirs.flatten().collect();
+        for child in &children {
+            let child_name = child.file_name();
+            let Some(child_str) = child_name.to_str() else { continue };
+            let child_path = child.path();
+            // Legacy flat layout: rounds/<round>/<vid>/verdict.json
+            if child_path.join(verdict::VERDICT_FILE).exists() {
+                if same_round {
+                    continue; // current-round legacy slot not yet "prior"
+                }
+                if let Ok(rec) = verdict::read_verdict(root, goal_id, child_str, round, None) {
+                    if rec.status == VerdictStatus::Reject {
+                        if let Some(notes) = rec.notes.as_deref() {
+                            let notes = notes.trim();
+                            if !notes.is_empty() && seen.insert(notes.to_string()) {
+                                entries.push((
+                                    round,
+                                    String::new(), // legacy: no phaseId
+                                    child_str.to_string(),
+                                    notes.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            // dynamic-pipeline layout: rounds/<round>/<phaseId>/<vid>/verdict.json
+            // child_str is a phaseId like "1a".
+            if same_round {
+                if let Some(cp) = current_phase {
+                    if child_str >= cp {
+                        // Skip the current + later phases within the same round.
+                        continue;
+                    }
+                } else {
+                    // No phase context supplied for a current-round walk → skip
+                    // (we don't know which phase is "current").
+                    continue;
+                }
+            }
+            let Ok(vid_dirs) = fs::read_dir(&child_path) else {
+                continue;
+            };
+            for vid_entry in vid_dirs.flatten() {
+                let vid = vid_entry.file_name();
+                let Some(vid_str) = vid.to_str() else { continue };
+                // read_verdict still uses the legacy flat path; for phaseId layout
+                // we read directly from the vid dir.
+                let vpath = vid_entry.path().join(verdict::VERDICT_FILE);
+                if !vpath.exists() {
+                    continue;
+                }
+                let Ok(raw) = fs::read_to_string(&vpath) else {
+                    continue;
+                };
+                let Ok(rec) = serde_json::from_str::<verdict::VerdictRecord>(&raw) else {
+                    continue;
+                };
+                if rec.status == VerdictStatus::Reject {
+                    if let Some(notes) = rec.notes.as_deref() {
+                        let notes = notes.trim();
+                        if !notes.is_empty() && seen.insert(notes.to_string()) {
+                            entries.push((
+                                round,
+                                child_str.to_string(),
+                                vid_str.to_string(),
+                                notes.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return String::new();
+    }
+    // Deterministic order: round, then phaseId (alphabetical), then verifier id.
+    entries.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    let mut out = String::new();
+    for (round, phase, vid, notes) in entries {
+        if phase.is_empty() {
+            out.push_str(&format!("round {round} {vid}: {notes}\n"));
+        } else {
+            out.push_str(&format!("round {round} {phase} {vid}: {notes}\n"));
+        }
+    }
+    out
+}
+
+/// Append a prior-reject-notes section to an already-rendered prompt (intention
+/// 2026-07-14 feature b). `notes` is the output of [`collect_prior_reject_notes`].
+///
+/// Empty `notes` is a no-op (the prompt is returned unchanged) so the caller can always
+/// call this without checking. Non-empty notes are appended under a clearly labelled
+/// `# Prior rejection notes` heading so the verifier sees the rejection history and can
+/// verify fixes against it, without it leaking into the frozen snapshot section.
+pub fn append_prior_reject_notes(rendered: &str, notes: &str) -> String {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return rendered.to_string();
+    }
+    format!(
+        "{rendered}\n\n---\n# Prior rejection notes (from earlier rounds)\n\n{trimmed}\n"
+    )
 }
 
 /// Errors emitted by prompt rendering / capture.
@@ -534,6 +864,85 @@ mod tests {
         assert!(
             VERIFIER_POLICY.contains("Verifier") || VERIFIER_POLICY.contains("ZERO trust"),
             "policy must embed the detective contract"
+        );
+        // The policy heading must appear EXACTLY ONCE in each composed const
+        // (the canonical policy is composed only via the `concat!` preamble; the
+        // template body files must NOT carry an inline duplicate). design D3.
+        let count_template = DEFAULT_TEMPLATE
+            .matches("# Verifier Detective Policy")
+            .count();
+        let count_resume = DEFAULT_RESUME_TEMPLATE
+            .matches("# Verifier Detective Policy")
+            .count();
+        assert_eq!(
+            count_template, 1,
+            "DEFAULT_TEMPLATE must contain the policy heading exactly once (got {count_template})"
+        );
+        assert_eq!(
+            count_resume, 1,
+            "DEFAULT_RESUME_TEMPLATE must contain the policy heading exactly once (got {count_resume})"
+        );
+    }
+
+    #[test]
+    fn capture_file_edit_times_handles_spaces_and_renames() {
+        // Build a temp git repo with a space in the filename and a rename entry, then
+        // assert `capture_file_edit_times` parses the NUL-delimited porcelain records
+        // correctly: it must NOT mis-split on the ` -> ` literal or on spaces.
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let _ = git_capture(cwd, &["init", "-q"]).unwrap();
+        let _ = git_capture(cwd, &["config", "user.email", "t@t.t"]).unwrap();
+        let _ = git_capture(cwd, &["config", "user.name", "t"]).unwrap();
+
+        // Create files with spaces and a ` -> ` literal in the name, then commit.
+        fs::write(cwd.join("my path.txt"), "a").unwrap();
+        fs::write(cwd.join("original.txt"), "b").unwrap();
+        fs::write(cwd.join("tracked.txt"), "c").unwrap();
+        let _ = git_capture(cwd, &["add", "."]).unwrap();
+        let _ = git_capture(cwd, &["commit", "-m", "seed"]).unwrap();
+
+        // Modify the space-named file.
+        fs::write(cwd.join("my path.txt"), "changed").unwrap();
+        // Force a REAL rename via `git mv` (staged) so porcelain emits an `R` record
+        // whose destination also contains a space.
+        let _ = git_capture(cwd, &["mv", "original.txt", "renamed dest.txt"]).unwrap();
+        // An untracked file with a space + the ` -> ` literal in its name.
+        fs::write(cwd.join("arrow -> new.txt"), "untracked").unwrap();
+
+        let lines = capture_file_edit_times(cwd, 8_000).unwrap();
+        let paths: std::collections::HashSet<&str> = lines
+            .lines()
+            .map(|l| l.rsplit_once(':').map(|(p, _)| p).unwrap_or(l))
+            .collect();
+        // We expect exactly 3 changed entries: the modified space-name, the rename
+        // (new path), and the untracked arrow-named file. No other tracked/unchanged
+        // file, and crucially NOT the rename's OLD path.
+        assert!(
+            paths.contains("my path.txt"),
+            "space in filename must be captured; got: {lines}"
+        );
+        assert!(
+            paths.contains("renamed dest.txt"),
+            "rename destination must be captured; got: {lines}"
+        );
+        assert!(
+            paths.contains("arrow -> new.txt"),
+            "untracked file containing ' -> ' must be captured; got: {lines}"
+        );
+        assert_eq!(
+            paths.len(),
+            3,
+            "exactly 3 changed entries expected; got: {lines}"
+        );
+        // The rename's OLD path and the unchanged tracked file must NOT appear.
+        assert!(
+            !lines.contains("original.txt"),
+            "rename source (old path) must be omitted; got: {lines}"
+        );
+        assert!(
+            !lines.contains("tracked.txt"),
+            "unchanged tracked file must be omitted; got: {lines}"
         );
     }
 }
