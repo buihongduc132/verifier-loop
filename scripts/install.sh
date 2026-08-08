@@ -16,21 +16,19 @@ set -eu
 
 ROOT="${1:-$HOME/.local}"
 
-echo ">> cargo install --path . --root \"$ROOT\""
-# `cargo install` normally records installed crates in `$ROOT/.crates.toml`.
-# A previous privileged install can leave that tracking file owned by root even
-# when `$ROOT/bin` is user-writable; in that case the install would build
-# successfully and then fail at the final metadata update.  Tracking is optional
-# for this two-binary install, so skip it rather than requiring sudo or mutating
-# the stale root-owned file.
-if [ -e "$ROOT/.crates.toml" ] && [ ! -w "$ROOT/.crates.toml" ]; then
-  echo ">> tracking file is not writable; installing with --no-track"
-  cargo install --path . --force --root "$ROOT" --no-track
-else
-  cargo install --path . --force --root "$ROOT"
-fi
+# Build the two release binaries once, then copy those exact artifacts.  Using
+# `cargo install` here would rebuild in Cargo's install pipeline and can produce
+# binaries that differ from the release artifacts validated by the caller; it also
+# writes `$ROOT/.crates.toml`.  A direct release build/copy avoids both problems,
+# including the root-owned metadata case handled by older installations.
+echo ">> cargo build --release --bins"
+cargo build --release --bins
 
 BIN_DIR="$ROOT/bin"
+mkdir -p "$BIN_DIR"
+install -m 755 target/release/verifier-loop "$BIN_DIR/verifier-loop"
+install -m 755 target/release/verifier-verdict "$BIN_DIR/verifier-verdict"
+
 install_alias() {
   src="$BIN_DIR/$1"
   dst="$BIN_DIR/$2"
