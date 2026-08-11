@@ -65,3 +65,5 @@ target
 scripts/bench/runs/
 .pi-subagents/
 .pi-opa-net/
+.fusion
+.pi

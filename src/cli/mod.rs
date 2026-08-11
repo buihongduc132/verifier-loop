@@ -36,7 +36,7 @@ pub struct VerifierLoopCli {
 #[derive(Debug, Subcommand)]
 pub enum VerifierLoopCmd {
     /// Create a new immutable goal, spawn round 1, evaluate n/m consensus.
-    #[command(name = "NEW")]
+    #[command(name = "NEW", alias = "new")]
     New {
         /// The goal text (immutable once written to goal.json). Optional when
         /// `--init-prompt-file` is supplied; exactly one of the two must be given.
@@ -51,7 +51,7 @@ pub enum VerifierLoopCmd {
         init_prompt_file: Option<String>,
     },
     /// Resume a goal: increment the round, append fix notes, respawn verifiers.
-    #[command(name = "RESUME")]
+    #[command(name = "RESUME", alias = "resume")]
     Resume {
         /// The goalId (UUID) to resume.
         goal_id: String,
@@ -68,14 +68,14 @@ pub enum VerifierLoopCmd {
     /// Cross-process round recovery (SHAPE-1): wait for already-emitted verdicts from the
     /// current round and re-evaluate consensus. Does NOT spawn, kill, re-render, or
     /// re-capture. Use after jewilo was killed/interrupted mid-round (add-round-recovery).
-    #[command(name = "RECOVER")]
+    #[command(name = "RECOVER", alias = "recover")]
     Recover {
         /// The goalId (UUID) to recover.
         goal_id: String,
     },
     /// Read-only machine-readable goal state: round, state, needs, and per-slot verdicts
     /// (add-round-recovery LD7). Does not take the goal lock; never blocks.
-    #[command(name = "STATUS")]
+    #[command(name = "STATUS", alias = "status")]
     Status {
         /// The goalId (UUID) to inspect.
         goal_id: String,
@@ -83,7 +83,7 @@ pub enum VerifierLoopCmd {
     /// Read-only aggregate of ALL stored JSON for a goal run: goal record, creation-time
     /// config snapshot, per-round verdicts, completion, health, and durations. Does not
     /// take the goal lock; never blocks or spawns verifiers (intention 2026-07-14).
-    #[command(name = "STATS")]
+    #[command(name = "STATS", alias = "stats")]
     Stats {
         /// The goalId (UUID) to inspect.
         goal_id: String,
@@ -92,7 +92,7 @@ pub enum VerifierLoopCmd {
     /// creation-time config requirement (n/m verdict match + hash recompute). Prints a
     /// JSON report and exits 0 if valid, non-zero otherwise. Does not take the goal lock
     /// or spawn verifiers (intention 2026-07-14).
-    #[command(name = "AUDIT")]
+    #[command(name = "AUDIT", alias = "audit")]
     Audit {
         /// The goalId (UUID) to audit.
         goal_id: String,
