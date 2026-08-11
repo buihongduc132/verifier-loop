@@ -164,6 +164,11 @@ pub fn adapter_for(backend: &str) -> Result<Adapter, AcpError> {
             resume: "pi --session {sid} --mode json".to_string(),
             ..Default::default()
         }),
+        "pi-rag" => Ok(Adapter {
+            spawn: "pi --model bhd-litellm/role-smart --mode json".to_string(),
+            resume: "pi --session {sid} --model bhd-litellm/role-smart --mode json".to_string(),
+            ..Default::default()
+        }),
         "hermes" => Ok(Adapter {
             spawn: "hermes --mode json".to_string(),
             resume: "hermes --session {sid} --mode json".to_string(),
@@ -175,7 +180,7 @@ pub fn adapter_for(backend: &str) -> Result<Adapter, AcpError> {
             ..Default::default()
         }),
         other => Err(AcpError::BadEventShape(format!(
-            "unknown backend '{other}' (expected one of: pi, hermes, acpx, or custom)"
+            "unknown backend '{other}' (expected one of: pi, pi-rag, hermes, acpx, or custom)"
         ))),
     }
 }
