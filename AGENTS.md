@@ -43,7 +43,7 @@ completion hash on n/m verifier consensus. See [`README.md`](README.md).
 
 Both binaries (`jewilo`, `jewije`) support a global `--json` flag emitting one stable
 camelCase envelope object on stdout (machine-readable contract; default output unchanged) —
-see `## JSON output mode (--json)` in [`README.md`](README.md) and
+see `## JSON output mode (\`--json\`) envelope schema` below and
 [`flow/usecases/programmatic-json-output.md`](flow/usecases/programmatic-json-output.md).
 ## Observability / tracing (add-otel-observability)
 
@@ -139,6 +139,95 @@ This keeps a known-good `jewilo` on PATH at all times; `jewilo-dev` is the canar
 - `goalText` edit → signature mismatch → hash mismatch.
 - Verdict edit → hash mismatch.
 
+## `config.json` reference (full schema)
+
+`~/.verifier-loop/config.json` — on-disk keys camelCase, all fields optional, schema CLOSED
+(`deny_unknown_fields` — unknown key = hard parse error, never silently dropped).
+
+| key                  | type    | default     | meaning                                                                     |
+|----------------------|---------|-------------|-----------------------------------------------------------------------------|
+| `n`                  | u32     | `2`         | consensus threshold — minimum APPROVE verdicts required to pass (n of m).   |
+| `m`                  | u32     | `2`         | number of verifiers spawned per round.                                      |
+| `maxTurn`            | u32     | `3`         | per-verifier turn budget; once exhausted the session is spawned fresh (D8). |
+| `backend`            | string  | `"pi"`      | ACP backend key: `pi` \| `hermes` \| `acpx` \| a custom/stub key. Legacy alias for `dumpAdapter` when `dumpAdapter` unset (LD19). Defaults to `""` when absent so LD19 ambiguity check can distinguish user-set from defaulted. |
+| `gitDiffMaxChars`    | u64     | `10000`     | cap on the frozen `git diff` snapshot handed to each verifier (chars).      |
+| `verifierTimeoutSec` | u64     | `1800`      | per-verifier wall-clock timeout in seconds (D9); a timeout leaves a null verdict. |
+| `verifierPromptFile` | string? | `null`      | optional override file whose **raw** contents are prepended to the baked-in verifier prompt for every NEW + RESUME round. Relative paths resolve against the store root (`VERIFIER_LOOP_HOME`); absolute paths used as-is. Missing/unreadable → fail-closed error. No `{{var}}` expansion. |
+| `minGoalChars`       | u64     | `0`         | minimum trimmed `goalText` char length. `0` disables. Empty/whitespace-only `goalText` is ALWAYS an error regardless. |
+| `fileEditTimesMaxChars` | u64 | `8000`      | byte cap on the `fileEditTimes` block (scoped to changed files). Prompt-bloat fix D1. |
+| `contextMaxChars`    | u64     | `20000`     | char cap on the `--context` input. Over-cap truncated with indicator. D3. |
+| `promptBudgetBytes`  | u64     | `50000`     | rendered-prompt byte budget; over-budget emits a per-section stderr warning (does NOT block spawn). D4. |
+
+### Dynamic-pipeline extension (D1, LD19/LD23/LD28/LD30)
+
+Setting `dumpAdapter` OR `smartAdapter` activates the DD/DS pipeline (output format
+`<D>+<S>/<m>`, e.g. `2+1/3`). Fields:
+
+| key               | type      | default | meaning |
+|-------------------|-----------|---------|---------|
+| `dumpAdapter`     | string?   | `null`  | adapter for the Dump (D) role. `None` → fall back to `backend` (LD19 #3). |
+| `smartAdapter`    | string?   | `null`  | adapter for the Smart (S) role. `None` → fall back to `backend`. |
+| `confirmCount`    | u32       | `1`     | Smart-verifier count for Confirm/Final phases (LD19). |
+| `escaThreshold`   | u32       | `2`     | consecutive Gate-pass/Confirm-reject count to flip to PL-E (LD4). `0` disables escalation (LD21). |
+| `escaMaxRetries`  | u32       | `3`     | PL-E cycle cap before hard-fail (LD21). |
+
+**LD19 precedence:** `dumpAdapter`/`smartAdapter` win over legacy `backend`; setting BOTH
+`backend` AND `dumpAdapter` is a hard error (ambiguous). All fields snapshotted at NEW time
+via `Config::snapshot` (LD23) → live `config.json` edits do NOT affect in-flight goals.
+
+### Validation (LD28, fail-closed at parse time)
+
+- `1 ≤ n ≤ m`  — reject `n=0` (vacuous-pass Gate) and `n>m` (impossible).
+- `m ≥ 1`, `confirmCount ≥ 1`.
+- NOT both `backend` AND `dumpAdapter` set.
+- Unknown key → hard error (schema closed).
+- Malformed → hard error; never silently defaulted.
+
+### `cwd` is runtime-derived (NOT configurable)
+
+The frozen artifact snapshot's `cwd` is ALWAYS `std::env::current_dir()` at invoke time.
+No `cwd` config key. Point jewilo at a worktree: `cd /path && jewilo NEW "<goal>"`.
+
+## Completion-hash formula
+
+```
+short       = mmddyy + "-" + first8hex(SHA256(inputs))   # displayed, printed
+fullDigest  = SHA256(inputs)                              # 64 hex, stored in completion.json
+
+inputs      = salt
+            + goalId
+            + goalSignature
+            + String(round)
+            + canonicalJSON(matchingVerdicts sorted by verifierId)
+            + matchedAtISO
+
+where  goalSignature = SHA256(salt + goalText + createdAt)
+      mmddyy         = UTC date of matchedAt (MMDDYY, e.g. 070326 for 2026-07-03)
+```
+
+- `salt` — per-store random secret; never printed.
+- `matchingVerdicts` — matching APPROVE verdicts as **canonical JSON**: objects sorted by
+  `verifierId` ascending, keys alphabetical, no whitespace.
+- Short hash (`mmddyy-XXXXXXXX`) = human/agent-facing ID. Full digest (`fullDigest`, 64 hex)
+  = exact deterministic tamper guard. Audit compares `fullDigest`; short hash is a scannable label.
+- Any edit to `goalText` (breaks `goalSignature`) or to a stored verdict changes BOTH hashes.
+
+## JSON output mode (`--json`) envelope schema
+
+Both binaries accept global `--json` (short `-j`). Exactly one JSON object on stdout; legacy
+free-text lines suppressed on stdout. `--json` is purely an output-shape layer: exit codes,
+hash inputs, verdict semantics, signatures, on-disk artifacts are byte-identical with/without it.
+
+Full schema + per-command `status` values + examples:
+[`flow/usecases/programmatic-json-output.md`](flow/usecases/programmatic-json-output.md).
+Key fields: `ok`, `command`, `goalId`, `round`, `verifierId`, `status`, `hash`, `fullDigest`,
+`needs`, `rejection`, `verdicts`, `state`, `error`. `rejection` carries `rejectNotes` /
+`nullVerifiers` / `signatureFailures` arrays (each sorted by `verifierId` for deterministic
+consumer equality).
+
+stdout = single structured parse point. All human-readable diagnostics (cooldown notices,
+recoverable-round hints, V* stderr previews, prompt-budget warnings) stay on stderr.
+
 ## Security / threat model
 
 The `add-verifier-tamper-hardening` change adds per-verifier Ed25519 signing keys
@@ -156,11 +245,7 @@ The `jewilo`/`jewije` CLIs do NOT produce `.jewilo-*` files in CWD — they writ
 
 ## Branch consolidation (2026-07-09)
 
-- 4 of 5 remote branches are DEAD (squash-merged via PRs #2, #3, #5, #6). Only `consolidate/all-work` has unique work. Audit + merge plan: [`flow/findings/2026-07-09_dead-branch-audit.md`](flow/findings/2026-07-09_dead-branch-audit.md), [`flow/plans/2026-07-09_consolidate-branches-merge-plan.md`](flow/plans/2026-07-09_consolidate-branches-merge-plan.md).
-
-## Branch consolidation (2026-07-09)
-
-5 remote branches assessed: 4 DEAD (squash-merged to main via PRs #2/#3/#5 + absorbed into consolidate), 1 LIVE (`consolidate/all-work`, ~85-90%, clean merge to main, blocked by dirty WT). Analysis + merge plan + dead-branch doc: [`flow/findings/2026-07-09_branch-consolidation-analysis.md`](flow/findings/2026-07-09_branch-consolidation-analysis.md).
+- 4 of 5 remote branches are DEAD (squash-merged via PRs #2, #3, #5, #6). Only `consolidate/all-work` has unique work. Audit + merge plan: [`flow/findings/2026-07-09_dead-branch-audit.md`](flow/findings/2026-07-09_dead-branch-audit.md), [`flow/plans/2026-07-09_consolidate-branches-merge-plan.md`](flow/plans/2026-07-09_consolidate-branches-merge-plan.md). Fuller analysis: [`flow/findings/2026-07-09_branch-consolidation-analysis.md`](flow/findings/2026-07-09_branch-consolidation-analysis.md).
 
 ## Out of scope (do NOT implement)
 
