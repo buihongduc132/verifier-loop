@@ -164,9 +164,19 @@ pub fn adapter_for(backend: &str) -> Result<Adapter, AcpError> {
             resume: "pi --session {sid} --mode json".to_string(),
             ..Default::default()
         }),
-        "pi-rag" => Ok(Adapter {
-            spawn: "pi --model bhd-litellm/role-smart --mode json".to_string(),
-            resume: "pi --session {sid} --model bhd-litellm/role-smart --mode json".to_string(),
+        "pi-rag-quick" => Ok(Adapter {
+            spawn: "pi --model bhd-litellm/rag-quick --mode json".to_string(),
+            resume: "pi --session {sid} --model bhd-litellm/rag-quick --mode json".to_string(),
+            ..Default::default()
+        }),
+        "pi-rag-quick-retry" => Ok(Adapter {
+            spawn: "pi-rag-quick-retry --mode json".to_string(),
+            resume: "pi-rag-quick-retry --session {sid} --mode json".to_string(),
+            ..Default::default()
+        }),
+        "hermes-verifier" => Ok(Adapter {
+            spawn: "hermes-verifier --mode json".to_string(),
+            resume: "hermes-verifier --session {sid} --mode json".to_string(),
             ..Default::default()
         }),
         "hermes" => Ok(Adapter {

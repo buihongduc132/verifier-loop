@@ -192,29 +192,18 @@ pub fn status(
     let mut any_null = false;
     let mut raw_approve_count: u32 = 0;
     if slots_populated {
-        for i in 0..config.m as usize {
-            let vid = verifier_id(i);
-            let rec = verdict::read_verdict(root, goal_id, &vid, round, None).unwrap_or(VerdictRecord {
-                status: VerdictStatus::Null,
-                notes: None,
-                registered_at: None,
-                signature: None,
-                pubkey_id: None,
-            });
+        // Use the same scan logic as read_round_verdicts: discover real on-disk slot dirs
+        // rather than assuming legacy v{i} ids.
+        let (verdicts, _) = read_round_verdicts(root, goal_id, round, config);
+        for (vid, rec) in verdicts {
             if rec.status == VerdictStatus::Null {
                 any_null = true;
-                slots.push(SlotStatus {
-                    id: vid,
-                    verdict: VerdictStatus::Null,
-                });
+                slots.push(SlotStatus { id: vid, verdict: VerdictStatus::Null });
             } else {
                 if rec.status == VerdictStatus::Approve {
                     raw_approve_count = raw_approve_count.saturating_add(1);
                 }
-                slots.push(SlotStatus {
-                    id: vid,
-                    verdict: rec.status,
-                });
+                slots.push(SlotStatus { id: vid, verdict: rec.status });
             }
         }
     }
@@ -254,15 +243,33 @@ pub fn status(
     })
 }
 
-/// True iff `round_dir` contains any `vN` verifier subdirectory.
+/// True iff `round_dir` contains any verifier subdirectory — either legacy `vN` dirs
+/// (round_dir/v1/) or dynamic-pipeline phase dirs (round_dir/1a/, 1b/, …).
 fn any_verifier_dir(round_dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(round_dir) else {
         return false;
     };
     for entry in entries.flatten() {
-        if let Some(name) = entry.file_name().to_str() {
-            if name.starts_with('v') && name[1..].chars().all(|c| c.is_ascii_digit()) {
-                return true;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        // Legacy: vN verifier dirs directly under round_dir.
+        if name.starts_with('v') && name[1..].chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        // Dynamic pipeline: phase subdirs ("1a", "1b", "2a", etc.) that themselves
+        // contain verifier dirs (d1, s1, …). Check one level deeper.
+        if entry.path().is_dir() {
+            if let Ok(phase_entries) = std::fs::read_dir(entry.path()) {
+                for pe in phase_entries.flatten() {
+                    let pname = pe.file_name();
+                    let Some(pname) = pname.to_str() else { continue };
+                    // Dynamic pipeline verifier ids: d{N}, s{N}.
+                    if (pname.starts_with('d') || pname.starts_with('s'))
+                        && pname[1..].chars().all(|c| c.is_ascii_digit())
+                    {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -360,17 +367,75 @@ pub fn recover_with_poll(
 /// Read every verifier slot's verdict for a round. Returns the `(verdicts, null_slots)`
 /// pair. Missing/unreadable slots are treated as null (fail-closed) and named in
 /// `null_slots`.
+///
+/// Supports BOTH legacy (round_dir/vN/verdict.json) and dynamic-pipeline
+/// (round_dir/phase/roleN/verdict.json) layouts. The scan is path-driven: we walk
+/// the on-disk directory tree so there is no dependency on config.m or a fixed id scheme.
 fn read_round_verdicts(
     root: &Path,
     goal_id: &str,
     round: u32,
     config: &store::Config,
 ) -> (Vec<(String, VerdictRecord)>, Vec<String>) {
-    let mut verdicts = Vec::with_capacity(config.m as usize);
+    let round_dir = goal::goal_dir(root, goal_id)
+        .join(goal::ROUNDS_DIR)
+        .join(round.to_string());
+
+    // --- Discover all verifier slot dirs ---
+    // A slot is a directory that contains a verdict.json (or is expected to contain one).
+    // Layout 1 (legacy): round_dir/v{N}/
+    // Layout 2 (dynamic): round_dir/{phase}/d{N}/ or round_dir/{phase}/s{N}/
+    let mut slot_entries: Vec<(String, Option<String>)> = Vec::new(); // (vid, phase_id)
+
+    if let Ok(top) = std::fs::read_dir(&round_dir) {
+        for entry in top.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+
+            // Legacy vN slot directly under round_dir.
+            if name.starts_with('v') && name[1..].chars().all(|c| c.is_ascii_digit()) {
+                slot_entries.push((name.to_string(), None));
+                continue;
+            }
+
+            // Dynamic-pipeline phase dir: scan one level deeper for d/s verifier dirs.
+            if entry.path().is_dir() {
+                let phase_id = name.to_string();
+                if let Ok(phase_entries) = std::fs::read_dir(entry.path()) {
+                    for pe in phase_entries.flatten() {
+                        let pname = pe.file_name();
+                        let Some(pname) = pname.to_str() else { continue };
+                        if (pname.starts_with('d') || pname.starts_with('s'))
+                            && pname[1..].chars().all(|c| c.is_ascii_digit())
+                        {
+                            slot_entries.push((pname.to_string(), Some(phase_id.clone())));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- If no slots discovered on disk, fall back to config.m legacy ids ---
+    // This covers the "round just started" case where jewilo timed out before
+    // spawning any verifier dirs.
+    if slot_entries.is_empty() {
+        for i in 0..config.m as usize {
+            slot_entries.push((verifier_id(i), None));
+        }
+    }
+
+    let mut verdicts = Vec::with_capacity(slot_entries.len());
     let mut null_slots = Vec::new();
-    for i in 0..config.m as usize {
-        let vid = verifier_id(i);
-        let rec = verdict::read_verdict(root, goal_id, &vid, round, None).unwrap_or(VerdictRecord {
+    for (vid, phase_id) in &slot_entries {
+        let rec = verdict::read_verdict(
+            root,
+            goal_id,
+            vid,
+            round,
+            phase_id.as_deref(),
+        )
+        .unwrap_or(VerdictRecord {
             status: VerdictStatus::Null,
             notes: None,
             registered_at: None,
@@ -380,7 +445,7 @@ fn read_round_verdicts(
         if rec.status == VerdictStatus::Null {
             null_slots.push(vid.clone());
         }
-        verdicts.push((vid, rec));
+        verdicts.push((vid.clone(), rec));
     }
     (verdicts, null_slots)
 }
