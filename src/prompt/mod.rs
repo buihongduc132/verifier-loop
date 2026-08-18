@@ -368,6 +368,10 @@ fn git_capture(cwd: &Path, args: &[&str]) -> Result<String, PromptError> {
     cmd.arg("-C").arg(cwd);
     cmd.args(args);
     cmd.env("GIT_PAGER", "cat");
+    // Disable hooks in test environments to avoid interference from global hook policies
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null");
     let out = cmd
         .output()
         .map_err(|e| PromptError::SnapshotCapture(format!("git {:?} failed: {e}", args)))?;

@@ -36,6 +36,10 @@ fn run(cwd: &Path, prog: &str, args: &[&str]) -> String {
     let out = std::process::Command::new(prog)
         .args(args)
         .current_dir(cwd)
+        // Isolate from the developer's global/system git config (e.g. core.hooksPath
+        // pointing at hooks that reject these throwaway commits).
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .unwrap_or_else(|e| panic!("running {prog}: {e}"));
     String::from_utf8_lossy(&out.stdout).into_owned()
